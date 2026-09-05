@@ -52,6 +52,72 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, string> = {
 
 export type LayoutMode = 'desktop' | 'mobile';
 
+/** 編集画面に置けるパネル。 */
+export type PanelId = 'media' | 'inspector' | 'timeline';
+/** パネルを置ける場所。 */
+export type PanelSlot = 'left' | 'right' | 'bottom';
+
+export const PANEL_IDS: PanelId[] = ['media', 'inspector', 'timeline'];
+export const PANEL_SLOTS: PanelSlot[] = ['left', 'right', 'bottom'];
+
+export const PANEL_LABELS: Record<PanelId, string> = {
+  media: '素材',
+  inspector: 'インスペクタ',
+  timeline: 'タイムライン',
+};
+
+export interface PanelLayout {
+  slots: Record<PanelSlot, PanelId[]>;
+  /** 左右のレールの幅と、下段の高さ（px）。 */
+  leftWidth: number;
+  rightWidth: number;
+  dockHeight: number;
+}
+
+export const DEFAULT_PANELS: PanelLayout = {
+  slots: { left: ['media'], right: ['inspector'], bottom: ['timeline'] },
+  leftWidth: 290,
+  rightWidth: 330,
+  dockHeight: 300,
+};
+
+export const PANEL_LIMITS = {
+  railMin: 200,
+  railMax: 560,
+  dockMin: 120,
+  dockMax: 720,
+};
+
+const clampSize = (value: number, min: number, max: number) =>
+  Math.round(Math.max(min, Math.min(max, Number.isFinite(value) ? value : min)));
+
+/**
+ * 保存されたレイアウトを、必ず「すべてのパネルがちょうど 1 回ずつ出てくる」形に直す。
+ * パネルが増えたり名前が変わったりしても、古い設定のせいで画面が欠けないようにするため。
+ */
+export function sanitizePanels(layout: Partial<PanelLayout> | undefined): PanelLayout {
+  const slots: Record<PanelSlot, PanelId[]> = { left: [], right: [], bottom: [] };
+  const placed = new Set<PanelId>();
+  for (const slot of PANEL_SLOTS) {
+    for (const id of layout?.slots?.[slot] ?? []) {
+      if (!PANEL_IDS.includes(id) || placed.has(id)) continue;
+      placed.add(id);
+      slots[slot].push(id);
+    }
+  }
+  for (const id of PANEL_IDS) {
+    if (placed.has(id)) continue;
+    const home = PANEL_SLOTS.find((slot) => DEFAULT_PANELS.slots[slot].includes(id)) ?? 'left';
+    slots[home].push(id);
+  }
+  return {
+    slots,
+    leftWidth: clampSize(layout?.leftWidth ?? DEFAULT_PANELS.leftWidth, PANEL_LIMITS.railMin, PANEL_LIMITS.railMax),
+    rightWidth: clampSize(layout?.rightWidth ?? DEFAULT_PANELS.rightWidth, PANEL_LIMITS.railMin, PANEL_LIMITS.railMax),
+    dockHeight: clampSize(layout?.dockHeight ?? DEFAULT_PANELS.dockHeight, PANEL_LIMITS.dockMin, PANEL_LIMITS.dockMax),
+  };
+}
+
 /** プレビューを描く解像度（長辺の px）。書き出しの画質には影響しない。 */
 export type PreviewQuality = 480 | 720 | 1080;
 
@@ -64,6 +130,8 @@ export interface Settings {
   exportFormat: 'auto' | 'mp4' | 'webm';
   snap: boolean;
   shortcuts: Record<ShortcutAction, string>;
+  /** 編集画面のパネル配置。 */
+  panels: PanelLayout;
 }
 
 /** 初回だけ画面幅で当たりをつける。以後はユーザーが選んだものを記憶する。 */
@@ -80,6 +148,7 @@ export const DEFAULT_SETTINGS: Settings = {
   exportFormat: 'auto',
   snap: true,
   shortcuts: { ...DEFAULT_SHORTCUTS },
+  panels: DEFAULT_PANELS,
 };
 
 export interface TextTemplate {
@@ -128,6 +197,9 @@ interface AppApi {
   settings: Settings;
   updateSettings: (patch: Partial<Settings>) => void;
   resetShortcuts: () => void;
+  /** 編集画面のパネル配置を更新する（保存まで面倒をみる）。 */
+  updatePanels: (patch: Partial<PanelLayout>) => void;
+  resetPanels: () => void;
   templates: Template[];
   addTemplate: (template: Omit<TextTemplate, 'id' | 'createdAt'> | Omit<LayoutTemplate, 'id' | 'createdAt'>) => Template;
   removeTemplate: (id: string) => void;
@@ -137,9 +209,10 @@ interface AppApi {
 const AppContext = createContext<AppApi | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [settings, setSettings] = useState<Settings>(() =>
-    load(SETTINGS_KEY, { ...DEFAULT_SETTINGS, layout: guessLayout() }),
-  );
+  const [settings, setSettings] = useState<Settings>(() => {
+    const loaded = load(SETTINGS_KEY, { ...DEFAULT_SETTINGS, layout: guessLayout() });
+    return { ...loaded, panels: sanitizePanels(loaded.panels) };
+  });
   const [templates, setTemplates] = useState<Template[]>(() => {
     try {
       const raw = localStorage.getItem(TEMPLATES_KEY);
@@ -168,6 +241,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setSettings((prev) => ({ ...prev, shortcuts: { ...DEFAULT_SHORTCUTS } }));
   }, []);
 
+  const updatePanels = useCallback((patch: Partial<PanelLayout>) => {
+    setSettings((prev) => ({ ...prev, panels: sanitizePanels({ ...prev.panels, ...patch }) }));
+  }, []);
+
+  const resetPanels = useCallback(() => {
+    setSettings((prev) => ({ ...prev, panels: sanitizePanels(DEFAULT_PANELS) }));
+  }, []);
+
   const addTemplate = useCallback<AppApi['addTemplate']>((template) => {
     const created = { ...template, id: uid('tpl'), createdAt: Date.now() } as Template;
     setTemplates((prev) => [created, ...prev]);
@@ -183,8 +264,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<AppApi>(
-    () => ({ settings, updateSettings, resetShortcuts, templates, addTemplate, removeTemplate, renameTemplate }),
-    [settings, updateSettings, resetShortcuts, templates, addTemplate, removeTemplate, renameTemplate],
+    () => ({
+      settings,
+      updateSettings,
+      resetShortcuts,
+      updatePanels,
+      resetPanels,
+      templates,
+      addTemplate,
+      removeTemplate,
+      renameTemplate,
+    }),
+    [settings, updateSettings, resetShortcuts, updatePanels, resetPanels, templates, addTemplate, removeTemplate, renameTemplate],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

@@ -160,16 +160,20 @@ export interface Project {
   sequence: Sequence;
 }
 
+/**
+ * クロップの初期値は「全体を切り抜いて元の場所に置く」＝見た目そのまま。
+ * 実際に入れるときは renderer の defaultCrop() が画角に合わせて置き直す。
+ */
 export const DEFAULT_CROP: Crop = {
   enabled: false,
-  sx: 0.25,
-  sy: 0.25,
-  sw: 0.5,
-  sh: 0.5,
-  dx: 0.05,
-  dy: 0.6,
-  dw: 0.4,
-  dh: 0.3,
+  sx: 0,
+  sy: 0,
+  sw: 1,
+  sh: 1,
+  dx: 0,
+  dy: 0,
+  dw: 1,
+  dh: 1,
 };
 
 export const DEFAULT_BG_BLUR: BgBlur = { enabled: false, strength: 0.05, zoom: 1.15 };

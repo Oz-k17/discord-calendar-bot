@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { useDockGrip } from './editor/PanelDock';
 
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
@@ -79,9 +80,15 @@ export function ColorInput({ value, onChange }: { value: string; onChange: (valu
 }
 
 export function Panel({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
+  // 編集画面に置かれているときだけ、見出しを掴んでパネルごと動かせる。
+  const grip = useDockGrip();
   return (
-    <section className="panel">
-      <header className="panel-head">
+    <section className={`panel${grip?.dragging ? ' dragging' : ''}`}>
+      <header
+        className={`panel-head${grip ? ' grabbable' : ''}`}
+        onPointerDown={grip?.onPointerDown}
+        title={grip ? 'ドラッグで配置を変更' : undefined}
+      >
         <h2>{title}</h2>
         {action}
       </header>

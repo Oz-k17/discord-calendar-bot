@@ -14,7 +14,7 @@ import {
 } from '../../engine/exporter';
 import { formatBytes } from '../../engine/media';
 import { player } from '../../engine/player';
-import { sequenceDuration } from '../../model/ops';
+import { FPS_OPTIONS, sequenceDuration } from '../../model/ops';
 import { ASPECT_PRESETS, type AspectKey } from '../../model/types';
 import { useApp } from '../../store/app';
 import { useEditor } from '../../store/editor';
@@ -88,6 +88,7 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
   // カメラロールは WebM を受け付けないので、iOS アプリ版では MP4 を既定にする。
   const [format, setFormat] = useState(isNativeHost() ? 'mp4' : settings.exportFormat);
   const [bitrate, setBitrate] = useState(8);
+  const [fps, setFps] = useState(sequence.fps || 30);
   const [progress, setProgress] = useState<number | null>(null);
   const [result, setResult] = useState<ExportResult | null>(null);
   const [saved, setSaved] = useState(false);
@@ -139,7 +140,7 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
         project.name,
         sequence,
         player,
-        { aspect, quality: effectiveQuality, fps: sequence.fps, bitrate: effectiveBitrate, format },
+        { aspect, quality: effectiveQuality, fps, bitrate: effectiveBitrate, format },
         setProgress,
       );
       setResult(output);
@@ -207,12 +208,20 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
           />
         </Field>
 
+        <Field label="フレームレート">
+          <Segmented
+            value={String(fps)}
+            options={FPS_OPTIONS.map((value) => ({ value: String(value), label: `${value}` }))}
+            onChange={(value) => !running && setFps(Number(value))}
+          />
+        </Field>
+
         <Field label="ビットレート" hint={`${bitrate} Mbps`}>
           <input type="range" min={2} max={20} step={1} value={bitrate} disabled={running} onChange={(e) => setBitrate(Number(e.target.value))} />
         </Field>
 
         <p className="muted">
-          {size.width} × {size.height} ・ {sequence.fps}fps ・ {mime?.ext.toUpperCase() ?? '—'} ・ 尺 {duration.toFixed(1)} 秒 ・ 予想サイズ 約{' '}
+          {size.width} × {size.height} ・ {fps}fps ・ {mime?.ext.toUpperCase() ?? '—'} ・ 尺 {duration.toFixed(1)} 秒 ・ 予想サイズ 約{' '}
           {formatBytes(estimatedBytes)}
         </p>
 

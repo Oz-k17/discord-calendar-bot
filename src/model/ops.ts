@@ -100,6 +100,26 @@ export function placeClip(sequence: Sequence, clip: Clip): Sequence {
   return { ...sequence, clips: [...carved.filter((c) => c.id !== clip.id), clip] };
 }
 
+/** シーケンスに設定できるフレームレート。 */
+export const FPS_OPTIONS = [24, 25, 30, 50, 60] as const;
+
+/** 素材のフレームレートを、選べる値のうち一番近いものへ寄せる。 */
+export function nearestFpsOption(fps: number): number {
+  return FPS_OPTIONS.reduce((best, option) => (Math.abs(option - fps) < Math.abs(best - fps) ? option : best), FPS_OPTIONS[0]);
+}
+
+/**
+ * 素材のフレームレートをシーケンスへ取り込む。
+ * まだ映像を 1 つも置いていないときだけ。あとから足した素材で勝手に変わると、
+ * それまでに置いたクリップのコマ位置がずれて驚かせることになる。
+ */
+export function adoptSourceFps(sequence: Sequence, fps: number | undefined): Sequence {
+  if (!fps) return sequence;
+  if (sequence.clips.some((c) => c.kind === 'video')) return sequence;
+  const next = nearestFpsOption(fps);
+  return next === sequence.fps ? sequence : { ...sequence, fps: next };
+}
+
 /** 選択中のクリップをまとめて時間 / トラック方向へ動かす。 */
 export function moveClips(
   sequence: Sequence,

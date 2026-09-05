@@ -4,17 +4,22 @@ import { Brand, SiteNav } from '../components/SiteNav';
 import { Field, Panel, Segmented, Toggle } from '../components/ui';
 import { ASPECT_PRESETS } from '../model/types';
 import {
+  PANEL_LABELS,
+  PANEL_SLOTS,
   SHORTCUT_LABELS,
   type PreviewQuality,
   shortcutFromEvent,
   shortcutLabel,
   useApp,
+  type PanelSlot,
   type ShortcutAction,
 } from '../store/app';
 import type { Lang } from '../i18n';
 
+const SLOT_LABELS: Record<PanelSlot, string> = { left: '左', right: '右', bottom: '下段' };
+
 export default function SettingsPage() {
-  const { settings, updateSettings, resetShortcuts } = useApp();
+  const { settings, updateSettings, resetShortcuts, resetPanels } = useApp();
   const [recording, setRecording] = useState<ShortcutAction | null>(null);
 
   /** キーを 1 つ押して割り当てを覚える。 */
@@ -76,6 +81,26 @@ export default function SettingsPage() {
             重い素材で再生がカクつくときは「軽い」にすると滑らかになります。プレビューの表示だけが粗くなり、
             書き出される動画の画質は変わりません。
           </p>
+        </Panel>
+
+        <Panel title="編集画面のレイアウト">
+          <p className="muted small">
+            素材・インスペクタ・タイムラインは、見出しを掴んで左右のレールや下段へ移せます。
+            境目をドラッグすれば幅と高さも変えられます。
+          </p>
+          <ul className="layout-summary">
+            {PANEL_SLOTS.map((slot) => (
+              <li key={slot}>
+                <span className="muted">{SLOT_LABELS[slot]}</span>
+                <strong>
+                  {settings.panels.slots[slot].map((id) => PANEL_LABELS[id]).join('・') || 'なし'}
+                </strong>
+              </li>
+            ))}
+          </ul>
+          <button type="button" className="wide" onClick={resetPanels}>
+            配置を初期状態に戻す
+          </button>
         </Panel>
 
         <Panel title="書き出しの既定値">

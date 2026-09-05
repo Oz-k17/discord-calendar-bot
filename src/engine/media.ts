@@ -5,6 +5,9 @@
  * Blob は IndexedDB に保存するので、リロードやページ移動をしても素材は残る。
  */
 
+import { BlobSource, Input } from 'mediabunny';
+import { VIDEO_INPUT_FORMATS } from './formats';
+
 export type MediaKind = 'video' | 'image' | 'audio';
 
 export interface MediaAsset {
@@ -16,6 +19,8 @@ export interface MediaAsset {
   duration: number;
   width: number;
   height: number;
+  /** 素材そのもののフレームレート。読み取れなかったら undefined。 */
+  fps?: number;
   thumbnail: string;
   size: number;
   folder: string;
@@ -216,6 +221,35 @@ function snapshot(source: HTMLVideoElement | HTMLImageElement, width: number, he
   }
 }
 
+/** よくあるフレームレートに寄せる（29.97 → 30 など、表示と設定のブレを無くすため）。 */
+const COMMON_RATES = [12, 15, 24, 25, 30, 48, 50, 60, 90, 120, 240];
+export function normalizeFps(rate: number): number | undefined {
+  if (!Number.isFinite(rate) || rate <= 0) return undefined;
+  const near = COMMON_RATES.find((r) => Math.abs(rate - r) / r < 0.03);
+  return near ?? Math.round(rate * 100) / 100;
+}
+
+/**
+ * 素材のフレームレートを、入れ物（コンテナ）を読んで求める。
+ * <video> 側からは取れない値なので mediabunny に任せる。デコードはしないため、
+ * このブラウザで再生できないコーデックでも数えられる。
+ */
+async function probeFrameRate(blob: Blob): Promise<number | undefined> {
+  let input: Input | undefined;
+  try {
+    input = new Input({ source: new BlobSource(blob), formats: VIDEO_INPUT_FORMATS });
+    const track = await input.getPrimaryVideoTrack();
+    if (!track) return undefined;
+    // 全パケットを数えると長尺で時間がかかるので、頭の方だけで平均を取る。
+    const stats = await track.computePacketStats(180);
+    return normalizeFps(stats.averagePacketRate);
+  } catch {
+    return undefined;
+  } finally {
+    input?.dispose();
+  }
+}
+
 interface VideoProbe {
   duration: number;
   width: number;
@@ -392,13 +426,17 @@ class MediaRegistry {
 
     let asset: MediaAsset;
     if (kind === 'video') {
-      const meta = await probeVideo(url);
+      const [meta, fps] = await Promise.all([
+        probeVideo(url),
+        withDeadline<number | undefined>(probeFrameRate(file), () => undefined, 8000),
+      ]);
       asset = {
         ...base,
         url,
         duration: meta.duration,
         width: meta.width,
         height: meta.height,
+        fps,
         thumbnail: meta.thumb,
         warning: meta.warning,
       };

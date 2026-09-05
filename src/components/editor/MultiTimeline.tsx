@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { formatTime, mediaRegistry } from '../../engine/media';
 import { player } from '../../engine/player';
 import {
+  adoptSourceFps,
   clipsOnTrack,
   moveClips,
   placeClip,
@@ -295,7 +296,7 @@ function Lane({
       start = snapTime(start, snapCandidates(sequence, player.time, []), SNAP_PX / pps);
     }
     const clip = clipFromAsset(asset, track.id, start);
-    apply((seq) => placeClip(seq, clip));
+    apply((seq) => placeClip(adoptSourceFps(seq, asset.fps), clip));
   };
 
   return (

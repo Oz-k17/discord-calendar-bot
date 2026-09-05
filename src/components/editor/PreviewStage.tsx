@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { exporter } from '../../engine/exporter';
 import { formatTime } from '../../engine/media';
 import { player } from '../../engine/player';
-import { renderFrame, type Rect } from '../../engine/renderer';
+import { CROP_CORNERS, cropDestForSelection, renderFrame, type CropCorner, type Rect } from '../../engine/renderer';
 import { clipAtTime, clipsOnTrack, splitAt } from '../../model/ops';
-import { clipEnd, type Clip, type Sequence } from '../../model/types';
+import { clipEnd, type Clip, type Crop, type Sequence } from '../../model/types';
 import { useApp } from '../../store/app';
 import { useEditor } from '../../store/editor';
 
@@ -25,13 +25,27 @@ export function usePlayerPlaying(): boolean {
   return useSyncExternalStore(player.subscribeState, player.getPlaying, player.getPlaying);
 }
 
+/** 範囲指定モードの操作。source は元の絵が描かれている矩形（シーケンス座標）。 */
+type CropDrag =
+  | { mode: 'draw'; anchorU: number; anchorV: number }
+  | { mode: 'move'; offsetU: number; offsetV: number; origin: Crop }
+  | { mode: 'resize'; corner: CropCorner; origin: Crop };
+
 type Drag =
   | { kind: 'none' }
   | { kind: 'move'; id: string; startX: number; startY: number; originX: number; originY: number }
-  | { kind: 'crop'; id: string; startX: number; startY: number; originX: number; originY: number };
+  | { kind: 'crop'; id: string; startX: number; startY: number; originX: number; originY: number }
+  | { kind: 'cropSelect'; id: string; source: Rect; drag: CropDrag };
+
+/** 切り抜き範囲の最小の大きさ（元の絵に対する割合）。潰れて掴めなくなるのを防ぐ。 */
+const MIN_CROP = 0.04;
+
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+
+
 
 export function PreviewStage() {
-  const { sequence, selection, setSelection, apply } = useEditor();
+  const { sequence, selection, setSelection, apply, cropTarget, setCropTarget } = useEditor();
   const { settings } = useApp();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const boundsRef = useRef<Map<string, Rect>>(new Map());
@@ -39,8 +53,8 @@ export function PreviewStage() {
   const [guides, setGuides] = useState(true);
 
   // 描画ループから最新値を読むための箱（RAF ごとに購読し直したくない）
-  const latest = useRef({ sequence, selection, guides });
-  latest.current = { sequence, selection, guides };
+  const latest = useRef({ sequence, selection, guides, cropTarget });
+  latest.current = { sequence, selection, guides, cropTarget };
 
   const size = useMemo(
     () => previewSize(sequence, settings.previewQuality),
@@ -62,7 +76,7 @@ export function PreviewStage() {
         ctx = canvas.getContext('2d', { alpha: false });
         ctxOwner = canvas;
       }
-      const { sequence: seq, selection: sel, guides: g } = latest.current;
+      const { sequence: seq, selection: sel, guides: g, cropTarget: crop } = latest.current;
       // 書き出し中はプレビューを描かない。モーダルの裏に隠れて見えないうえ、
       // 描画に処理時間を取られると書き出しそのものが遅く・不安定になる。
       if (exporter.active) {
@@ -71,7 +85,7 @@ export function PreviewStage() {
           renderFrame(exporter.ctx, exporter.sequence, time, sources, { guides: false, selectedIds: [] });
         }
       } else if (ctx) {
-        boundsRef.current = renderFrame(ctx, seq, time, sources, { guides: g, selectedIds: sel });
+        boundsRef.current = renderFrame(ctx, seq, time, sources, { guides: g, selectedIds: sel, cropTarget: crop });
       }
     });
     return () => player.stop();
@@ -93,9 +107,62 @@ export function PreviewStage() {
   const hit = (rect: Rect | undefined, point: { x: number; y: number }) =>
     !!rect && point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h;
 
+  /** 範囲指定モード中の 1 本道。ここでは切り抜き範囲だけを触る。 */
+  const beginCropSelect = (event: React.PointerEvent<HTMLCanvasElement>, point: { x: number; y: number }): boolean => {
+    if (!cropTarget) return false;
+    const clip = sequence.clips.find((c) => c.id === cropTarget);
+    const source = boundsRef.current.get(`cropsrc:${cropTarget}`);
+    if (!clip || !source || source.w <= 0 || source.h <= 0) return false;
+
+    let drag: CropDrag | null = null;
+    for (const corner of CROP_CORNERS) {
+      if (hit(boundsRef.current.get(`crophandle:${cropTarget}:${corner}`), point)) {
+        drag = { mode: 'resize', corner, origin: clip.crop };
+        break;
+      }
+    }
+    // 全体が選ばれている間は「動かす」余地が無いので、内側を押しても引き直しにする。
+    const wholeFrame = clip.crop.sw >= 0.995 && clip.crop.sh >= 0.995;
+    if (!drag && !wholeFrame && hit(boundsRef.current.get(`cropsel:${cropTarget}`), point)) {
+      drag = {
+        mode: 'move',
+        offsetU: (point.x - source.x) / source.w - clip.crop.sx,
+        offsetV: (point.y - source.y) / source.h - clip.crop.sy,
+        origin: clip.crop,
+      };
+    }
+    if (!drag) {
+      // 枠の外を押したら、そこを起点に新しい範囲を引き直す。
+      drag = {
+        mode: 'draw',
+        anchorU: clamp01((point.x - source.x) / source.w),
+        anchorV: clamp01((point.y - source.y) / source.h),
+      };
+    }
+    dragRef.current = { kind: 'cropSelect', id: cropTarget, source, drag };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    // 引き始めた時点で潰れた範囲にしておくと、動かした量がそのまま大きさになる。
+    if (drag.mode === 'draw') {
+      applyCrop(clip.id, (crop) => ({ ...crop, sx: drag.anchorU, sy: drag.anchorV, sw: 0, sh: 0 }), source);
+    }
+    return true;
+  };
+
+  const applyCrop = (id: string, next: (crop: Crop) => Crop, source: Rect) => {
+    apply(
+      (seq) => ({
+        ...seq,
+        clips: seq.clips.map((c) => (c.id === id ? { ...c, crop: cropDestForSelection(seq, c, source, next(c.crop)) } : c)),
+      }),
+      `cropSelect:${id}`,
+    );
+  };
+
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const point = toSequenceCoords(event);
     const time = player.time;
+
+    if (beginCropSelect(event, point)) return;
 
     // 選択中クリップのクロップ枠を最優先で掴む
     for (const id of selection) {
@@ -145,6 +212,52 @@ export function PreviewStage() {
     const drag = dragRef.current;
     if (drag.kind === 'none') return;
     const point = toSequenceCoords(event);
+
+    if (drag.kind === 'cropSelect') {
+      const { source } = drag;
+      const u = clamp01((point.x - source.x) / source.w);
+      const v = clamp01((point.y - source.y) / source.h);
+      applyCrop(
+        drag.id,
+        (crop) => {
+          const d = drag.drag;
+          if (d.mode === 'draw') {
+            return {
+              ...crop,
+              sx: Math.min(d.anchorU, u),
+              sy: Math.min(d.anchorV, v),
+              sw: Math.abs(u - d.anchorU),
+              sh: Math.abs(v - d.anchorV),
+            };
+          }
+          if (d.mode === 'move') {
+            return {
+              ...crop,
+              sx: Math.max(0, Math.min(1 - d.origin.sw, u - d.offsetU)),
+              sy: Math.max(0, Math.min(1 - d.origin.sh, v - d.offsetV)),
+            };
+          }
+          const left = d.origin.sx;
+          const top = d.origin.sy;
+          const right = d.origin.sx + d.origin.sw;
+          const bottom = d.origin.sy + d.origin.sh;
+          const x0 = d.corner === 'nw' || d.corner === 'sw' ? u : left;
+          const x1 = d.corner === 'ne' || d.corner === 'se' ? u : right;
+          const y0 = d.corner === 'nw' || d.corner === 'ne' ? v : top;
+          const y1 = d.corner === 'sw' || d.corner === 'se' ? v : bottom;
+          return {
+            ...crop,
+            sx: Math.min(x0, x1),
+            sy: Math.min(y0, y1),
+            sw: Math.abs(x1 - x0),
+            sh: Math.abs(y1 - y0),
+          };
+        },
+        source,
+      );
+      return;
+    }
+
     const dx = (point.x - drag.startX) / sequence.width;
     const dy = (point.y - drag.startY) / sequence.height;
 
@@ -164,10 +277,65 @@ export function PreviewStage() {
   };
 
   const endDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (dragRef.current.kind !== 'none' && event.currentTarget.hasPointerCapture(event.pointerId)) {
+    const drag = dragRef.current;
+    if (drag.kind !== 'none' && event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    // 指を離した時点で潰れていたら、選び直しやすい大きさへ戻す。
+    if (drag.kind === 'cropSelect') {
+      applyCrop(
+        drag.id,
+        (crop) => ({
+          ...crop,
+          sw: Math.max(MIN_CROP, crop.sw),
+          sh: Math.max(MIN_CROP, crop.sh),
+          sx: Math.min(crop.sx, 1 - Math.max(MIN_CROP, crop.sw)),
+          sy: Math.min(crop.sy, 1 - Math.max(MIN_CROP, crop.sh)),
+        }),
+        drag.source,
+      );
+    }
     dragRef.current = { kind: 'none' };
+  };
+
+  // 範囲指定中は Esc で抜けられるようにする。
+  useEffect(() => {
+    if (!cropTarget) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCropTarget(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [cropTarget, setCropTarget]);
+
+  /** 選んだ範囲を画面いっぱいに引き伸ばす（切り抜いて寄る、いわゆるクロップズーム）。 */
+  const fillFrame = () => {
+    if (!cropTarget) return;
+    apply(
+      (seq) => ({
+        ...seq,
+        clips: seq.clips.map((c) => {
+          if (c.id !== cropTarget) return c;
+          const aspect = (c.crop.sw * (seq.width / seq.height)) / Math.max(c.crop.sh, 1e-6);
+          // 画角を埋めるように、はみ出す側を基準に合わせる。
+          const dw = aspect >= seq.width / seq.height ? (seq.height / seq.width) * aspect : 1;
+          const dh = aspect >= seq.width / seq.height ? 1 : (seq.width / seq.height) / aspect;
+          const scale = c.scale || 1;
+          return {
+            ...c,
+            crop: { ...c.crop, dw: dw / scale, dh: dh / scale, dx: (1 - dw / scale) / 2 - c.x, dy: (1 - dh / scale) / 2 - c.y },
+          };
+        }),
+      }),
+      `cropFill:${cropTarget}`,
+    );
+  };
+
+  const resetCrop = () => {
+    if (!cropTarget) return;
+    const source = boundsRef.current.get(`cropsrc:${cropTarget}`);
+    if (!source) return;
+    applyCrop(cropTarget, (crop) => ({ ...crop, sx: 0, sy: 0, sw: 1, sh: 1 }), source);
   };
 
   const onWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
@@ -183,7 +351,7 @@ export function PreviewStage() {
 
   return (
     <div className="preview">
-      <div className="preview-stage">
+      <div className={`preview-stage${cropTarget ? ' cropping' : ''}`}>
         <canvas
           ref={canvasRef}
           width={size.width}
@@ -196,6 +364,22 @@ export function PreviewStage() {
           onWheel={onWheel}
         />
       </div>
+      {cropTarget && (
+        <div className="crop-hud">
+          <span>切り抜く範囲をなぞってください。角のつまみで大きさ、内側をドラッグで位置を変えられます。</span>
+          <div className="crop-hud-actions">
+            <button type="button" onClick={fillFrame}>
+              画面いっぱいに
+            </button>
+            <button type="button" onClick={resetCrop}>
+              全体に戻す
+            </button>
+            <button type="button" className="primary" onClick={() => setCropTarget(null)}>
+              完了
+            </button>
+          </div>
+        </div>
+      )}
       <Transport guides={guides} onToggleGuides={() => setGuides((g) => !g)} />
     </div>
   );

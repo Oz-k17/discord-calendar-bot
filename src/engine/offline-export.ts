@@ -21,13 +21,9 @@ import {
   CanvasSink,
   CanvasSource,
   Input,
-  MATROSKA,
-  MP4,
   Mp4OutputFormat,
   Output,
-  QTFF,
   Quality,
-  WEBM,
   WebMOutputFormat,
   getFirstEncodableAudioCodec,
   getFirstEncodableVideoCodec,
@@ -36,17 +32,12 @@ import {
   type VideoCodec,
   type WrappedCanvas,
 } from 'mediabunny';
+import { VIDEO_INPUT_FORMATS } from './formats';
 import { mediaRegistry } from './media';
 import { renderFrame, type RenderSources } from './renderer';
 import { previousAdjacent } from '../model/ops';
 import { sourceTimeAt, type Clip, type Sequence } from '../model/types';
 
-/**
- * 読み込める素材の形式。
- * mediabunny の ALL_FORMATS を使うと全形式のデマルチプレクサを抱き込んで
- * 配布物が倍近くになるので、このアプリが実際に扱う映像の入れ物だけに絞る。
- */
-const VIDEO_INPUT_FORMATS = [MP4, QTFF, MATROSKA, WEBM];
 
 const SAMPLE_RATE = 48_000;
 const CHANNELS = 2;

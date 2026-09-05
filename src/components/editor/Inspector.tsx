@@ -1,8 +1,9 @@
-import { useRef, useState, type MutableRefObject, type SyntheticEvent } from 'react';
+import { useMemo, useRef, useState, type MutableRefObject, type SyntheticEvent } from 'react';
 import { EMOJI_FOLDER, formatTime, mediaRegistry } from '../../engine/media';
 import { player } from '../../engine/player';
+import { defaultCrop } from '../../engine/renderer';
 import { FONT_OPTIONS, LOOK_PRESETS, SPEED_PRESETS, TEXT_PRESETS } from '../../presets';
-import { removeClips } from '../../model/ops';
+import { FPS_OPTIONS, nearestFpsOption, removeClips } from '../../model/ops';
 import { uid } from '../../model/factory';
 import {
   ASPECT_PRESETS,
@@ -123,9 +124,11 @@ function SequenceInspector() {
       <div className="two-col">
         <Field label="フレームレート">
           <select value={sequence.fps} onChange={(e) => apply((seq) => ({ ...seq, fps: Number(e.target.value) }))}>
-            <option value={24}>24 fps</option>
-            <option value={30}>30 fps</option>
-            <option value={60}>60 fps</option>
+            {FPS_OPTIONS.map((value) => (
+              <option key={value} value={value}>
+                {value} fps
+              </option>
+            ))}
           </select>
         </Field>
         <Field label="背景色">
@@ -135,12 +138,45 @@ function SequenceInspector() {
       <p className="muted">
         出力サイズ {sequence.width} × {sequence.height}
       </p>
+      <SourceFpsHint />
       <EmptyHint>
         クリップを選ぶと、ここで音量・不透明度・スケール・エフェクトを調整できます。
         <br />
         プレビューはドラッグで移動、ホイールで拡大縮小です。
       </EmptyHint>
     </Panel>
+  );
+}
+
+/**
+ * タイムラインに置いた映像のフレームレートが、シーケンスの設定と食い違っているときだけ出す。
+ * 60fps で撮った素材を 30fps のまま書き出すと、動きの滑らかさが半分になってしまうため。
+ */
+function SourceFpsHint() {
+  const { sequence, apply } = useEditor();
+  const assets = useMediaAssets();
+
+  const sourceFps = useMemo(() => {
+    const rates = new Set<number>();
+    for (const clip of sequence.clips) {
+      if (clip.kind !== 'video' || !clip.mediaId) continue;
+      const fps = assets.find((a) => a.id === clip.mediaId)?.fps;
+      if (fps) rates.add(nearestFpsOption(fps));
+    }
+    return [...rates].sort((a, b) => b - a);
+  }, [sequence.clips, assets]);
+
+  const best = sourceFps[0];
+  if (!best || best === sequence.fps) return null;
+
+  return (
+    <p className="hint-note">
+      素材は {sourceFps.join(' / ')} fps です。いまの設定（{sequence.fps} fps）で書き出すと、
+      そのぶん動きが粗くなります。
+      <button type="button" className="link" onClick={() => apply((seq) => ({ ...seq, fps: best }))}>
+        {best} fps に合わせる
+      </button>
+    </p>
   );
 }
 
@@ -319,15 +355,61 @@ function PropsTab({ clip }: { clip: Clip }) {
           )}
 
           <hr />
-          <Toggle
-            label="クロップ & 配置（一部を切り抜いて置く）"
-            checked={clip.crop.enabled}
-            onChange={(enabled) => patch({ crop: { ...clip.crop, enabled } })}
-          />
-          {clip.crop.enabled && <CropControls clip={clip} />}
+          <CropSection clip={clip} />
 
           <hr />
           <TransitionControls clip={clip} />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * クロップの入口。
+ * 数値をいじって当てるのは当てずっぽうになるので、まずプレビュー上でなぞって選ばせる。
+ * 数値は「そのあと微調整したいとき」のものとして畳んでおく。
+ */
+function CropSection({ clip }: { clip: Clip }) {
+  const { sequence, cropTarget, setCropTarget } = useEditor();
+  const patch = useClipPatch(clip);
+  const [showNumbers, setShowNumbers] = useState(false);
+  const asset = mediaRegistry.get(clip.mediaId);
+  const selecting = cropTarget === clip.id;
+
+  const toggle = (enabled: boolean) => {
+    if (!enabled) {
+      setCropTarget(null);
+      patch({ crop: { ...clip.crop, enabled: false } });
+      return;
+    }
+    // 入れた瞬間は「全体を選んだ状態」＝見た目そのまま。そのまま範囲指定へ入る。
+    const media = { width: asset?.width || sequence.width, height: asset?.height || sequence.height };
+    patch({ crop: defaultCrop(sequence, clip, media) });
+    setCropTarget(clip.id);
+  };
+
+  return (
+    <>
+      <Toggle label="クロップ（一部を切り抜いて使う）" checked={clip.crop.enabled} onChange={toggle} />
+      {clip.crop.enabled && (
+        <>
+          <button
+            type="button"
+            className={selecting ? 'wide primary' : 'wide'}
+            onClick={() => setCropTarget(selecting ? null : clip.id)}
+          >
+            {selecting ? '範囲を指定中（押して終了）' : 'プレビューで範囲を選ぶ'}
+          </button>
+          <p className="muted small">
+            {selecting
+              ? 'プレビューをなぞると、その範囲だけが残ります。角のつまみで大きさ、内側をドラッグで位置を変えられます。'
+              : '切り抜いた絵はプレビュー上でドラッグして動かせます。'}
+          </p>
+          <button type="button" className="wide ghost" onClick={() => setShowNumbers((v) => !v)}>
+            {showNumbers ? '数値で調整を閉じる' : '数値で微調整'}
+          </button>
+          {showNumbers && <CropControls clip={clip} />}
         </>
       )}
     </>

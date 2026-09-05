@@ -3,7 +3,7 @@ import { formatTime, mediaRegistry, SFX_FOLDER, UNSORTED, type MediaAsset } from
 import { renderPreset, SFX_PRESETS } from '../../engine/sfx';
 import { player } from '../../engine/player';
 import { clipFromAsset } from '../../model/factory';
-import { placeClip, tracksOf } from '../../model/ops';
+import { adoptSourceFps, placeClip, tracksOf } from '../../model/ops';
 import { useEditor } from '../../store/editor';
 import { MEDIA_DND_TYPE } from './MultiTimeline';
 import { EmptyHint, Panel } from '../ui';
@@ -81,7 +81,7 @@ export function MediaPanel() {
       candidates.find(
         (track) => !sequence.clips.some((c) => c.trackId === track.id && c.start < start + 0.05 && c.start + c.duration > start + 0.05),
       ) ?? candidates[0];
-    apply((seq) => placeClip(seq, clipFromAsset(asset, free.id, start)));
+    apply((seq) => placeClip(adoptSourceFps(seq, asset.fps), clipFromAsset(asset, free.id, start)));
   };
 
   return (
@@ -149,6 +149,7 @@ export function MediaPanel() {
               <strong>{asset.name}</strong>
               <span>
                 {asset.warning ? '⚠ 読み取れず' : asset.kind === 'image' ? '画像' : formatTime(asset.duration)}
+                {asset.fps ? <em className="asset-fps">{asset.fps}fps</em> : null}
               </span>
             </li>
           ))}

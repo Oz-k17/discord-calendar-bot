@@ -13,6 +13,7 @@ import {
   truncateAtoms,
   type Clip,
   type ContentSegment,
+  type Crop,
   type Effect,
   type Sequence,
   type TextProps,
@@ -37,6 +38,11 @@ export interface RenderOptions {
   guides: boolean;
   /** 選択中のクリップに枠を出す（プレビューのみ）。 */
   selectedIds?: string[];
+  /**
+   * 範囲指定モード中のクリップ id。
+   * このクリップだけは切り抜かずに元の絵をまるごと描き、選んでいる範囲を重ねて見せる。
+   */
+  cropTarget?: string | null;
 }
 
 const supportsLetterSpacing = (() => {
@@ -185,6 +191,8 @@ interface DrawContext {
   sequence: Sequence;
   sources: RenderSources;
   pixelScale: number;
+  /** 範囲指定モード中のクリップ id。 */
+  cropTarget?: string | null;
 }
 
 function drawVisualClip(
@@ -228,7 +236,7 @@ function drawVisualClip(
 
     ctx.filter = effectFilter(clip.effects, dc.pixelScale);
 
-    if (clip.crop.enabled) {
+    if (clip.crop.enabled && dc.cropTarget !== clip.id) {
       const dest = cropDestRect(dc.sequence, clip);
       ctx.drawImage(
         frame,
@@ -242,7 +250,8 @@ function drawVisualClip(
         dest.h,
       );
     } else {
-      const mode = clip.bgBlur.enabled ? 'contain' : clip.fit;
+      // 範囲指定モード中は、どこを切り抜くか見えないと選べないので必ず全体を描く。
+      const mode = dc.cropTarget === clip.id ? clip.fit : clip.bgBlur.enabled ? 'contain' : clip.fit;
       const rect = fitRect(dc.sequence, clip, size, mode);
       ctx.drawImage(frame, rect.x, rect.y, rect.w, rect.h);
     }
@@ -615,9 +624,117 @@ function outline(ctx: CanvasRenderingContext2D, sequence: Sequence, rect: Rect, 
   ctx.restore();
 }
 
+/** 範囲指定モードで、元の絵がまるごと描かれている矩形。 */
+export function cropSourceRect(sequence: Sequence, clip: Clip, media: { width: number; height: number }): Rect {
+  return fitRect(sequence, clip, media, clip.fit);
+}
+
+/** いま選んでいる範囲（0〜1）を、画面上の矩形へ。 */
+export function cropSelectionRect(source: Rect, crop: Clip['crop']): Rect {
+  return {
+    x: source.x + crop.sx * source.w,
+    y: source.y + crop.sy * source.h,
+    w: crop.sw * source.w,
+    h: crop.sh * source.h,
+  };
+}
+
+/**
+ * 切り抜きの位置を、いま画面に映っている場所のまま保つように出力側の矩形を決める。
+ * 「囲んだところ以外が消える」という見た目になるので、範囲を選んだ結果が予測しやすい。
+ */
+export function cropDestForSelection(sequence: Sequence, clip: Clip, source: Rect, crop: Crop): Crop {
+  const { width: W, height: H } = sequence;
+  const scale = clip.scale || 1;
+  const sel = cropSelectionRect(source, crop);
+  const dw = sel.w / (W * scale);
+  const dh = sel.h / (H * scale);
+  return {
+    ...crop,
+    dw,
+    dh,
+    dx: (sel.x + sel.w / 2) / W - clip.x - dw / 2,
+    dy: (sel.y + sel.h / 2) / H - clip.y - dh / 2,
+  };
+}
+
+/**
+ * クロップを入れた直後の値。
+ * 「全体を選んだ状態」から始めれば、入れた瞬間に見た目が変わらず、
+ * そこから範囲をなぞるだけで済む。
+ */
+export function defaultCrop(sequence: Sequence, clip: Clip, media: { width: number; height: number }): Crop {
+  const source = cropSourceRect(sequence, clip, media);
+  return cropDestForSelection(sequence, clip, source, { ...clip.crop, enabled: true, sx: 0, sy: 0, sw: 1, sh: 1 });
+}
+
+/** つまみの当たり判定に使う一辺の長さ（シーケンス座標）。指でも掴める大きさにしてある。 */
+export function cropHandleSize(sequence: Sequence): number {
+  return Math.max(24, sequence.width / 13);
+}
+
+export const CROP_CORNERS = ['nw', 'ne', 'sw', 'se'] as const;
+export type CropCorner = (typeof CROP_CORNERS)[number];
+
+/** つまみの矩形（角に重なるように置く）。 */
+export function cropHandleRect(sequence: Sequence, rect: Rect, corner: CropCorner): Rect {
+  const s = cropHandleSize(sequence);
+  const x = corner === 'nw' || corner === 'sw' ? rect.x : rect.x + rect.w;
+  const y = corner === 'nw' || corner === 'ne' ? rect.y : rect.y + rect.h;
+  return { x: x - s / 2, y: y - s / 2, w: s, h: s };
+}
+
+/** 範囲指定モードの重ね描き。外側を暗くして、選んでいる範囲と角のつまみを出す。 */
+function drawCropOverlay(ctx: CanvasRenderingContext2D, sequence: Sequence, source: Rect, selection: Rect) {
+  const { width: W, height: H } = sequence;
+  ctx.save();
+  ctx.filter = 'none';
+  ctx.globalAlpha = 1;
+
+  // 選択範囲の外だけを暗くする（穴あきの塗り）。
+  ctx.beginPath();
+  ctx.rect(0, 0, W, H);
+  ctx.rect(selection.x, selection.y, selection.w, selection.h);
+  ctx.fillStyle = 'rgba(10, 11, 13, 0.62)';
+  ctx.fill('evenodd');
+
+  // 元の絵が置かれている範囲（＝ここまで選べる）を薄く示す。
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+  ctx.lineWidth = Math.max(1, W / 900);
+  ctx.setLineDash([W / 120, W / 120]);
+  ctx.strokeRect(source.x, source.y, source.w, source.h);
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#e0b184';
+  ctx.lineWidth = Math.max(2, W / 400);
+  ctx.strokeRect(selection.x, selection.y, selection.w, selection.h);
+
+  // 三分割の目安。
+  ctx.strokeStyle = 'rgba(224, 177, 132, 0.35)';
+  ctx.lineWidth = Math.max(1, W / 900);
+  ctx.beginPath();
+  for (let i = 1; i <= 2; i += 1) {
+    ctx.moveTo(selection.x + (selection.w * i) / 3, selection.y);
+    ctx.lineTo(selection.x + (selection.w * i) / 3, selection.y + selection.h);
+    ctx.moveTo(selection.x, selection.y + (selection.h * i) / 3);
+    ctx.lineTo(selection.x + selection.w, selection.y + (selection.h * i) / 3);
+  }
+  ctx.stroke();
+
+  const s = cropHandleSize(sequence) * 0.62;
+  ctx.fillStyle = '#e0b184';
+  for (const corner of CROP_CORNERS) {
+    const x = corner === 'nw' || corner === 'sw' ? selection.x : selection.x + selection.w;
+    const y = corner === 'nw' || corner === 'ne' ? selection.y : selection.y + selection.h;
+    ctx.fillRect(x - s / 2, y - s / 2, s, s);
+  }
+  ctx.restore();
+}
+
 /**
  * 1 フレーム描画する。返り値は当たり判定用の矩形（シーケンス座標）。
  * テキストは clip.id、クロップ枠は `crop:<clip.id>` をキーにしている。
+ * 範囲指定モード中は `cropsrc:<id>` `cropsel:<id>` `crophandle:<id>:<角>` も入る。
  */
 export function renderFrame(
   ctx: CanvasRenderingContext2D,
@@ -633,7 +750,7 @@ export function renderFrame(
   ctx.fillStyle = sequence.background;
   ctx.fillRect(0, 0, sequence.width, sequence.height);
 
-  const dc: DrawContext = { sequence, sources, pixelScale };
+  const dc: DrawContext = { sequence, sources, pixelScale, cropTarget: options.cropTarget };
   const bounds = new Map<string, Rect>();
   const selected = options.selectedIds ?? [];
 
@@ -649,6 +766,24 @@ export function renderFrame(
       if (time < clip.start || time >= clipEnd(clip)) continue;
       drawTextClip(ctx, sequence, clip, time, bounds, sources);
     }
+  }
+
+  // 範囲指定モード中は、その 1 クリップだけに集中させる（他の枠は出さない）。
+  const cropClip = options.cropTarget ? sequence.clips.find((c) => c.id === options.cropTarget) : null;
+  if (cropClip && time >= cropClip.start && time < clipEnd(cropClip)) {
+    const size = sources.sizeFor(cropClip);
+    if (size) {
+      const source = cropSourceRect(sequence, cropClip, size);
+      const selection = cropSelectionRect(source, cropClip.crop);
+      drawCropOverlay(ctx, sequence, source, selection);
+      bounds.set(`cropsrc:${cropClip.id}`, source);
+      bounds.set(`cropsel:${cropClip.id}`, selection);
+      for (const corner of CROP_CORNERS) {
+        bounds.set(`crophandle:${cropClip.id}:${corner}`, cropHandleRect(sequence, selection, corner));
+      }
+    }
+    if (options.guides) drawGuides(ctx, sequence);
+    return bounds;
   }
 
   // 選択中クリップの枠（クロップ中は切り抜きの配置枠を出す）

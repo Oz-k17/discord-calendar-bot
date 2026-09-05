@@ -7,11 +7,134 @@ import { MultiTimeline } from '../components/editor/MultiTimeline';
 import { PreviewStage } from '../components/editor/PreviewStage';
 import { TopBar } from '../components/editor/TopBar';
 import { TransitionPicker } from '../components/editor/TransitionPicker';
+import { DockProvider, DockSlot, DockSplitter, useDockGrip } from '../components/editor/PanelDock';
 import { player } from '../engine/player';
 import { textClip } from '../model/factory';
 import { placeClip, removeClips, splitAt, tracksOf } from '../model/ops';
-import { SHORTCUT_LABELS, shortcutFromEvent, shortcutLabel, useApp, type ShortcutAction } from '../store/app';
+import {
+  SHORTCUT_LABELS,
+  shortcutFromEvent,
+  shortcutLabel,
+  useApp,
+  type PanelId,
+  type ShortcutAction,
+} from '../store/app';
 import { useEditor } from '../store/editor';
+
+/**
+ * 編集画面の本体。パネルは置き場（左 / 右 / 下）の中身として描き、
+ * どこに何があるかは設定側が持っている。
+ */
+function Workspace({
+  pps,
+  setPps,
+  onPickTransition,
+  onAddText,
+}: {
+  pps: number;
+  setPps: (value: number | ((prev: number) => number)) => void;
+  onPickTransition: (clipId: string) => void;
+  onAddText: () => void;
+}) {
+  const { apply, selection } = useEditor();
+  const { settings, updatePanels } = useApp();
+  const { panels } = settings;
+
+  const renderPanel = (id: PanelId) => {
+    if (id === 'media') return <MediaPanel />;
+    if (id === 'inspector') return <Inspector />;
+    return (
+      <TimelinePanel
+        pps={pps}
+        setPps={setPps}
+        onPickTransition={onPickTransition}
+        onAddText={onAddText}
+        onSplit={() => apply((seq) => splitAt(seq, player.time, selection))}
+      />
+    );
+  };
+
+  const hasLeft = panels.slots.left.length > 0;
+  const hasRight = panels.slots.right.length > 0;
+  const hasBottom = panels.slots.bottom.length > 0;
+
+  return (
+    <>
+      <main className="workspace">
+        <DockSlot slot="left" render={renderPanel} style={{ width: panels.leftWidth }} />
+        {hasLeft && (
+          <DockSplitter
+            axis="x"
+            value={panels.leftWidth}
+            onChange={(leftWidth) => updatePanels({ leftWidth })}
+            label="左パネルの幅"
+          />
+        )}
+        <section className="stage">
+          <PreviewStage />
+        </section>
+        {hasRight && (
+          <DockSplitter
+            axis="x"
+            value={panels.rightWidth}
+            sign={-1}
+            onChange={(rightWidth) => updatePanels({ rightWidth })}
+            label="右パネルの幅"
+          />
+        )}
+        <DockSlot slot="right" render={renderPanel} style={{ width: panels.rightWidth }} />
+      </main>
+
+      {hasBottom && (
+        <DockSplitter
+          axis="y"
+          value={panels.dockHeight}
+          sign={-1}
+          onChange={(dockHeight) => updatePanels({ dockHeight })}
+          label="下段の高さ"
+        />
+      )}
+      <DockSlot slot="bottom" render={renderPanel} style={{ height: panels.dockHeight }} />
+    </>
+  );
+}
+
+/** タイムラインだけはパネルの体裁を持っていないので、ここで見出しを付ける。 */
+function TimelinePanel({
+  pps,
+  setPps,
+  onPickTransition,
+  onAddText,
+  onSplit,
+}: {
+  pps: number;
+  setPps: (value: number | ((prev: number) => number)) => void;
+  onPickTransition: (clipId: string) => void;
+  onAddText: () => void;
+  onSplit: () => void;
+}) {
+  const grip = useDockGrip();
+  return (
+    <section className={`panel timeline-panel${grip?.dragging ? ' dragging' : ''}`}>
+      <header
+        className={`panel-head${grip ? ' grabbable' : ''}`}
+        onPointerDown={grip?.onPointerDown}
+        title={grip ? 'ドラッグで配置を変更' : undefined}
+      >
+        <h2>タイムライン</h2>
+        <div className="panel-actions">
+          <button type="button" onClick={onAddText}>
+            ＋ テロップ
+          </button>
+          <button type="button" onClick={onSplit}>
+            ✂ 分割
+          </button>
+        </div>
+      </header>
+      <MultiTimeline pps={pps} setPps={setPps} onPickTransition={onPickTransition} />
+    </section>
+  );
+}
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
@@ -111,31 +234,9 @@ export default function EditorPage() {
       {mobile ? (
         <MobileEditor pps={pps} setPps={setPps} onPickTransition={setTransitionFor} onAddText={addText} />
       ) : (
-        <>
-      <main className="workspace">
-        <aside className="rail left">
-          <MediaPanel />
-        </aside>
-        <section className="stage">
-          <PreviewStage />
-        </section>
-        <aside className="rail right">
-          <Inspector />
-        </aside>
-      </main>
-
-      <footer className="dock">
-        <div className="dock-tools">
-          <button type="button" onClick={addText}>
-            ＋ テロップ
-          </button>
-          <button type="button" onClick={() => apply((seq) => splitAt(seq, player.time, selection))}>
-            ✂ 分割
-          </button>
-        </div>
-        <MultiTimeline pps={pps} setPps={setPps} onPickTransition={setTransitionFor} />
-      </footer>
-        </>
+        <DockProvider>
+          <Workspace pps={pps} setPps={setPps} onPickTransition={setTransitionFor} onAddText={addText} />
+        </DockProvider>
       )}
 
       {showExport && <ExportDialog onClose={() => setShowExport(false)} />}

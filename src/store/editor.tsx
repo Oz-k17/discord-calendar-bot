@@ -114,6 +114,9 @@ interface EditorApi {
   setSelection: (ids: string[]) => void;
   toggleSelection: (id: string, additive: boolean) => void;
   isSelected: (id: string) => boolean;
+  /** プレビュー上で切り抜く範囲を指定しているクリップ（していなければ null）。 */
+  cropTarget: string | null;
+  setCropTarget: (id: string | null) => void;
 }
 
 const EditorContext = createContext<EditorApi | null>(null);
@@ -140,6 +143,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     lastAt: 0,
   }));
   const [selection, setSelectionState] = useState<string[]>([]);
+  const [cropTarget, setCropTarget] = useState<string | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
 
   // ページを移動しても戻ってこられるように、編集内容を控えておく。
@@ -159,7 +163,11 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'apply', fn, key });
   }, []);
 
-  const setSelection = useCallback((ids: string[]) => setSelectionState(ids), []);
+  const setSelection = useCallback((ids: string[]) => {
+    setSelectionState(ids);
+    // 別のクリップを選んだら範囲指定は終わり。編集対象と操作対象がずれると分からなくなる。
+    setCropTarget((current) => (current && ids.includes(current) ? current : null));
+  }, []);
 
   const toggleSelection = useCallback((id: string, additive: boolean) => {
     setSelectionState((prev) => {
@@ -170,9 +178,15 @@ export function EditorProvider({ children }: { children: ReactNode }) {
 
   // 消えたクリップが選択に残らないようにする。
   useEffect(() => {
+    const clips = state.project.sequence.clips;
     setSelectionState((prev) => {
-      const alive = prev.filter((id) => state.project.sequence.clips.some((c) => c.id === id));
+      const alive = prev.filter((id) => clips.some((c) => c.id === id));
       return alive.length === prev.length ? prev : alive;
+    });
+    setCropTarget((current) => {
+      if (!current) return current;
+      const clip = clips.find((c) => c.id === current);
+      return clip?.crop.enabled ? current : null;
     });
   }, [state.project.sequence.clips]);
 
@@ -188,8 +202,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setSelection,
       toggleSelection,
       isSelected: (id: string) => selection.includes(id),
+      cropTarget,
+      setCropTarget,
     }),
-    [state, apply, selection, setSelection, toggleSelection],
+    [state, apply, selection, setSelection, toggleSelection, cropTarget],
   );
 
   return <EditorContext.Provider value={value}>{children}</EditorContext.Provider>;

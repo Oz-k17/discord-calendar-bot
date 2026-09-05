@@ -268,33 +268,12 @@ textarea {
 
 .workspace {
   flex: 1 1 auto;
-  display: grid;
-  grid-template-columns: 290px minmax(0, 1fr) 330px;
-  min-height: 0;
-}
-
-.rail {
-  min-height: 0;
-  overflow-y: auto;
-  padding: 10px;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: var(--bg);
-  border-right: 1px solid var(--line);
-}
-
-/* パネルは縮めずスクロールさせる（縮むと中身がはみ出して重なる）。 */
-.rail > * {
-  flex: 0 0 auto;
-}
-
-.rail.right {
-  border-right: none;
-  border-left: 1px solid var(--line);
+  min-height: 0;
 }
 
 .stage {
+  flex: 1 1 auto;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -302,10 +281,175 @@ textarea {
   background: #101114;
 }
 
-.dock {
+/* ---------- パネルの置き場（ドラッグで移動できる） ---------- */
+
+.dock-slot {
   flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  background: var(--bg);
+}
+
+.dock-slot.slot-left,
+.dock-slot.slot-right {
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.dock-slot.slot-bottom {
+  flex-direction: row;
+  overflow-x: auto;
   border-top: 1px solid var(--line);
   background: var(--bg-raised);
+}
+
+/* レールのパネルは縮めずスクロールさせる（縮むと中身がはみ出して重なる）。 */
+.dock-slot.slot-left > .dock-item,
+.dock-slot.slot-right > .dock-item {
+  flex: 0 0 auto;
+}
+
+.dock-slot.slot-bottom > .dock-item {
+  flex: 1 1 0;
+  min-width: 320px;
+  height: 100%;
+}
+
+.dock-item {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.dock-item.dragging {
+  opacity: 0.4;
+}
+
+/* ドラッグ中だけ、置ける場所と挿入位置を見せる。 */
+.dock-slot.droppable {
+  outline: 1px dashed var(--line);
+  outline-offset: -4px;
+}
+
+.dock-slot.hovered {
+  outline-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dock-marker {
+  position: absolute;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.dock-slot.slot-left .dock-marker,
+.dock-slot.slot-right .dock-marker {
+  left: 0;
+  right: 0;
+  top: -6px;
+  height: 3px;
+}
+
+.dock-slot.slot-bottom .dock-marker {
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  width: 3px;
+}
+
+.dock-slot.slot-bottom > .dock-marker,
+.dock-slot.slot-left > .dock-marker,
+.dock-slot.slot-right > .dock-marker {
+  position: relative;
+  flex: 0 0 3px;
+  inset: auto;
+}
+
+.dock-empty {
+  margin: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.dock-ghost {
+  position: fixed;
+  transform: translate(12px, 12px);
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #14160f;
+  font-size: 11px;
+  font-weight: 700;
+  pointer-events: none;
+  z-index: 120;
+}
+
+.dock-splitter {
+  flex: 0 0 6px;
+  background: var(--line);
+  opacity: 0.5;
+  transition: opacity 0.12s, background 0.12s;
+}
+
+.dock-splitter:hover,
+.dock-splitter:active {
+  opacity: 1;
+  background: var(--accent);
+}
+
+.dock-splitter.axis-x {
+  cursor: col-resize;
+}
+
+.dock-splitter.axis-y {
+  flex: 0 0 6px;
+  cursor: row-resize;
+}
+
+/* 下段に入ったタイムラインは、置き場の高さいっぱいに広がる。 */
+.timeline-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.timeline-panel .tl {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 置き場の高さに収まらないぶんは、レーンの見出しごと縦にスクロールさせる。 */
+.timeline-panel .tl-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.timeline-panel .tl-heads,
+.timeline-panel .tl-scroll {
+  align-self: flex-start;
+}
+
+.timeline-panel .tl-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.panel-head.grabbable {
+  cursor: grab;
+  touch-action: none;
+}
+
+.panel-head.grabbable:active {
+  cursor: grabbing;
+}
+
+.panel.dragging {
+  outline: 1px solid var(--accent);
 }
 
 /* ---------- パネル ---------- */
@@ -513,6 +657,67 @@ hr {
   padding: 4px 8px;
 }
 
+/* 範囲指定モードのときだけ、プレビューの下に出る操作バー。 */
+.crop-hud {
+  width: min(560px, 100%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  border: 1px solid var(--accent-soft);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.crop-hud-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+
+/* 設定ページで、いまのパネル配置をひと目で見せる一覧。 */
+.layout-summary {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.layout-summary li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+/* 設定と素材が食い違っているときなど、押せば直せる案内。 */
+.hint-note {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.asset-fps {
+  margin-left: 6px;
+  font-style: normal;
+  opacity: 0.75;
+}
+
 /* 表示/非表示・ミュートなどの状態アイコン。絵文字だとOS任せで揃わないので線画にしている。 */
 .icon {
   display: inline-block;
@@ -704,6 +909,7 @@ hr {
 }
 
 .preview-stage {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
@@ -726,6 +932,11 @@ hr {
 
 .preview-stage canvas:active {
   cursor: grabbing;
+}
+
+.preview-stage.cropping canvas,
+.preview-stage.cropping canvas:active {
+  cursor: crosshair;
 }
 
 .transport {
@@ -983,17 +1194,6 @@ hr {
 
 /* ---------- タイムライン ---------- */
 
-.dock-tools {
-  display: flex;
-  gap: 6px;
-  padding: 6px 10px 0;
-}
-
-.dock-tools button {
-  font-size: 11px;
-  padding: 4px 9px;
-}
-
 .tl {
   display: flex;
   flex-direction: column;
@@ -1002,9 +1202,15 @@ hr {
 .tl-toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--line);
+}
+
+/* 細いレールに入れても、ボタンの文字が縦に折れないようにする。 */
+.tl-toolbar button {
+  white-space: nowrap;
 }
 
 .tl-toolbar button {
@@ -1467,11 +1673,7 @@ hr {
   z-index: 90;
 }
 
-@media (max-width: 1240px) {
-  .workspace {
-    grid-template-columns: 230px minmax(0, 1fr) 290px;
-  }
-}
+
 
 /* ---------- 表示切り替えボタン ---------- */
 
