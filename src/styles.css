@@ -661,10 +661,8 @@ hr {
 .crop-hud {
   width: min(560px, 100%);
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 8px;
   padding: 8px 10px;
   border-radius: var(--radius);
   background: var(--bg-panel);
@@ -672,6 +670,29 @@ hr {
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-dim);
+}
+
+.crop-hud-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.crop-hud-label {
+  flex: 0 0 auto;
+}
+
+.crop-hud-ratios {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.crop-hud-ratios .chip {
+  padding: 3px 9px;
+  font-size: 11px;
 }
 
 .crop-hud-actions {

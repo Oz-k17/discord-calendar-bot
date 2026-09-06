@@ -117,6 +117,9 @@ interface EditorApi {
   /** プレビュー上で切り抜く範囲を指定しているクリップ（していなければ null）。 */
   cropTarget: string | null;
   setCropTarget: (id: string | null) => void;
+  /** 切り抜く範囲の縦横比の固定（幅 ÷ 高さ）。null なら自由。 */
+  cropRatio: number | null;
+  setCropRatio: (ratio: number | null) => void;
 }
 
 const EditorContext = createContext<EditorApi | null>(null);
@@ -144,6 +147,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   }));
   const [selection, setSelectionState] = useState<string[]>([]);
   const [cropTarget, setCropTarget] = useState<string | null>(null);
+  const [cropRatio, setCropRatio] = useState<number | null>(null);
   const saveTimer = useRef<number | undefined>(undefined);
 
   // ページを移動しても戻ってこられるように、編集内容を控えておく。
@@ -204,8 +208,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       isSelected: (id: string) => selection.includes(id),
       cropTarget,
       setCropTarget,
+      cropRatio,
+      setCropRatio,
     }),
-    [state, apply, selection, setSelection, toggleSelection, cropTarget],
+    [state, apply, selection, setSelection, toggleSelection, cropTarget, cropRatio],
   );
 
   return <EditorContext.Provider value={value}>{children}</EditorContext.Provider>;

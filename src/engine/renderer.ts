@@ -4,6 +4,7 @@
  * 描画は常に「シーケンス座標（例 1080x1920）」で計算し、出力解像度の差は ctx のスケールで吸収する。
  */
 
+import { CROP_CORNERS, CROP_HANDLES, handlePoint, handleRect, handleSize, selectionRect, type CropHandle } from './crop';
 import { clipAtTime, previousAdjacent } from '../model/ops';
 import {
   clipEnd,
@@ -629,32 +630,26 @@ export function cropSourceRect(sequence: Sequence, clip: Clip, media: { width: n
   return fitRect(sequence, clip, media, clip.fit);
 }
 
-/** いま選んでいる範囲（0〜1）を、画面上の矩形へ。 */
-export function cropSelectionRect(source: Rect, crop: Clip['crop']): Rect {
-  return {
-    x: source.x + crop.sx * source.w,
-    y: source.y + crop.sy * source.h,
-    w: crop.sw * source.w,
-    h: crop.sh * source.h,
-  };
-}
-
 /**
  * 切り抜きの位置を、いま画面に映っている場所のまま保つように出力側の矩形を決める。
  * 「囲んだところ以外が消える」という見た目になるので、範囲を選んだ結果が予測しやすい。
  */
 export function cropDestForSelection(sequence: Sequence, clip: Clip, source: Rect, crop: Crop): Crop {
+  return cropDestFromRect(sequence, clip, selectionRect(source, crop), crop);
+}
+
+/** 画面上の矩形を、そこへ切り抜きを置く値（dx/dy/dw/dh）に直す。cropDestRect の逆。 */
+export function cropDestFromRect(sequence: Sequence, clip: Clip, rect: Rect, crop: Crop): Crop {
   const { width: W, height: H } = sequence;
   const scale = clip.scale || 1;
-  const sel = cropSelectionRect(source, crop);
-  const dw = sel.w / (W * scale);
-  const dh = sel.h / (H * scale);
+  const dw = rect.w / (W * scale);
+  const dh = rect.h / (H * scale);
   return {
     ...crop,
     dw,
     dh,
-    dx: (sel.x + sel.w / 2) / W - clip.x - dw / 2,
-    dy: (sel.y + sel.h / 2) / H - clip.y - dh / 2,
+    dx: (rect.x + rect.w / 2) / W - clip.x - dw / 2,
+    dy: (rect.y + rect.h / 2) / H - clip.y - dh / 2,
   };
 }
 
@@ -666,22 +661,6 @@ export function cropDestForSelection(sequence: Sequence, clip: Clip, source: Rec
 export function defaultCrop(sequence: Sequence, clip: Clip, media: { width: number; height: number }): Crop {
   const source = cropSourceRect(sequence, clip, media);
   return cropDestForSelection(sequence, clip, source, { ...clip.crop, enabled: true, sx: 0, sy: 0, sw: 1, sh: 1 });
-}
-
-/** つまみの当たり判定に使う一辺の長さ（シーケンス座標）。指でも掴める大きさにしてある。 */
-export function cropHandleSize(sequence: Sequence): number {
-  return Math.max(24, sequence.width / 13);
-}
-
-export const CROP_CORNERS = ['nw', 'ne', 'sw', 'se'] as const;
-export type CropCorner = (typeof CROP_CORNERS)[number];
-
-/** つまみの矩形（角に重なるように置く）。 */
-export function cropHandleRect(sequence: Sequence, rect: Rect, corner: CropCorner): Rect {
-  const s = cropHandleSize(sequence);
-  const x = corner === 'nw' || corner === 'sw' ? rect.x : rect.x + rect.w;
-  const y = corner === 'nw' || corner === 'ne' ? rect.y : rect.y + rect.h;
-  return { x: x - s / 2, y: y - s / 2, w: s, h: s };
 }
 
 /** 範囲指定モードの重ね描き。外側を暗くして、選んでいる範囲と角のつまみを出す。 */
@@ -721,12 +700,29 @@ function drawCropOverlay(ctx: CanvasRenderingContext2D, sequence: Sequence, sour
   }
   ctx.stroke();
 
-  const s = cropHandleSize(sequence) * 0.62;
-  ctx.fillStyle = '#e0b184';
-  for (const corner of CROP_CORNERS) {
-    const x = corner === 'nw' || corner === 'sw' ? selection.x : selection.x + selection.w;
-    const y = corner === 'nw' || corner === 'ne' ? selection.y : selection.y + selection.h;
-    ctx.fillRect(x - s / 2, y - s / 2, s, s);
+  drawHandles(ctx, sequence, selection, '#e0b184');
+  ctx.restore();
+}
+
+/** 枠のつまみ。角は四角、辺は細長くして「どちらに伸びるか」が分かるようにする。 */
+function drawHandles(
+  ctx: CanvasRenderingContext2D,
+  sequence: Sequence,
+  rect: Rect,
+  color: string,
+  handles: readonly CropHandle[] = CROP_HANDLES,
+) {
+  const s = handleSize(sequence.width) * 0.6;
+  const thin = s * 0.36;
+  ctx.save();
+  ctx.fillStyle = color;
+  for (const handle of handles) {
+    const { x, y } = handlePoint(rect, handle);
+    const corner = (handle.includes('n') || handle.includes('s')) && (handle.includes('e') || handle.includes('w'));
+    // 辺のつまみは、その辺に沿って伸ばす。
+    const w = corner ? s : handle === 'n' || handle === 's' ? s * 1.5 : thin;
+    const h = corner ? s : handle === 'e' || handle === 'w' ? s * 1.5 : thin;
+    ctx.fillRect(x - w / 2, y - h / 2, w, h);
   }
   ctx.restore();
 }
@@ -774,12 +770,12 @@ export function renderFrame(
     const size = sources.sizeFor(cropClip);
     if (size) {
       const source = cropSourceRect(sequence, cropClip, size);
-      const selection = cropSelectionRect(source, cropClip.crop);
+      const selection = selectionRect(source, cropClip.crop);
       drawCropOverlay(ctx, sequence, source, selection);
       bounds.set(`cropsrc:${cropClip.id}`, source);
       bounds.set(`cropsel:${cropClip.id}`, selection);
-      for (const corner of CROP_CORNERS) {
-        bounds.set(`crophandle:${cropClip.id}:${corner}`, cropHandleRect(sequence, selection, corner));
+      for (const handle of CROP_HANDLES) {
+        bounds.set(`crophandle:${cropClip.id}:${handle}`, handleRect(sequence.width, selection, handle));
       }
     }
     if (options.guides) drawGuides(ctx, sequence);
@@ -792,9 +788,14 @@ export function renderFrame(
     if (!clip) continue;
     if (time < clip.start || time >= clipEnd(clip)) continue;
     if (clip.crop.enabled && clip.kind !== 'text') {
+      // 切り抜いた絵を置く枠。ここは動かすだけでなく、つまみで大きさも変えられる。
       const rect = cropDestRect(sequence, clip);
       bounds.set(`crop:${clip.id}`, rect);
       outline(ctx, sequence, rect, '#e0b184');
+      drawHandles(ctx, sequence, rect, 'rgba(224, 177, 132, 0.85)', CROP_CORNERS);
+      for (const handle of CROP_CORNERS) {
+        bounds.set(`crophandle:${clip.id}:${handle}`, handleRect(sequence.width, rect, handle));
+      }
     } else {
       const rect = bounds.get(clip.id);
       if (rect) outline(ctx, sequence, rect, '#cfe0cb');
