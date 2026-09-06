@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ViViD Edit ラボ — 無音カットとオートダッキング</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23b7d0a8'/%3E%3Cpath d='M4 5v6M7 3v10M10 6v4M13 4v8' stroke='%23101114' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header class="head">
+      <h1>無音カット & オートダッキング</h1>
+      <p>
+        ViViD Edit へ入れる前の試作。音声ファイルでも動画ファイルでも構いません（音だけを見ます）。
+        処理はすべてこのページの中で完結し、どこにも送信しません。
+      </p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>1. 無音カット（ジェットカット）</h2>
+        <p class="muted">
+          しゃべっていない時間を自動で見つけて詰めます。ショート動画でいちばん時間を取られる作業です。
+        </p>
+
+        <label class="file">
+          <span>声の入った素材を選ぶ</span>
+          <input type="file" id="voice-file" accept="audio/*,video/*" />
+        </label>
+        <p class="status" id="voice-status">まだ読み込んでいません。</p>
+
+        <div class="canvas-wrap">
+          <canvas id="voice-canvas" data-height="180"></canvas>
+        </div>
+        <p class="legend">
+          <span class="swatch keep"></span>残す　<span class="swatch cut"></span>削る　<span class="swatch line"></span>しきい値
+        </p>
+
+        <div class="controls" id="cut-controls">
+          <label>
+            感度 <output id="out-sensitivity"></output>
+            <input type="range" id="sensitivity" min="0" max="0.8" step="0.01" value="0.25" />
+            <small>小さいほど小さな音も「声」として残します</small>
+          </label>
+          <label>
+            これより短い無音は残す <output id="out-min-silence"></output>
+            <input type="range" id="min-silence" min="0.1" max="1.5" step="0.05" value="0.35" />
+            <small>息継ぎで切られるときは長めに</small>
+          </label>
+          <label>
+            前後の余白 <output id="out-padding"></output>
+            <input type="range" id="padding" min="0" max="0.4" step="0.01" value="0.08" />
+            <small>語頭・語尾が食われるときは長めに</small>
+          </label>
+        </div>
+
+        <dl class="stats" id="cut-stats"></dl>
+
+        <div class="row">
+          <button type="button" id="play-original" disabled>元のまま再生</button>
+          <button type="button" id="play-cut" disabled>カット後を再生</button>
+          <button type="button" id="stop-voice" disabled>停止</button>
+        </div>
+
+        <details>
+          <summary>タイムラインへ置いたときのクリップの並び</summary>
+          <p class="muted">
+            計画（秒の並び）を <code>toClipEdits()</code> に通した結果です。
+            本体では、この並びどおりに分割してリップル削除すれば同じ状態になります。
+          </p>
+          <pre id="edit-list">—</pre>
+        </details>
+      </section>
+
+      <section class="card">
+        <h2>2. オートダッキング</h2>
+        <p class="muted">
+          上で読み込んだ声を見て、BGM の音量を自動で上げ下げします。手で音量を書くより速く、しゃべりが埋もれません。
+        </p>
+
+        <label class="file">
+          <span>BGM を選ぶ</span>
+          <input type="file" id="bgm-file" accept="audio/*,video/*" />
+        </label>
+        <p class="status" id="bgm-status">まだ読み込んでいません。</p>
+
+        <div class="canvas-wrap">
+          <canvas id="bgm-canvas" data-height="160"></canvas>
+        </div>
+        <p class="legend"><span class="swatch line"></span>BGM に当てる音量カーブ</p>
+
+        <div class="controls">
+          <label>
+            下げる量 <output id="out-duck"></output>
+            <input type="range" id="duck-db" min="-30" max="-3" step="1" value="-12" />
+          </label>
+          <label>
+            戻すまでの待ち <output id="out-hold"></output>
+            <input type="range" id="hold" min="0" max="1.5" step="0.05" value="0.3" />
+          </label>
+          <label>
+            戻す速さ <output id="out-release"></output>
+            <input type="range" id="release" min="0.05" max="1.5" step="0.05" value="0.45" />
+          </label>
+        </div>
+
+        <div class="row">
+          <button type="button" id="play-bgm" disabled>BGM だけ再生</button>
+          <button type="button" id="play-mix" disabled>ダッキングありで再生</button>
+          <button type="button" id="play-flat" disabled>ダッキングなしで再生</button>
+          <button type="button" id="stop-mix" disabled>停止</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>3. セルフテスト</h2>
+        <p class="muted">
+          合成した波形で計算そのものを確かめます。素材が無くても、壊れていないことがここで分かります。
+        </p>
+        <button type="button" id="run-tests">テストを実行</button>
+        <ul class="tests" id="test-results"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./src/demo.ts"></script>
+  </body>
+</html>

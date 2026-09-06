@@ -9,7 +9,10 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty false",
-    "bundle": "npm run build && node scripts/sync-bundles.mjs"
+    "bundle": "npm run build && node scripts/sync-bundles.mjs",
+    "lab": "vite lab/auto-cut",
+    "lab:build": "vite build lab/auto-cut",
+    "lab:typecheck": "tsc -p lab/auto-cut --pretty false"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",
