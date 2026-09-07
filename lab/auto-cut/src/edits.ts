@@ -5,7 +5,7 @@
  * 本体の Clip 型には依存させず、必要な 3 つの数字だけを受け取る形にしてある。
  */
 
-import type { Range } from './silence';
+import type { Range } from './silence.ts';
 
 /** 対象クリップの、タイムライン上の位置と素材内の位置。 */
 export interface ClipPlacement {

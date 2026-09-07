@@ -11,7 +11,7 @@
  * タイムラインの実装が変わっても使い回せる。
  */
 
-import { percentileDb, SILENCE_DB, type LoudnessTrack } from './loudness';
+import { percentileDb, SILENCE_DB, type LoudnessTrack } from './loudness.ts';
 
 export interface Range {
   start: number;

@@ -4,12 +4,12 @@
  * 本体へ持っていくときに要るのはそちらだけで、このファイルは捨ててよい。
  */
 
-import { analyzeLoudness, type LoudnessTrack } from './loudness';
-import { buildPeaks, type Peaks } from './peaks';
-import { planJetCut, type JetCutPlan } from './silence';
-import { applyDucking, gainAt, planDucking, type GainPoint } from './ducking';
-import { summarize, toClipEdits } from './edits';
-import { runSelfTest } from './selftest';
+import { analyzeLoudness, type LoudnessTrack } from './loudness.ts';
+import { buildPeaks, type Peaks } from './peaks.ts';
+import { planJetCut, type JetCutPlan } from './silence.ts';
+import { applyDucking, gainAt, planDucking, type GainPoint } from './ducking.ts';
+import { summarize, toClipEdits } from './edits.ts';
+import { runSelfTest } from './selftest.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 

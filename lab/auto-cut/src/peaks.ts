@@ -6,7 +6,7 @@
  * これは「タイムラインのクリップに波形を出す」ときにもそのまま使える。
  */
 
-import type { AudioLike } from './loudness';
+import type { AudioLike } from './loudness.ts';
 
 export interface Peaks {
   min: Float32Array;

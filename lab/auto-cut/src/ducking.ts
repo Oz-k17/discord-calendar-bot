@@ -8,7 +8,7 @@
  * のどちらでも同じ結果になる。
  */
 
-import type { LoudnessTrack } from './loudness';
+import type { LoudnessTrack } from './loudness.ts';
 
 export interface DuckOptions {
   /** 声があるときに BGM を何 dB 下げるか（負の値）。 */

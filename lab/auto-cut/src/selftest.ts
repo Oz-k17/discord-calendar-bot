@@ -3,11 +3,11 @@
  * 素材を用意しなくても壊れていないことが分かるように、画面から実行できるようにしてある。
  */
 
-import { analyzeLoudness, toDb, type AudioLike } from './loudness';
-import { autoThresholdDb, planJetCut } from './silence';
-import { gainAt, planDucking } from './ducking';
-import { toClipEdits } from './edits';
-import { buildPeaks } from './peaks';
+import { analyzeLoudness, toDb, type AudioLike } from './loudness.ts';
+import { autoThresholdDb, planJetCut } from './silence.ts';
+import { gainAt, planDucking } from './ducking.ts';
+import { toClipEdits } from './edits.ts';
+import { buildPeaks } from './peaks.ts';
 
 export interface TestResult {
   name: string;

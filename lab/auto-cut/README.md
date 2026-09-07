@@ -3,7 +3,8 @@
 ViViD Edit に次に必要になりそうな機能として、**音を見て自動で編集する**ひとまとまりを試作しました。
 
 ```
-npm run lab   →  http://localhost:5173/
+npm run lab        →  http://localhost:5173/
+npm run lab:test   →  セルフテスト（ブラウザ不要）
 ```
 
 音声でも動画でも読み込めます（音だけを見ます）。読み込んだ素材はどこにも送信せず、
@@ -40,7 +41,8 @@ npm run lab   →  http://localhost:5173/
 | `src/ducking.ts` | 声の位置から、BGM に当てる音量カーブ（時刻と音量の並び）を出す |
 | `src/peaks.ts` | 波形を描くための山と谷 |
 | `src/edits.ts` | 計画（秒の並び）をタイムラインのクリップの並びに翻訳する |
-| `src/selftest.ts` | 合成波形での検算 |
+| `src/selftest.ts` | 合成波形での検算。画面の「3. セルフテスト」と `npm run lab:test` の両方から呼ばれる |
+| `selftest.mjs` | それをコマンドラインから走らせる入口 |
 | `src/demo.ts` `index.html` `src/style.css` | 見せる・鳴らすだけ。本体へは持っていかない |
 
 ### 無音カットの決め方

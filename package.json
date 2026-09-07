@@ -12,7 +12,8 @@
     "bundle": "npm run build && node scripts/sync-bundles.mjs",
     "lab": "vite lab/auto-cut",
     "lab:build": "vite build lab/auto-cut",
-    "lab:typecheck": "tsc -p lab/auto-cut --pretty false"
+    "lab:typecheck": "tsc -p lab/auto-cut --pretty false",
+    "lab:test": "node lab/auto-cut/selftest.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",
