@@ -216,6 +216,16 @@ input[type='range'] {
   font-variant-numeric: tabular-nums;
 }
 
+.warn {
+  margin: -4px 0 14px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: rgba(138, 91, 91, 0.18);
+  border: 1px solid rgba(138, 91, 91, 0.5);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .row {
   display: flex;
   gap: 8px;

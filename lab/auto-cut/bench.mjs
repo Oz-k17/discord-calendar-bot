@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readWav } from '../fixtures/wav.mjs';
-import { SHORT_FIXTURES, UTTERANCES } from '../fixtures/spec.mjs';
+import { SHORT_FIXTURES, utterancesOf } from '../fixtures/spec.mjs';
 
 const { analyzeLoudness } = await import('./src/loudness.ts');
 const { analyzeFeatures } = await import('./src/features.ts');
@@ -61,7 +61,7 @@ const overlap = (a, b) => Math.max(0, Math.min(a.end, b[1]) - Math.max(a.start, 
  */
 function accuracy(plan, fixture) {
   if (!fixture) return null;
-  const truth = fixture.speech ? UTTERANCES : [];
+  const truth = utterancesOf(fixture);
   const truthTotal = truth.reduce((sum, [a, b]) => sum + (b - a), 0);
   let hit = 0;
   for (const range of plan.keep) for (const u of truth) hit += overlap(range, u);
@@ -99,7 +99,9 @@ for (const file of files) {
 
   const notes = [];
   if (verdict(level)) notes.push(`level: ${verdict(level)}`);
-  if (verdict(speech)) notes.push(`speech: ${verdict(speech)}`);
+  if (speech.noSpeechFound) notes.push('speech: 声が見つからないので何もしなかった');
+  else if (verdict(speech)) notes.push(`speech: ${verdict(speech)}`);
+  notes.push(`声らしいコマの割合 ${(speech.speechRatio * 100).toFixed(0)}%`);
   if (speech.usedMode !== 'speech') notes.push('speech モードに落ちられなかった');
   if (notes.length) console.log(`${' '.repeat(22)} └ ${notes.join(' / ')}`);
 

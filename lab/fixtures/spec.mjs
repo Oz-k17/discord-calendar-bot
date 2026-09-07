@@ -8,6 +8,15 @@
 
 export const SHORT_LENGTH = 13;
 
+/**
+ * まばらな発話（秒）。BGM の上でたまにしゃべるだけ、という素材のため。
+ * 13 秒のうち 2.6 秒しかしゃべらない（20%）。
+ */
+export const SPARSE_UTTERANCES = [
+  [2.0, 3.4],
+  [9.0, 10.2],
+];
+
 /** 発話の並び（秒）。息継ぎ（0.2 秒）と間（0.7〜1.2 秒）を混ぜてある。 */
 export const UTTERANCES = [
   [1.0, 2.2],
@@ -56,10 +65,23 @@ export const SHORT_FIXTURES = [
     hard: true,
     options: { speech: false, beat: 4, noiseLevel: 0.0005, seed: 8 },
   },
+  {
+    name: 'speech-sparse-bgm.wav',
+    note: 'BGM の上でたまにしゃべるだけ（20%）',
+    speech: true,
+    sparse: true,
+    hard: true,
+    options: { bgm: true, bgmLevel: 0.25, sparse: true, seed: 9 },
+  },
 ];
+
+/** その素材の発話の並び。 */
+export function utterancesOf(fixture) {
+  if (!fixture.speech) return [];
+  return fixture.sparse ? SPARSE_UTTERANCES : UTTERANCES;
+}
 
 /** 時刻が発話の中かどうか。声の無い素材は常に false。 */
 export function isSpeechAt(fixture, seconds) {
-  if (!fixture.speech) return false;
-  return UTTERANCES.some(([from, to]) => seconds >= from && seconds < to);
+  return utterancesOf(fixture).some(([from, to]) => seconds >= from && seconds < to);
 }

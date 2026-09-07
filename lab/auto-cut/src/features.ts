@@ -158,7 +158,19 @@ function harmonicityOf(mag: Float64Array, binHz: number): number {
   return Math.min(1, best / total);
 }
 
-export function analyzeFeatures(buffer: AudioLike, track: LoudnessTrack): FeatureTrack {
+export interface FeatureOptions {
+  /** 声らしさの谷を埋める窓の長さ（秒）。0 で無効。 */
+  smoothSeconds: number;
+}
+
+export const DEFAULT_FEATURES: FeatureOptions = { smoothSeconds: SCORE_SMOOTH };
+
+export function analyzeFeatures(
+  buffer: AudioLike,
+  track: LoudnessTrack,
+  options: Partial<FeatureOptions> = {},
+): FeatureTrack {
+  const opts = { ...DEFAULT_FEATURES, ...options };
   const step = Math.max(1, Math.round(track.hop * buffer.sampleRate));
   const frames = track.db.length;
   const scratch = fftScratch(WINDOW);
@@ -238,7 +250,7 @@ export function analyzeFeatures(buffer: AudioLike, track: LoudnessTrack): Featur
   }
   // 人がしゃべっている間は続けてしゃべっている。1 コマだけ下がったからといって
   // そこで切ると、語中で切り刻むことになる。少し均してから使う。
-  const speechScore = smooth(raw, Math.max(1, Math.round(SCORE_SMOOTH / track.hop)));
+  const speechScore = smooth(raw, Math.round(opts.smoothSeconds / track.hop));
 
   return {
     hop: track.hop,

@@ -41,6 +41,28 @@ export interface JetCutOptions {
    * 取りこぼしと誤検出の釣り合いがいちばん良くなる値を探して決めた（probe.mjs）。
    */
   speechThreshold: number;
+  /**
+   * いったん声だと判断したあと、どこまで下がったら声でないとするか（0〜1）。
+   *
+   * 入る値と出る値を分けるのは、しゃべっている最中に声らしさが一瞬へこんでも
+   * そこで切らないため。1 つのしきい値だけだと、へこむたびに切れ目ができる。
+   * `speechThreshold` より大きい値を渡しても、入る値まで引き下げて扱う。
+   */
+  speechExit: number;
+  /**
+   * 「声が 1 つも見つからなかった」とみなす下限（0〜1）。
+   *
+   * 鳴っているコマのうち、声らしいと判断できたものがこの割合に満たなければ、
+   * 声の入っていない素材とみなして**何もしない**（丸ごと消してしまうより安全）。
+   *
+   * 既定が 0.05 と低いのには理由がある。測ったところ:
+   *   音楽だけ 28% / BGM の上でたまにしゃべる（20%）46% / よくしゃべる 66〜100%
+   * つまり**この割合では「声が無い」と「たまにしか声が無い」を安全に分けられない**。
+   * 高くすると、本当に声の入っている素材で何もしなくなる。
+   * ここでは誰が見ても声の無い場合（打楽器だけ = 0%）だけを拾い、
+   * 判断に迷う範囲は `speechRatio` として返して呼ぶ側に任せる。
+   */
+  minSpeechRatio: number;
 }
 
 export const DEFAULT_JET_CUT: JetCutOptions = {
@@ -51,6 +73,8 @@ export const DEFAULT_JET_CUT: JetCutOptions = {
   minKeep: 0.15,
   mode: 'level',
   speechThreshold: 0.2,
+  speechExit: 0.1,
+  minSpeechRatio: 0.05,
 };
 
 export interface JetCutPlan {
@@ -71,6 +95,17 @@ export interface JetCutPlan {
    * 黙って落ちると「効かないのはなぜか」が分からなくなるので、結果に残す。
    */
   usedMode: 'level' | 'speech';
+  /**
+   * `speech` で見たが、声らしいところが見つからなかった。
+   * このとき keep は「全部残す」になっている（削らない）。
+   * 音楽だけの素材を掛け違えて丸ごと消してしまうより、何もしないほうがよい。
+   */
+  noSpeechFound: boolean;
+  /**
+   * 鳴っているコマのうち、声らしいと判断できたものの割合（0〜1）。
+   * `level` のときは 1。低いときは「声の少ない素材に掛けていないか」を疑う手がかりになる。
+   */
+  speechRatio: number;
 }
 
 /**
@@ -129,15 +164,49 @@ export function planJetCut(
   const usedMode = opts.mode === 'speech' && speechScore && speechScore.length === track.db.length ? 'speech' : 'level';
 
   // 2. しきい値を超えたコマを拾い、そのまま 3. の余白を足す。
+  const enter = opts.speechThreshold;
+  const exit = Math.min(opts.speechExit, enter);
+  let inSpeech = false;
+  let soundingFrames = 0;
+  let speechFrames = 0;
+
   const loud: Range[] = [];
   for (let i = 0; i < track.db.length; i += 1) {
-    if (track.db[i] <= thresholdDb || track.db[i] <= SILENCE_DB) continue;
-    // 声らしさも見るときは、鳴っているだけでは足りない。
-    if (usedMode === 'speech' && (speechScore as Float32Array)[i] < opts.speechThreshold) continue;
+    if (track.db[i] <= thresholdDb || track.db[i] <= SILENCE_DB) {
+      inSpeech = false;
+      continue;
+    }
+    soundingFrames += 1;
+    if (usedMode === 'speech') {
+      // 入る値と出る値を分ける（ヒステリシス）。しゃべっている最中の
+      // 一瞬のへこみで切れ目を作らないため。
+      const score = (speechScore as Float32Array)[i];
+      inSpeech = inSpeech ? score >= exit : score >= enter;
+      if (!inSpeech) continue;
+      speechFrames += 1;
+    }
     loud.push({
       start: Math.max(0, i * track.hop - opts.padding),
       end: Math.min(duration, (i + 1) * track.hop + opts.padding),
     });
+  }
+
+  const speechRatio = usedMode === 'speech' ? (soundingFrames > 0 ? speechFrames / soundingFrames : 0) : 1;
+
+  // 声が 1 つも見つからなかったら、何もしない。
+  if (usedMode === 'speech' && soundingFrames > 0 && speechRatio < opts.minSpeechRatio) {
+    const whole = duration > 0 ? [{ start: 0, end: duration }] : [];
+    return {
+      thresholdDb,
+      keep: whole,
+      cut: [],
+      originalDuration: duration,
+      resultDuration: duration,
+      removed: 0,
+      usedMode,
+      noSpeechFound: true,
+      speechRatio,
+    };
   }
 
   // 3. 隣り合うものと、minSilence より短い切れ目しかないものを繋ぐ。
@@ -153,5 +222,7 @@ export function planJetCut(
     resultDuration: kept,
     removed: Math.max(0, duration - kept),
     usedMode,
+    noSpeechFound: false,
+    speechRatio,
   };
 }

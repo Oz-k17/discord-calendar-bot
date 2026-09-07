@@ -242,6 +242,24 @@ function refreshCut() {
     .map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`)
     .join('');
 
+  // 声が少ないときは、黙って判断せず知らせる。
+  // 割合だけでは「声が無い」と「たまにしか声が無い」を分けられないため、
+  // 決めるのは人に任せて、材料を出すだけにしている。
+  const warning = $<HTMLParagraphElement>('cut-warning');
+  if (plan.noSpeechFound) {
+    warning.textContent =
+      '声らしいところが見つからなかったので、何もしていません。' +
+      '音楽だけの素材ではありませんか？（切りたいなら「音量だけ」で試してください）';
+    warning.hidden = false;
+  } else if (plan.usedMode === 'speech' && plan.speechRatio < 0.5) {
+    warning.textContent =
+      `鳴っているところのうち、声らしいと判断できたのは ${Math.round(plan.speechRatio * 100)}% です。` +
+      '声の少ない素材か、声として拾えていないかのどちらかです。結果を必ず耳で確かめてください。';
+    warning.hidden = false;
+  } else {
+    warning.hidden = true;
+  }
+
   const clip = { start: 0, duration: voice.buffer.duration, sourceIn: 0 };
   const edits = toClipEdits(plan.keep, clip);
   const stats = summarize(edits, clip);

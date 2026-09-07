@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SHORT_FIXTURES, SHORT_LENGTH, UTTERANCES } from './spec.mjs';
+import { SHORT_FIXTURES, SHORT_LENGTH, SPARSE_UTTERANCES, UTTERANCES } from './spec.mjs';
 
 const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'out');
 const SR = 44100;
@@ -118,14 +118,26 @@ function drums(data, from, to, level, hitsPerSecond, random) {
 
 function makeShort(
   name,
-  { speech = true, bgm = false, bgmLevel = 0.12, beat = 0, beatLevel = 0.25, noiseLevel = 0.002, speechLevel = 0.5, seed = 1 },
+  {
+    speech = true,
+    sparse = false,
+    bgm = false,
+    bgmLevel = 0.12,
+    beat = 0,
+    beatLevel = 0.25,
+    noiseLevel = 0.002,
+    speechLevel = 0.5,
+    seed = 1,
+  },
 ) {
   const random = rng(seed);
   const data = new Float32Array(Math.round(SHORT_LENGTH * SR));
   noise(data, noiseLevel, random);
   if (bgm) music(data, 0, SHORT_LENGTH, bgmLevel);
   if (beat) drums(data, 0, SHORT_LENGTH, beatLevel, beat, random);
-  if (speech) for (const [from, to] of UTTERANCES) speak(data, from, to, speechLevel, random);
+  if (speech) {
+    for (const [from, to] of sparse ? SPARSE_UTTERANCES : UTTERANCES) speak(data, from, to, speechLevel, random);
+  }
   return writeWav(name, data);
 }
 

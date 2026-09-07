@@ -84,6 +84,29 @@ try {
   ok('声らしさモードに切り替わる', speechPlan.usedMode === 'speech', speechPlan.usedMode);
   ok('声らしさのつまみが出る', await page.locator('.speech-only').isVisible());
   ok('切り替えても計画が出る', speechPlan.keep.length > 0, `${speechPlan.keep.length} 本`);
+  ok('声がよく入っている素材では注意書きを出さない', !(await page.locator('#cut-warning').isVisible()));
+
+  // 声の無い素材では、削らずに知らせる。
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'drums.wav'));
+  await page.waitForFunction(() => window.__lab.state().plan?.usedMode === 'speech', { timeout: 30000 });
+  await page.waitForTimeout(400);
+  const drums = (await page.evaluate(() => window.__lab.state())).plan;
+  ok('声が無ければ何もしない', drums.noSpeechFound && drums.removed === 0, `削った ${drums.removed.toFixed(2)} 秒`);
+  ok('そのことを画面で知らせる', await page.locator('#cut-warning').isVisible(),
+    (await page.locator('#cut-warning').textContent())?.slice(0, 24));
+
+  // 声の少ない素材では、決めつけずに材料を出す。
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech-sparse-bgm.wav'));
+  await page.waitForFunction(() => window.__lab.state().plan?.noSpeechFound === false, { timeout: 30000 });
+  await page.waitForTimeout(400);
+  const sparse = (await page.evaluate(() => window.__lab.state())).plan;
+  ok('声の少ない素材でも切れる', sparse.removed > 1, `${sparse.removed.toFixed(2)} 秒削減`);
+  ok('割合が低ければ注意書きを出す', await page.locator('#cut-warning').isVisible(),
+    `割合 ${(sparse.speechRatio * 100).toFixed(0)}%`);
+
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech.wav'));
+  await page.waitForFunction(() => window.__lab.state().voice !== null, { timeout: 30000 });
+  await page.waitForTimeout(400);
   await page.locator('input[name="mode"][value="level"]').check();
   await page.waitForTimeout(300);
   ok('戻すと音量だけの判定に戻る', (await page.evaluate(() => window.__lab.state())).plan.usedMode === 'level');

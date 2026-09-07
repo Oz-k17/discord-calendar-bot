@@ -194,5 +194,45 @@ export function runSelfTest(): TestResult[] {
     check('既定は level のまま', planJetCut(plain).usedMode === 'level', '');
   }
 
+  // --- ヒステリシスと「声が見つからない」 ---
+  {
+    // 声らしさの列を直接組み立てて、判定の道筋だけを確かめる。
+    const sr = 8000;
+    const sounding = analyzeLoudness(makeTone(4, sr, [{ from: 0, to: 4 }]), 0.02);
+    const frames = sounding.db.length;
+    const fill = (fn: (t: number) => number) => {
+      const out = new Float32Array(frames);
+      for (let i = 0; i < frames; i += 1) out[i] = fn(i * sounding.hop);
+      return out;
+    };
+
+    // 1〜3 秒が声。ただし 2.00〜2.25 秒だけ声らしさがへこむ（言い淀み）。
+    // 余白と「短い無音は残す」で埋まってしまわないよう、どちらも切って裸で見る。
+    const dipped = fill((t) => {
+      if (t < 1 || t >= 3) return 0.02;
+      return t >= 2.0 && t < 2.25 ? 0.14 : 0.5;
+    });
+    const bare = { mode: 'speech' as const, minSilence: 0.05, padding: 0 };
+    const single = planJetCut(sounding, { ...bare, speechExit: 0.2 }, dipped);
+    const hyst = planJetCut(sounding, { ...bare, speechExit: 0.1 }, dipped);
+    check('一瞬のへこみは、入る値だけだと切れ目になる', single.keep.length === 2, `${single.keep.length} 本`);
+    check('ヒステリシスなら切れ目にならない', hyst.keep.length === 1, `${hyst.keep.length} 本`);
+    check(
+      'それでも声の外までは広がらない',
+      hyst.keep[0].start > 0.9 && hyst.keep[0].end < 3.1,
+      `${hyst.keep[0].start.toFixed(2)}〜${hyst.keep[0].end.toFixed(2)}`,
+    );
+
+    // 声らしさがどこにも無ければ、削らずに何もしない。
+    const none = planJetCut(sounding, { mode: 'speech' }, fill(() => 0.01));
+    check('声が見つからなければ何もしない', none.noSpeechFound && none.removed === 0, `削った ${none.removed.toFixed(2)} 秒`);
+    check('そのとき全部残っている', near(none.resultDuration, none.originalDuration, 1e-6), '');
+
+    // 割合は結果に出る（呼ぶ側が「声の少ない素材では」と判断できるように）。
+    const half = planJetCut(sounding, { mode: 'speech' }, fill((t) => (t < 2 ? 0.5 : 0.01)));
+    check('声らしいコマの割合が返る', near(half.speechRatio, 0.5, 0.05), half.speechRatio.toFixed(3));
+    check('level のときは割合を 1 とする', planJetCut(sounding).speechRatio === 1, '');
+  }
+
   return results;
 }
