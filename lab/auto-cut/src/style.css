@@ -122,6 +122,47 @@ canvas {
   background: var(--accent);
 }
 
+.swatch.score {
+  background: #9ab7d8;
+}
+
+.mode-row {
+  align-items: center;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.mode-label {
+  color: var(--dim);
+}
+
+.mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.mode:has(input:checked) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/*
+ * 「声らしさも見る」を選んでいないときは、そのつまみを出さない。
+ * .controls label 側にも display があるので、詳細度で負けないように書く。
+ */
+.controls label.speech-only {
+  display: none;
+}
+
+body.mode-speech .controls label.speech-only {
+  display: flex;
+}
+
 .controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));

@@ -8,11 +8,37 @@ import { autoThresholdDb, planJetCut } from './silence.ts';
 import { gainAt, planDucking } from './ducking.ts';
 import { toClipEdits } from './edits.ts';
 import { buildPeaks } from './peaks.ts';
+import { analyzeFeatures, modulationRatio } from './features.ts';
+import { fftScratch, magnitudes } from './fft.ts';
 
 export interface TestResult {
   name: string;
   ok: boolean;
   detail: string;
+}
+
+/** 音量が指定の速さで揺れる音。声の音節らしさを模す。 */
+function makeModulated(seconds: number, sampleRate: number, hz: number, amp = 0.5): AudioLike {
+  const length = Math.round(seconds * sampleRate);
+  const data = new Float32Array(length);
+  for (let i = 0; i < length; i += 1) {
+    const t = i / sampleRate;
+    const env = 0.55 + 0.45 * Math.sin(2 * Math.PI * hz * t);
+    data[i] = amp * env * Math.sin(2 * Math.PI * 200 * t);
+  }
+  return { sampleRate, numberOfChannels: 1, length, getChannelData: () => data };
+}
+
+/** 白色雑音。音色が平坦な音の代表として使う。 */
+function makeNoise(seconds: number, sampleRate: number, amp = 0.3): AudioLike {
+  const length = Math.round(seconds * sampleRate);
+  const data = new Float32Array(length);
+  let seed = 12345;
+  for (let i = 0; i < length; i += 1) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    data[i] = ((seed / 0x7fffffff) * 2 - 1) * amp;
+  }
+  return { sampleRate, numberOfChannels: 1, length, getChannelData: () => data };
 }
 
 /** 指定した区間だけサイン波が鳴る、1ch の合成音を作る。 */
@@ -109,6 +135,63 @@ export function runSelfTest(): TestResult[] {
     const peaks = buildPeaks(makeTone(1, 8000, [{ from: 0, to: 1, amp: 0.8 }]), 100);
     check('波形の山が振幅と一致する', near(Math.max(...peaks.max), 0.8, 0.02), Math.max(...peaks.max).toFixed(3));
     check('波形のバケット数が指定どおり', peaks.max.length === 100, `${peaks.max.length}`);
+  }
+
+  // --- FFT ---
+  {
+    // 8 周期ぶんちょうど入るサイン波を入れたら、その山だけが立つはず。
+    const n = 256;
+    const input = new Float32Array(n);
+    for (let i = 0; i < n; i += 1) input[i] = Math.sin((2 * Math.PI * 8 * i) / n);
+    const scratch = fftScratch(n);
+    magnitudes(input, scratch.re, scratch.im, scratch.mag);
+    let peak = 0;
+    for (let b = 1; b < scratch.mag.length; b += 1) if (scratch.mag[b] > scratch.mag[peak]) peak = b;
+    check('FFT の山が入れた周波数と一致する', peak === 8, `bin ${peak}`);
+    // 直流だけを入れたら、0 番以外は立たない。
+    const flat = new Float32Array(n).fill(1);
+    magnitudes(flat, scratch.re, scratch.im, scratch.mag);
+    let others = 0;
+    for (let b = 2; b < scratch.mag.length; b += 1) others = Math.max(others, scratch.mag[b]);
+    check('直流だけなら他の周波数は立たない', others < 1e-6, others.toExponential(1));
+  }
+
+  // --- 声らしさ ---
+  {
+    const sr = 16000;
+    // 4Hz で揺れる音は「音節らしい」、まったく揺れない音はそうではない。
+    const modulated = analyzeLoudness(makeModulated(3, sr, 4), 0.02);
+    const steady = analyzeLoudness(makeTone(3, sr, [{ from: 0, to: 3 }]), 0.02);
+    const mid = (a: Float32Array) => a[Math.floor(a.length / 2)];
+    const modOn = mid(modulationRatio(modulated));
+    const modOff = mid(modulationRatio(steady));
+    check('4Hz で揺れる音は揺れが検出される', modOn > 0.5, modOn.toFixed(3));
+    check('揺れない音では検出されない', modOff < 0.2, modOff.toFixed(3));
+
+    // 音色: 音程のある音は尖っていて、雑音は平坦。
+    const toneBuffer = makeModulated(2, sr, 4);
+    const noiseBuffer = makeNoise(2, sr);
+    const toneFeatures = analyzeFeatures(toneBuffer, analyzeLoudness(toneBuffer, 0.02));
+    const noiseFeatures = analyzeFeatures(noiseBuffer, analyzeLoudness(noiseBuffer, 0.02));
+    check('音程のある音は尖っている', mid(toneFeatures.tone) > 0.9, mid(toneFeatures.tone).toFixed(3));
+    check('雑音は平坦', mid(noiseFeatures.tone) < mid(toneFeatures.tone) - 0.1, mid(noiseFeatures.tone).toFixed(3));
+    check(
+      '声らしさは「揺れる音程のある音」でいちばん高い',
+      mid(toneFeatures.speechScore) > mid(noiseFeatures.speechScore),
+      `${mid(toneFeatures.speechScore).toFixed(3)} > ${mid(noiseFeatures.speechScore).toFixed(3)}`,
+    );
+
+    // speech モードは、声らしさの列を渡さなければ level へ落ちる。黙って落ちないこと。
+    const plain = analyzeLoudness(makeTone(3, sr, [{ from: 1, to: 2 }]), 0.02);
+    check('声らしさを渡さなければ level に落ちる', planJetCut(plain, { mode: 'speech' }).usedMode === 'level', '');
+    const withScore = analyzeFeatures(makeModulated(3, sr, 4), plain);
+    check(
+      '渡せば speech モードで動く',
+      planJetCut(plain, { mode: 'speech' }, withScore.speechScore).usedMode === 'speech',
+      '',
+    );
+    // 既定は level のまま。既存の結果を勝手に変えない。
+    check('既定は level のまま', planJetCut(plain).usedMode === 'level', '');
   }
 
   return results;

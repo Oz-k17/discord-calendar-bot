@@ -6,6 +6,7 @@
 
 import { analyzeLoudness, type LoudnessTrack } from './loudness.ts';
 import { buildPeaks, type Peaks } from './peaks.ts';
+import { analyzeFeatures, type FeatureTrack } from './features.ts';
 import { planJetCut, type JetCutPlan } from './silence.ts';
 import { applyDucking, gainAt, planDucking, type GainPoint } from './ducking.ts';
 import { summarize, toClipEdits } from './edits.ts';
@@ -38,6 +39,8 @@ interface Loaded {
   buffer: AudioBuffer;
   track: LoudnessTrack;
   peaks: Peaks;
+  /** 声らしさなど。重いので、読み込んだときに一度だけ作る。 */
+  features: FeatureTrack;
 }
 
 let voice: Loaded | null = null;
@@ -51,11 +54,13 @@ async function load(file: File, canvas: HTMLCanvasElement): Promise<Loaded> {
   const bytes = await file.arrayBuffer();
   // decodeAudioData は音声トラックだけを取り出すので、動画ファイルをそのまま渡してよい。
   const buffer = await ensureAudio().decodeAudioData(bytes);
+  const track = analyzeLoudness(buffer, 0.02);
   return {
     name: file.name,
     buffer,
-    track: analyzeLoudness(buffer, 0.02),
+    track,
     peaks: buildPeaks(buffer, Math.max(200, canvas.clientWidth || 800)),
+    features: analyzeFeatures(buffer, track),
   };
 }
 
@@ -131,6 +136,31 @@ function drawVoice() {
 
   drawWave(ctx, voice.peaks, width, height, '#cfd6cb');
 
+  // 声らしさの曲線（「声らしさも見る」のときだけ）。判定の理由が目で見えるように。
+  if (plan.usedMode === 'speech') {
+    const score = voice.features.speechScore;
+    ctx.strokeStyle = '#9ab7d8';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let x = 0; x <= width; x += 1) {
+      const i = Math.min(score.length - 1, Math.floor((x / width) * score.length));
+      const y = height - Math.min(1, score[i] / 0.6) * (height - 4) - 2;
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    const threshold = Number($<HTMLInputElement>('speech-threshold').value);
+    const y = height - Math.min(1, threshold / 0.6) * (height - 4) - 2;
+    ctx.strokeStyle = 'rgba(154, 183, 216, 0.5)';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
   // しきい値の線（dB を振幅に戻して描く）。
   const amp = Math.pow(10, plan.thresholdDb / 20);
   const mid = height / 2;
@@ -173,13 +203,28 @@ function drawBgm() {
 
 // ---------- 無音カット ----------
 
+/** いま選ばれている判定のしかた。 */
+function currentMode(): 'level' | 'speech' {
+  const checked = document.querySelector<HTMLInputElement>('input[name="mode"]:checked');
+  return checked?.value === 'speech' ? 'speech' : 'level';
+}
+
 function refreshCut() {
+  const mode = currentMode();
+  document.body.classList.toggle('mode-speech', mode === 'speech');
+  $<HTMLOutputElement>('out-speech').textContent = Number($<HTMLInputElement>('speech-threshold').value).toFixed(2);
   if (!voice) return;
-  plan = planJetCut(voice.track, {
-    sensitivity: Number($<HTMLInputElement>('sensitivity').value),
-    minSilence: Number($<HTMLInputElement>('min-silence').value),
-    padding: Number($<HTMLInputElement>('padding').value),
-  });
+  plan = planJetCut(
+    voice.track,
+    {
+      mode,
+      speechThreshold: Number($<HTMLInputElement>('speech-threshold').value),
+      sensitivity: Number($<HTMLInputElement>('sensitivity').value),
+      minSilence: Number($<HTMLInputElement>('min-silence').value),
+      padding: Number($<HTMLInputElement>('padding').value),
+    },
+    voice.features.speechScore,
+  );
 
   $<HTMLOutputElement>('out-sensitivity').textContent = Number($<HTMLInputElement>('sensitivity').value).toFixed(2);
   $<HTMLOutputElement>('out-min-silence').textContent = `${Number($<HTMLInputElement>('min-silence').value).toFixed(2)} 秒`;
@@ -192,6 +237,7 @@ function refreshCut() {
     ['削減', `${plan.removed.toFixed(2)} 秒（${Math.round((1 - ratio) * 100)}%）`],
     ['クリップ数', `${plan.keep.length} 本`],
     ['しきい値', `${plan.thresholdDb.toFixed(1)} dB`],
+    ['判定', plan.usedMode === 'speech' ? '声らしさも見た' : '音量だけ'],
   ]
     .map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`)
     .join('');
@@ -303,8 +349,11 @@ bindFile('bgm-file', 'bgm-status', $<HTMLCanvasElement>('bgm-canvas'), (loaded) 
   refreshDuck();
 });
 
-for (const id of ['sensitivity', 'min-silence', 'padding']) {
+for (const id of ['sensitivity', 'min-silence', 'padding', 'speech-threshold']) {
   $<HTMLInputElement>(id).addEventListener('input', refreshCut);
+}
+for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="mode"]')) {
+  radio.addEventListener('change', refreshCut);
 }
 for (const id of ['duck-db', 'hold', 'release']) {
   $<HTMLInputElement>(id).addEventListener('input', refreshDuck);

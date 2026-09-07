@@ -37,9 +37,21 @@
         </div>
         <p class="legend">
           <span class="swatch keep"></span>残す　<span class="swatch cut"></span>削る　<span class="swatch line"></span>しきい値
+          　<span class="swatch score"></span>声らしさ（「声らしさも見る」のとき）
         </p>
 
+        <div class="row mode-row">
+          <span class="mode-label">判定のしかた</span>
+          <label class="mode"><input type="radio" name="mode" value="level" checked /> 音量だけ（速い）</label>
+          <label class="mode"><input type="radio" name="mode" value="speech" /> 声らしさも見る（BGM に強い）</label>
+        </div>
+
         <div class="controls" id="cut-controls">
+          <label class="speech-only">
+            声らしさの下限 <output id="out-speech"></output>
+            <input type="range" id="speech-threshold" min="0.02" max="0.6" step="0.01" value="0.2" />
+            <small>上げるほど厳しくなる（既定 0.20 は素材で測って決めた値）</small>
+          </label>
           <label>
             感度 <output id="out-sensitivity"></output>
             <input type="range" id="sensitivity" min="0" max="0.8" step="0.01" value="0.25" />

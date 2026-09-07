@@ -29,6 +29,18 @@ export interface JetCutOptions {
   padding: number;
   /** これより短くなった残し区間は捨てる（秒）。物音 1 発で 1 カットできるのを防ぐ。 */
   minKeep: number;
+  /**
+   * 何を見て「鳴っている」と決めるか。
+   * - `level`（既定）: 音量だけ。素材が声だけなら、これがいちばん素直で速い
+   * - `speech`: 音量に加えて「声らしさ」も見る。BGM や環境音が乗った素材で効く
+   */
+  mode: 'level' | 'speech';
+  /**
+   * `speech` のとき、声らしさをどこで切るか（0〜1）。
+   * 既定の 0.2 は勘ではなく、正解の分かっている素材 4240 コマで
+   * 取りこぼしと誤検出の釣り合いがいちばん良くなる値を探して決めた（probe.mjs）。
+   */
+  speechThreshold: number;
 }
 
 export const DEFAULT_JET_CUT: JetCutOptions = {
@@ -37,6 +49,8 @@ export const DEFAULT_JET_CUT: JetCutOptions = {
   minSilence: 0.35,
   padding: 0.08,
   minKeep: 0.15,
+  mode: 'level',
+  speechThreshold: 0.2,
 };
 
 export interface JetCutPlan {
@@ -51,6 +65,12 @@ export interface JetCutPlan {
   resultDuration: number;
   /** 削った秒数。 */
   removed: number;
+  /**
+   * 実際に使った判定のしかた。
+   * `speech` を指定しても声らしさの列が渡されていなければ `level` に落ちる。
+   * 黙って落ちると「効かないのはなぜか」が分からなくなるので、結果に残す。
+   */
+  usedMode: 'level' | 'speech';
 }
 
 /**
@@ -94,15 +114,26 @@ function complement(keep: Range[], duration: number): Range[] {
   return cut;
 }
 
-export function planJetCut(track: LoudnessTrack, options: Partial<JetCutOptions> = {}): JetCutPlan {
+/**
+ * @param speechScore コマごとの声らしさ（0〜1）。`mode: 'speech'` のときだけ使う。
+ *   音そのものを見ないと出せない値なので、features.ts で作って渡してもらう。
+ */
+export function planJetCut(
+  track: LoudnessTrack,
+  options: Partial<JetCutOptions> = {},
+  speechScore?: Float32Array,
+): JetCutPlan {
   const opts = { ...DEFAULT_JET_CUT, ...options };
   const thresholdDb = opts.thresholdDb ?? autoThresholdDb(track, opts.sensitivity);
   const duration = track.duration;
+  const usedMode = opts.mode === 'speech' && speechScore && speechScore.length === track.db.length ? 'speech' : 'level';
 
   // 2. しきい値を超えたコマを拾い、そのまま 3. の余白を足す。
   const loud: Range[] = [];
   for (let i = 0; i < track.db.length; i += 1) {
     if (track.db[i] <= thresholdDb || track.db[i] <= SILENCE_DB) continue;
+    // 声らしさも見るときは、鳴っているだけでは足りない。
+    if (usedMode === 'speech' && (speechScore as Float32Array)[i] < opts.speechThreshold) continue;
     loud.push({
       start: Math.max(0, i * track.hop - opts.padding),
       end: Math.min(duration, (i + 1) * track.hop + opts.padding),
@@ -121,5 +152,6 @@ export function planJetCut(track: LoudnessTrack, options: Partial<JetCutOptions>
     originalDuration: duration,
     resultDuration: kept,
     removed: Math.max(0, duration - kept),
+    usedMode,
   };
 }

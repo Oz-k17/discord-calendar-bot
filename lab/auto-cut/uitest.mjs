@@ -67,7 +67,7 @@ try {
   await page.waitForTimeout(300);
   const { plan } = await page.evaluate(() => window.__lab.state());
   ok('読み込んだ素材から計画が出る', !!plan && plan.keep.length > 0, plan ? `${plan.keep.length} 本 / ${plan.removed.toFixed(2)} 秒削減` : 'なし');
-  ok('統計が画面に出る', (await page.locator('#cut-stats div').count()) === 5, `${await page.locator('#cut-stats div').count()} 項目`);
+  ok('統計が画面に出る', (await page.locator('#cut-stats div').count()) === 6, `${await page.locator('#cut-stats div').count()} 項目`);
   ok('波形が描かれている', await hasInk(page, 'voice-canvas'), '');
 
   // --- つまみを動かすと結果が変わる ---
@@ -76,6 +76,18 @@ try {
   const after = (await page.evaluate(() => window.__lab.state())).plan.keep.length;
   ok('「短い無音は残す」を伸ばすと本数が減る', after < before, `${before} → ${after} 本`);
   await setRange(page, '#min-silence', '0.35');
+
+  // --- 声らしさも見るモード ---
+  await page.locator('input[name="mode"][value="speech"]').check();
+  await page.waitForTimeout(400);
+  const speechPlan = (await page.evaluate(() => window.__lab.state())).plan;
+  ok('声らしさモードに切り替わる', speechPlan.usedMode === 'speech', speechPlan.usedMode);
+  ok('声らしさのつまみが出る', await page.locator('.speech-only').isVisible());
+  ok('切り替えても計画が出る', speechPlan.keep.length > 0, `${speechPlan.keep.length} 本`);
+  await page.locator('input[name="mode"][value="level"]').check();
+  await page.waitForTimeout(300);
+  ok('戻すと音量だけの判定に戻る', (await page.evaluate(() => window.__lab.state())).plan.usedMode === 'level');
+  ok('戻すとつまみも隠れる', !(await page.locator('.speech-only').isVisible()));
 
   // --- ダッキング ---
   await page.locator('#bgm-file').setInputFiles(path.join(fixtures, 'bgm.wav'));

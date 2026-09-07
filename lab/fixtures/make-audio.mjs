@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SHORT_FIXTURES, SHORT_LENGTH, UTTERANCES } from './spec.mjs';
 
 const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'out');
 const SR = 44100;
@@ -96,22 +97,34 @@ function noise(data, level, random) {
   for (let i = 0; i < data.length; i += 1) data[i] += (random() - 0.5) * 2 * level;
 }
 
-/** 発話の並び。息継ぎ（0.2 秒）と間（0.7〜1.2 秒）を混ぜてある。 */
-const UTTERANCES = [
-  [1.0, 2.2],
-  [2.9, 4.4],
-  [4.6, 5.4],
-  [6.6, 8.0],
-  [8.2, 8.9],
-  [10.0, 11.6],
-];
-const SHORT_LENGTH = 13;
+/**
+ * 打楽器らしい音。指定した速さで「タッ」と鳴る。
+ *
+ * これは **わざと意地悪な素材** を作るためのもの。
+ * 声を見分けるのに「音量が 1 秒に 3〜6 回くらい揺れているか」を見る手が有力だが、
+ * それだと同じ速さで刻む音楽に引っかかる。引っかかることを確かめられなければ、
+ * 「うまくいった」の中身が「自分に都合のいい素材で試しただけ」になってしまう。
+ */
+function drums(data, from, to, level, hitsPerSecond, random) {
+  const period = SR / hitsPerSecond;
+  for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
+    const sincePeak = i % period;
+    // 立ち上がりが速く、80ms ほどで減衰する打撃音。
+    const env = Math.exp(-sincePeak / (0.08 * SR));
+    const t = i / SR;
+    data[i] += level * env * ((random() - 0.5) * 1.2 + 0.6 * Math.sin(2 * Math.PI * 90 * t));
+  }
+}
 
-function makeShort(name, { speech = true, bgm = false, noiseLevel = 0.002, speechLevel = 0.5, seed = 1 }) {
+function makeShort(
+  name,
+  { speech = true, bgm = false, bgmLevel = 0.12, beat = 0, beatLevel = 0.25, noiseLevel = 0.002, speechLevel = 0.5, seed = 1 },
+) {
   const random = rng(seed);
   const data = new Float32Array(Math.round(SHORT_LENGTH * SR));
   noise(data, noiseLevel, random);
-  if (bgm) music(data, 0, SHORT_LENGTH, 0.12);
+  if (bgm) music(data, 0, SHORT_LENGTH, bgmLevel);
+  if (beat) drums(data, 0, SHORT_LENGTH, beatLevel, beat, random);
   if (speech) for (const [from, to] of UTTERANCES) speak(data, from, to, speechLevel, random);
   return writeWav(name, data);
 }
@@ -119,16 +132,12 @@ function makeShort(name, { speech = true, bgm = false, noiseLevel = 0.002, speec
 fs.mkdirSync(OUT, { recursive: true });
 console.log(`出力先: ${OUT}\n`);
 
-// 基準。きれいに録れた声。
-makeShort('speech.wav', { seed: 1 });
-// いまのしきい値方式が苦手な素材。BGM 込みで録ってしまった場合。
-makeShort('speech-bgm.wav', { bgm: true, seed: 2 });
-// 部屋のノイズが大きい。しきい値がノイズに引っ張られないかを見る。
-makeShort('speech-noisy.wav', { noiseLevel: 0.02, seed: 3 });
-// 録音レベルが小さい。固定しきい値なら何も残らないはずの素材。
-makeShort('speech-quiet.wav', { speechLevel: 0.06, noiseLevel: 0.0006, seed: 4 });
-// ダッキングの相手。
-makeShort('bgm.wav', { speech: false, bgm: true, noiseLevel: 0.0005, seed: 5 });
+// 何をどう作るかは spec.mjs にまとめてある（測る側からも同じものを参照するため）。
+for (const fixture of SHORT_FIXTURES) {
+  process.stdout.write(`${fixture.hard ? '※ ' : '  '}${fixture.note.padEnd(24, '　')} `);
+  makeShort(fixture.name, fixture.options);
+}
+console.log('\n※ は、声を見分ける処理をいじめるために足した素材。');
 
 if (process.argv.includes('long')) {
   // 長尺での処理時間とメモリを測るためのもの。10 分ぶん。
