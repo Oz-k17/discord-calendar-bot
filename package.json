@@ -13,7 +13,10 @@
     "lab": "vite lab/auto-cut",
     "lab:build": "vite build lab/auto-cut",
     "lab:typecheck": "tsc -p lab/auto-cut --pretty false",
-    "lab:test": "node lab/auto-cut/selftest.mjs"
+    "lab:test": "node lab/auto-cut/selftest.mjs",
+    "lab:fixtures": "node lab/fixtures/make-audio.mjs",
+    "lab:bench": "node lab/auto-cut/bench.mjs",
+    "lab:uitest": "node lab/auto-cut/uitest.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",

@@ -5,3 +5,6 @@ dist-ssr
 .DS_Store
 .vite
 *.tsbuildinfo
+
+# ラボの試し用素材（生成物）
+lab/fixtures/out/

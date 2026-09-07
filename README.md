@@ -225,6 +225,10 @@ ffmpeg.wasm のような重量級の変換エンジンは持ち込まず、エ�
 
 - [`lab/auto-cut`](./lab/auto-cut/) — 無音カット（ジェットカット）・オートダッキング・波形表示（`npm run lab`）
 
+確かめ方は 3 段に分けてあります。`npm run lab:test`（計算が合っているか）、
+`npm run lab:bench`（実際どれくらい効くか）、`npm run lab:uitest`（画面まで繋がっているか）。
+試し用の素材は `npm run lab:fixtures` で生成でき、種を固定してあるので前後の数字がそのまま比べられます。
+
 何をやったか・次に何をやるかは [`lab/JOURNAL.md`](./lab/JOURNAL.md) に記録しています。
 
 ## 制限
