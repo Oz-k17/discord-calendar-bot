@@ -66,16 +66,34 @@ export const PANEL_LABELS: Record<PanelId, string> = {
   timeline: 'タイムライン',
 };
 
+/**
+ * 同じ場所に重ねたパネルのまとまり。
+ * 2 つ以上入っているとタブになり、前に出ているものだけが表示される。
+ * id を持たせてあるのは、並べ替えのときに「どのまとまりへ／どの手前へ」を
+ * 位置ではなく相手そのもので指せるようにするため（位置は取り除いた拍子にずれる）。
+ */
+export interface PanelGroup {
+  id: string;
+  panels: PanelId[];
+  /** いま前に出ているパネル。 */
+  active: PanelId;
+}
+
 export interface PanelLayout {
-  slots: Record<PanelSlot, PanelId[]>;
+  slots: Record<PanelSlot, PanelGroup[]>;
+  /** どこにも置いていない（非表示にした）パネル。 */
+  hidden: PanelId[];
   /** 左右のレールの幅と、下段の高さ（px）。 */
   leftWidth: number;
   rightWidth: number;
   dockHeight: number;
 }
 
+const group = (...panels: PanelId[]): PanelGroup => ({ id: uid('g'), panels, active: panels[0] });
+
 export const DEFAULT_PANELS: PanelLayout = {
-  slots: { left: ['media'], right: ['inspector'], bottom: ['timeline'] },
+  slots: { left: [group('media')], right: [group('inspector')], bottom: [group('timeline')] },
+  hidden: [],
   leftWidth: 290,
   rightWidth: 330,
   dockHeight: 300,
@@ -91,31 +109,95 @@ export const PANEL_LIMITS = {
 const clampSize = (value: number, min: number, max: number) =>
   Math.round(Math.max(min, Math.min(max, Number.isFinite(value) ? value : min)));
 
+/** そのパネルが既定でどこに置かれるか。 */
+export function homeSlotOf(id: PanelId): PanelSlot {
+  return PANEL_SLOTS.find((slot) => DEFAULT_PANELS.slots[slot].some((g) => g.panels.includes(id))) ?? 'left';
+}
+
+/** 保存された値は、まとまりの形にも文字列の並びにもなりうる（古い形からの引き継ぎ）。 */
+type StoredGroup = PanelGroup | PanelId;
+
 /**
  * 保存されたレイアウトを、必ず「すべてのパネルがちょうど 1 回ずつ出てくる」形に直す。
+ *
  * パネルが増えたり名前が変わったりしても、古い設定のせいで画面が欠けないようにするため。
+ * 重ねる仕組みを入れる前は `slots` が文字列の並びだったので、その形も受け取れるようにしてある。
  */
 export function sanitizePanels(layout: Partial<PanelLayout> | undefined): PanelLayout {
-  const slots: Record<PanelSlot, PanelId[]> = { left: [], right: [], bottom: [] };
+  const slots: Record<PanelSlot, PanelGroup[]> = { left: [], right: [], bottom: [] };
   const placed = new Set<PanelId>();
-  for (const slot of PANEL_SLOTS) {
-    for (const id of layout?.slots?.[slot] ?? []) {
+
+  const take = (ids: PanelId[]): PanelId[] => {
+    const out: PanelId[] = [];
+    for (const id of ids) {
       if (!PANEL_IDS.includes(id) || placed.has(id)) continue;
       placed.add(id);
-      slots[slot].push(id);
+      out.push(id);
+    }
+    return out;
+  };
+
+  for (const slot of PANEL_SLOTS) {
+    for (const stored of (layout?.slots?.[slot] ?? []) as StoredGroup[]) {
+      // 古い形（文字列だけ）は、1 枚だけのまとまりとして読む。
+      const panels = take(typeof stored === 'string' ? [stored] : (stored?.panels ?? []));
+      if (panels.length === 0) continue;
+      const wanted = typeof stored === 'string' ? undefined : stored?.active;
+      slots[slot].push({
+        id: typeof stored === 'string' ? uid('g') : stored?.id || uid('g'),
+        panels,
+        active: wanted && panels.includes(wanted) ? wanted : panels[0],
+      });
     }
   }
+
+  // 非表示にしたものは、置き場のあとで読む（両方に出てきたら「表示」を採る）。
+  const hidden = take((layout?.hidden ?? []) as PanelId[]);
+
+  // どちらにも出てこなかったものは、既定の置き場へ戻す。
+  // 新しく増えたパネルが、古い設定のせいで消えたままにならないようにするため。
   for (const id of PANEL_IDS) {
     if (placed.has(id)) continue;
-    const home = PANEL_SLOTS.find((slot) => DEFAULT_PANELS.slots[slot].includes(id)) ?? 'left';
-    slots[home].push(id);
+    slots[homeSlotOf(id)].push({ id: uid('g'), panels: [id], active: id });
   }
+
   return {
     slots,
+    hidden,
     leftWidth: clampSize(layout?.leftWidth ?? DEFAULT_PANELS.leftWidth, PANEL_LIMITS.railMin, PANEL_LIMITS.railMax),
     rightWidth: clampSize(layout?.rightWidth ?? DEFAULT_PANELS.rightWidth, PANEL_LIMITS.railMin, PANEL_LIMITS.railMax),
     dockHeight: clampSize(layout?.dockHeight ?? DEFAULT_PANELS.dockHeight, PANEL_LIMITS.dockMin, PANEL_LIMITS.dockMax),
   };
+}
+
+/**
+ * パネルをどこからでも取り除く（空になったまとまりは畳む）。
+ *
+ * 配置をいじる操作はすべてこれを土台にしている。「掴んで動かす」も「仕舞う」も、
+ * まず抜いてから置き直すという同じ形なので、抜くところだけを 1 か所に置いた。
+ */
+export function detachPanel(layout: PanelLayout, id: PanelId): { slots: Record<PanelSlot, PanelGroup[]>; hidden: PanelId[] } {
+  const slots = {} as Record<PanelSlot, PanelGroup[]>;
+  for (const slot of PANEL_SLOTS) {
+    slots[slot] = layout.slots[slot]
+      .map((g) => ({ ...g, panels: g.panels.filter((p) => p !== id) }))
+      .filter((g) => g.panels.length > 0)
+      .map((g) => ({ ...g, active: g.panels.includes(g.active) ? g.active : g.panels[0] }));
+  }
+  return { slots, hidden: layout.hidden.filter((p) => p !== id) };
+}
+
+/** 仕舞う（画面から下ろす）。 */
+export function hidePanel(layout: PanelLayout, id: PanelId): Partial<PanelLayout> {
+  const { slots, hidden } = detachPanel(layout, id);
+  return { slots, hidden: [...hidden, id] };
+}
+
+/** 既定の置き場へ戻す。 */
+export function showPanel(layout: PanelLayout, id: PanelId): Partial<PanelLayout> {
+  const { slots, hidden } = detachPanel(layout, id);
+  slots[homeSlotOf(id)] = [...slots[homeSlotOf(id)], { id: uid('g'), panels: [id], active: id }];
+  return { slots, hidden };
 }
 
 /** プレビューを描く解像度（長辺の px）。書き出しの画質には影響しない。 */
@@ -246,7 +328,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const resetPanels = useCallback(() => {
-    setSettings((prev) => ({ ...prev, panels: sanitizePanels(DEFAULT_PANELS) }));
+    // DEFAULT_PANELS をそのまま入れると id を使い回してしまうので、作り直す。
+    setSettings((prev) => ({ ...prev, panels: sanitizePanels({ ...DEFAULT_PANELS, slots: undefined }) }));
   }, []);
 
   const addTemplate = useCallback<AppApi['addTemplate']>((template) => {

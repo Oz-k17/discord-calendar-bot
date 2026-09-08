@@ -86,6 +86,8 @@ export default function SettingsPage() {
         <Panel title="編集画面のレイアウト">
           <p className="muted small">
             素材・インスペクタ・タイムラインは、見出しを掴んで左右のレールや下段へ移せます。
+            他のパネルの<strong>見出しの上に落とすと重なってタブ</strong>になり、
+            見出しの <code>×</code> で仕舞えます。仕舞ったものは編集画面の「パネル」から戻せます。
             境目をドラッグすれば幅と高さも変えられます。
           </p>
           <ul className="layout-summary">
@@ -93,10 +95,18 @@ export default function SettingsPage() {
               <li key={slot}>
                 <span className="muted">{SLOT_LABELS[slot]}</span>
                 <strong>
-                  {settings.panels.slots[slot].map((id) => PANEL_LABELS[id]).join('・') || 'なし'}
+                  {settings.panels.slots[slot]
+                    .map((group) => group.panels.map((id) => PANEL_LABELS[id]).join('＋'))
+                    .join('・') || 'なし'}
                 </strong>
               </li>
             ))}
+            {settings.panels.hidden.length > 0 && (
+              <li>
+                <span className="muted">仕舞ってある</span>
+                <strong>{settings.panels.hidden.map((id) => PANEL_LABELS[id]).join('・')}</strong>
+              </li>
+            )}
           </ul>
           <button type="button" className="wide" onClick={resetPanels}>
             配置を初期状態に戻す

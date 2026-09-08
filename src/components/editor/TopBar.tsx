@@ -4,11 +4,14 @@ import { useApp } from '../../store/app';
 import { useEditor } from '../../store/editor';
 import { LayoutToggle } from '../LayoutToggle';
 import { Brand, SiteNav } from '../SiteNav';
+import { PanelMenu } from './PanelDock';
 
 export function TopBar({ onExport, onHelp }: { onExport: () => void; onHelp: () => void }) {
   const { project, sequence, dispatch, canUndo, canRedo } = useEditor();
-  const { addTemplate } = useApp();
+  const { addTemplate, settings } = useApp();
   const [saved, setSaved] = useState(false);
+  // スマホ表示にはパネルの置き場そのものが無いので出さない。
+  const mobile = settings.layout === 'mobile';
 
   const saveLayout = () => {
     const name = window.prompt('テンプレート名', project.name);
@@ -30,6 +33,7 @@ export function TopBar({ onExport, onHelp }: { onExport: () => void; onHelp: () 
         <button type="button" disabled={!canRedo} onClick={() => dispatch({ type: 'redo' })} title="やり直す">
           ↻<span className="btn-label"> {t('進む')}</span>
         </button>
+        {!mobile && <PanelMenu />}
         <button type="button" className="desktop-only" onClick={saveLayout}>
           {saved ? '保存しました' : '⌂ レイアウトを保存'}
         </button>

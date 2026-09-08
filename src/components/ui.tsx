@@ -82,16 +82,30 @@ export function ColorInput({ value, onChange }: { value: string; onChange: (valu
 export function Panel({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
   // 編集画面に置かれているときだけ、見出しを掴んでパネルごと動かせる。
   const grip = useDockGrip();
+  // 重ねてタブになっているときは、名前はタブ側に出ている。
+  // ここでもう一度出すと同じ文字が 2 行並ぶので、操作ボタンだけを残す。
+  const showHead = !grip?.grouped || !!action;
+
   return (
     <section className={`panel${grip?.dragging ? ' dragging' : ''}`}>
-      <header
-        className={`panel-head${grip ? ' grabbable' : ''}`}
-        onPointerDown={grip?.onPointerDown}
-        title={grip ? 'ドラッグで配置を変更' : undefined}
-      >
-        <h2>{title}</h2>
-        {action}
-      </header>
+      {showHead && (
+        <header
+          className={`panel-head${grip ? ' grabbable' : ''}${grip?.grouped ? ' in-group' : ''}`}
+          onPointerDown={grip?.onPointerDown}
+          title={grip ? 'ドラッグで移動（他のパネルの見出しへ重ねるとタブになります）' : undefined}
+        >
+          {!grip?.grouped && <h2>{title}</h2>}
+          {/* 操作ボタンは右端にまとめる。見出しとの間の余白が、掴むための場所になる。 */}
+          <div className="panel-head-tail">
+            {action}
+            {grip && !grip.grouped && (
+              <button type="button" className="panel-close" aria-label={`${title} を仕舞う`} onClick={grip.hide}>
+                ×
+              </button>
+            )}
+          </div>
+        </header>
+      )}
       <div className="panel-body">{children}</div>
     </section>
   );

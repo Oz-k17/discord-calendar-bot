@@ -117,18 +117,27 @@ function TimelinePanel({
   return (
     <section className={`panel timeline-panel${grip?.dragging ? ' dragging' : ''}`}>
       <header
-        className={`panel-head${grip ? ' grabbable' : ''}`}
+        className={`panel-head${grip ? ' grabbable' : ''}${grip?.grouped ? ' in-group' : ''}`}
         onPointerDown={grip?.onPointerDown}
-        title={grip ? 'ドラッグで配置を変更' : undefined}
+        title={grip ? 'ドラッグで移動（他のパネルの見出しへ重ねるとタブになります）' : undefined}
       >
-        <h2>タイムライン</h2>
-        <div className="panel-actions">
-          <button type="button" onClick={onAddText}>
-            ＋ テロップ
-          </button>
-          <button type="button" onClick={onSplit}>
-            ✂ 分割
-          </button>
+        {/* 重ねてタブになっているときは、名前はタブ側に出ている。 */}
+        {!grip?.grouped && <h2>タイムライン</h2>}
+        {/* ボタンは右端にまとめる。見出しとの間の余白が、掴むための場所になる。 */}
+        <div className="panel-head-tail">
+          <div className="panel-actions">
+            <button type="button" onClick={onAddText}>
+              ＋ テロップ
+            </button>
+            <button type="button" onClick={onSplit}>
+              ✂ 分割
+            </button>
+          </div>
+          {grip && !grip.grouped && (
+            <button type="button" className="panel-close" aria-label="タイムラインを仕舞う" onClick={grip.hide}>
+              ×
+            </button>
+          )}
         </div>
       </header>
       <MultiTimeline pps={pps} setPps={setPps} onPickTransition={onPickTransition} />
