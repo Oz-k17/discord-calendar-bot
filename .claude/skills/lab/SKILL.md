@@ -18,9 +18,31 @@ description: ViViD Edit の lab/（試作置き場）を 1 回ぶん前へ進め
 - 作業ディレクトリ: `/home/user/discord-calendar-bot`
 - ブランチ: `claude/short-form-video-editor-o8oabn`
 - リモートは 2 つあり、**両方に push** します:
-  - `origin` → `claude/short-form-video-editor-o8oabn`
+  - `origin` → `claude/short-form-video-editor-o8oabn`（**こちらが本命**）
   - `vivid` → `main`（`git push vivid HEAD:main`）
 - `node_modules` が無ければ先に `npm install` してください。
+
+### push できるかを、作業を始める前に確かめる
+
+自動起動のセッションは、リポジトリを**読めても push できないことがあります**
+（git プロキシが押し先の無いセッションを弾く）。これに気づかないまま進めると、
+20 分かけた作業が最後に丸ごと消えます。実際に 2026-09-08〜09-10 の自動実行 3 回ぶんが
+そうやって失われました。
+
+なので **いちばん最初に**、空でよいので push が通ることを確かめてください:
+
+```
+cd /home/user/discord-calendar-bot
+git fetch origin claude/short-form-video-editor-o8oabn && git status
+git push --dry-run origin HEAD:claude/short-form-video-editor-o8oabn
+```
+
+`--dry-run` が **通らなかったら、そこで作業を始めないでください。**
+何を作っても残らないので、時間の無駄になります。代わりに、
+
+- エラー文をそのまま添えて、**「push できないので今回は作業していません」と報告して終わる。**
+
+これが正しい終わり方です。黙って作業を進めて消すより、ずっと役に立ちます。
 
 ## 最初にやること（必ず）
 
@@ -79,8 +101,14 @@ push する前に、自分の差分を**粗探しするつもりで読み直し�
    - **測った数字**（効きに関わる変更をしたなら、前後を並べて）
    - **やってみて分かったこと・うまくいかなかったこと**（必ず 1 行以上。次の回の自分にとっていちばん価値があるのはここです）
    - 積み残し（あれば）
-4. commit して `origin` と `vivid` の両方へ push する。
+4. commit して `origin` へ push する。続けて `vivid` へも試す。
+   - **`origin` への push が本命です。** ここが通らなければ、その回の成果は残りません。
+   - `vivid` が通らなかった場合は、それだけを報告に書いて終わってよいです
+     （`origin` に残っていれば、後から人が同期できます）。
 5. 何をやって、何が分かって、次に何をやるとよさそうかを、日本語で短く報告する。
+   **`origin` への push が通らなかったときは、報告の 1 行目に必ず
+   「push できていません」と書いてください。** ここを濁されると、
+   何日も失敗に気づけません（実際に 3 日気づけませんでした）。
 
 うまく進まなかった回は、それも正直に記録して push してください。
 「これを試したが駄目だった」という記録も、次の回の判断材料になります。
