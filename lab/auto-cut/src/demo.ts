@@ -224,6 +224,7 @@ function refreshCut() {
       padding: Number($<HTMLInputElement>('padding').value),
     },
     voice.features.speechScore,
+    voice.features.shapeChange,
   );
 
   $<HTMLOutputElement>('out-sensitivity').textContent = Number($<HTMLInputElement>('sensitivity').value).toFixed(2);
@@ -247,9 +248,13 @@ function refreshCut() {
   // 決めるのは人に任せて、材料を出すだけにしている。
   const warning = $<HTMLParagraphElement>('cut-warning');
   if (plan.noSpeechFound) {
+    // 同じ「何もしない」でも、理由によって次にすべきことが違う。
     warning.textContent =
-      '声らしいところが見つからなかったので、何もしていません。' +
-      '音楽だけの素材ではありませんか？（切りたいなら「音量だけ」で試してください）';
+      plan.noSpeechReason === 'shape'
+        ? '音の中身が最初から最後まで変わりません。鳴りっぱなしの音楽ではありませんか？ ' +
+          '声だと思うなら「音量だけ」で試してください。'
+        : '声らしいところが見つからなかったので、何もしていません。' +
+          '音楽だけの素材ではありませんか？（切りたいなら「音量だけ」で試してください）';
     warning.hidden = false;
   } else if (plan.usedMode === 'speech' && plan.speechRatio < 0.5) {
     warning.textContent =

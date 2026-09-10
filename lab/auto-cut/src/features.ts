@@ -27,6 +27,15 @@ export interface FeatureTrack {
   flatness: Float32Array;
   /** 1 コマ前からのスペクトルの変化量。子音や打撃で跳ねる。 */
   flux: Float32Array;
+  /**
+   * スペクトルの**形**の変化量（0〜1）。
+   *
+   * `flux` との違いは、比べる前にスペクトルを自分の合計で割っていること。
+   * こうすると**音量が何倍になっても値が変わらない**ので、
+   * 「音量だけが揺れている」音（トレモロやビブラートのかかった楽器）には反応しない。
+   * 人がしゃべると母音が移り変わってスペクトルの形そのものが動くので、そこで差が出る。
+   */
+  shapeFlux: Float32Array;
   /** 声の帯域（300〜3400Hz）が全体に占める割合。 */
   voiceBand: Float32Array;
   /** ゼロ交差率。高いほど雑音的・高域寄り。 */
@@ -36,12 +45,31 @@ export interface FeatureTrack {
   /** 音色の尖り具合（= 1 - flatness）。声や楽音で高く、雑音や打撃で低い。 */
   tone: Float32Array;
   /**
+   * `shapeFlux` を 0.15 秒で均したもの。**素材が声を含むかを判断するのに使う。**
+   *
+   * コマごとの声らしさ（`speechScore`）には掛けない。掛けると乾いた録音で声を切る:
+   * 背景のほとんど無い素材だと、発話の最中の形の変化は 0.011〜0.046 までしか上がらず、
+   * 震える楽器（0.071 まで）より下に来てしまうため、両者を隔てる線が引けない
+   * （試して測ったが駄目だった。詳しくは JOURNAL の 2026-09-10）。
+   *
+   * **素材の中の最大値**で見るなら話が別で、そこには 2 倍の開きがある。
+   * 声のある素材はどこかで必ず形が動く（語頭・語尾・母音の移り変わり）のに対し、
+   * 鳴りっぱなしの音楽はどこにもそういう瞬間が無い。silence.ts はそちらを使う。
+   */
+  shapeChange: Float32Array;
+  /**
    * 声らしさ。揺れの速さ（modulation）と音色の尖り具合（tone）の積。
    *
    * 片方だけでは足りないことが probe.mjs で分かったので掛け合わせている。
    * - modulation は BGM が大きい素材でよく効くが、声と同じ速さで刻む打楽器には無力
    * - tone は打楽器をきれいに弾くが、BGM が大きいと鈍る
    * 互いの穴が重ならないので、積を取ると両方でそこそこ効く。
+   *
+   * **ただし、この 2 つだけでは原理的に破れる。** 声らしさの定義が
+   * 「音程のある音が音節の速さで揺れている」なので、音程のある楽器を
+   * 同じ速さで震わせると、声が 1 つも無いのに満点が出る
+   * （`music-tremolo.wav` は中央値 0.896 で、本物の声のどれよりも高い）。
+   * ここはコマ単位では塞げなかったので、素材単位で `shapeChange` を見て弾く。
    */
   speechScore: Float32Array;
 }
@@ -67,6 +95,30 @@ const F0_HIGH = 320;
  * なお平均で均すと端が引きずられて逆に悪化した（0.25s で 71%）。最大値で谷だけを埋める。
  */
 const SCORE_SMOOTH = 0.1;
+/**
+ * 形の変化を均す窓の長さ（秒）。
+ * 1 コマの値は行ったり来たりするので、そのまま比べると折り返し点を掴む。
+ * 「この辺りが動いているか」を見たいので、谷を埋める最大値ではなく平均で均す。
+ */
+const SHAPE_SMOOTH = 0.15;
+
+/** 窓の中の平均。均一に均すので、山も谷も同じだけ動く。 */
+function smoothMean(values: Float32Array, halfWidth: number): Float32Array {
+  if (halfWidth < 1) return values;
+  const out = new Float32Array(values.length);
+  for (let i = 0; i < values.length; i += 1) {
+    let sum = 0;
+    let count = 0;
+    for (let k = -halfWidth; k <= halfWidth; k += 1) {
+      const j = i + k;
+      if (j < 0 || j >= values.length) continue;
+      sum += values[j];
+      count += 1;
+    }
+    out[i] = count > 0 ? sum / count : 0;
+  }
+  return out;
+}
 
 /** 窓の中の最大値で埋める。谷を埋めるが、山（＝声のある所）は削らない。 */
 function smooth(values: Float32Array, halfWidth: number): Float32Array {
@@ -161,9 +213,14 @@ function harmonicityOf(mag: Float64Array, binHz: number): number {
 export interface FeatureOptions {
   /** 声らしさの谷を埋める窓の長さ（秒）。0 で無効。 */
   smoothSeconds: number;
+  /** 形の変化を均す窓の長さ（秒）。0 で無効。 */
+  shapeSmoothSeconds: number;
 }
 
-export const DEFAULT_FEATURES: FeatureOptions = { smoothSeconds: SCORE_SMOOTH };
+export const DEFAULT_FEATURES: FeatureOptions = {
+  smoothSeconds: SCORE_SMOOTH,
+  shapeSmoothSeconds: SHAPE_SMOOTH,
+};
 
 export function analyzeFeatures(
   buffer: AudioLike,
@@ -180,6 +237,7 @@ export function analyzeFeatures(
   const centroid = new Float32Array(frames);
   const flatness = new Float32Array(frames);
   const flux = new Float32Array(frames);
+  const shapeFlux = new Float32Array(frames);
   const voiceBand = new Float32Array(frames);
   const zcr = new Float32Array(frames);
   const harmonicity = new Float32Array(frames);
@@ -194,6 +252,9 @@ export function analyzeFeatures(
   };
 
   const previous = new Float64Array(scratch.mag.length);
+  // 形の比較用。合計で割ったものを別に持つ（previous は生の大きさなので使い回せない）。
+  const previousShape = new Float64Array(scratch.mag.length);
+  let hasPreviousShape = false;
   const lowBin = Math.round(300 / binHz);
   const highBin = Math.min(scratch.mag.length - 1, Math.round(3400 / binHz));
 
@@ -233,6 +294,23 @@ export function analyzeFeatures(
       previous[b] = m;
     }
 
+    // 形の変化。合計で割ってから比べるので、音量倍率はここで消える。
+    // 差の合計は最大 2（全部入れ替わったとき）なので、2 で割って 0〜1 に収める。
+    if (sum > 0) {
+      let shapeDiff = 0;
+      if (hasPreviousShape) {
+        for (let b = 1; b < mag.length; b += 1) shapeDiff += Math.abs(mag[b] / sum - previousShape[b]);
+      }
+      for (let b = 1; b < mag.length; b += 1) previousShape[b] = mag[b] / sum;
+      hasPreviousShape = true;
+      shapeFlux[i] = shapeDiff / 2;
+    } else {
+      // 無音を挟んだら「前のコマ」は無かったことにする。
+      // 繋げて比べると、鳴り始めの 1 コマだけが巨大な変化になってしまう。
+      hasPreviousShape = false;
+      shapeFlux[i] = 0;
+    }
+
     centroid[i] = sum > 0 ? weighted / sum : 0;
     // 平坦さ＝幾何平均 ÷ 算術平均。雑音なら 1 に近づき、音程があると 0 に近づく。
     flatness[i] = sum > 0 ? Math.exp(logSum / counted) / (sum / counted) : 0;
@@ -251,6 +329,7 @@ export function analyzeFeatures(
   // 人がしゃべっている間は続けてしゃべっている。1 コマだけ下がったからといって
   // そこで切ると、語中で切り刻むことになる。少し均してから使う。
   const speechScore = smooth(raw, Math.round(opts.smoothSeconds / track.hop));
+  const shapeChange = smoothMean(shapeFlux, Math.round(opts.shapeSmoothSeconds / track.hop));
 
   return {
     hop: track.hop,
@@ -261,10 +340,12 @@ export function analyzeFeatures(
     centroid,
     flatness,
     flux,
+    shapeFlux,
     voiceBand,
     zcr,
     harmonicity,
     tone,
+    shapeChange,
     speechScore,
   };
 }
@@ -275,6 +356,7 @@ export const FEATURE_NAMES = [
   'modulation',
   'flatness',
   'tone',
+  'shapeFlux',
   'centroid',
   'zcr',
   'harmonicity',

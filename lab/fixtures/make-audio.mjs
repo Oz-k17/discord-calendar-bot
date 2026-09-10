@@ -60,9 +60,22 @@ function writeWav(name, samples) {
 /**
  * 声らしい音。倍音を重ねたうえで、音節くらいの速さで音量を揺らす。
  * 本物の声ではないが、「鳴っている／黙っている」を見分ける処理を試すには足りる。
+ *
+ * `vowel` を真にすると、音節ごとに倍音の重みを行き来させる（母音が移り変わる）。
+ * **既定を偽のままにしてあるのは、既存の素材を 1 ビットも変えないため。**
+ * 種を固定してある意味が無くなり、記録に残した過去の数字と比べられなくなる。
+ *
+ * なお、`vowel` が偽のときのこの音は、発話中ずっと倍音の重みも f0 も変わらない。
+ * **つまりスペクトルの形は動かず、トレモロのかかった楽器と同じ形をしている。**
+ * 「声とは何か」を模した音としては、そこが抜けている。
  */
-function speak(data, from, to, level, random) {
+function speak(data, from, to, level, random, vowel = false) {
   const f0 = 120 + random() * 40;
+  // 「あ」と「い」のつもりの倍音の重み。
+  const shapes = [
+    [1, 0.6, 0.35, 0.2],
+    [1, 0.15, 0.7, 0.5],
+  ];
   for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
     const t = i / SR;
     const local = t - from;
@@ -70,6 +83,17 @@ function speak(data, from, to, level, random) {
     const syllable = 0.55 + 0.45 * Math.sin(2 * Math.PI * 4.2 * local);
     const fade = Math.min(1, local / 0.05, (to - from - local) / 0.08);
     const env = level * syllable * Math.max(0, fade);
+    if (vowel) {
+      // 音節と同じ速さで、2 つの母音の間を行き来する。
+      const blend = 0.5 + 0.5 * Math.sin(2 * Math.PI * 4.2 * local + Math.PI / 2);
+      let v = 0;
+      for (let h = 0; h < shapes[0].length; h += 1) {
+        const weight = shapes[0][h] * (1 - blend) + shapes[1][h] * blend;
+        v += weight * Math.sin(2 * Math.PI * f0 * (h + 1) * t);
+      }
+      data[i] += env * v * 0.28;
+      continue;
+    }
     data[i] +=
       env *
       (Math.sin(2 * Math.PI * f0 * t) +
@@ -80,16 +104,26 @@ function speak(data, from, to, level, random) {
   }
 }
 
-/** 音楽らしい音。和音が一定の音量で鳴り続けるので、しきい値方式には手強い。 */
-function music(data, from, to, level) {
+/**
+ * 音楽らしい音。和音が一定の音量で鳴り続けるので、しきい値方式には手強い。
+ *
+ * `tremolo` に周波数を渡すと、その速さで音量を揺らす。
+ * これは **わざと意地悪な素材** を作るためのもの。声らしさを
+ * 「音程がある（tone）× 音節の速さで揺れる（modulation）」で測っているので、
+ * 音程のある楽器を音節と同じ速さで震わせると、声が 1 つも無いのに
+ * 声らしさが高く出てしまう。この抜け道を塞げているかを確かめるために要る。
+ */
+function music(data, from, to, level, tremolo = 0) {
   const chord = [220, 277.18, 329.63, 440];
   for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
     const t = i / SR;
     // 2 秒周期で少し揺らして、まったくの定常にならないようにする。
     const swell = 0.85 + 0.15 * Math.sin(2 * Math.PI * 0.5 * t);
+    // ビブラート気味に深く揺らす。声の音節（4.2Hz）と同じ帯域を狙う。
+    const shake = tremolo ? 0.55 + 0.45 * Math.sin(2 * Math.PI * tremolo * t) : 1;
     let v = 0;
     for (const f of chord) v += Math.sin(2 * Math.PI * f * t);
-    data[i] += (level * swell * v) / chord.length;
+    data[i] += (level * swell * shake * v) / chord.length;
   }
 }
 
@@ -123,20 +157,23 @@ function makeShort(
     sparse = false,
     bgm = false,
     bgmLevel = 0.12,
+    bgmTremolo = 0,
     beat = 0,
     beatLevel = 0.25,
     noiseLevel = 0.002,
     speechLevel = 0.5,
+    vowel = false,
     seed = 1,
   },
 ) {
   const random = rng(seed);
   const data = new Float32Array(Math.round(SHORT_LENGTH * SR));
   noise(data, noiseLevel, random);
-  if (bgm) music(data, 0, SHORT_LENGTH, bgmLevel);
+  if (bgm) music(data, 0, SHORT_LENGTH, bgmLevel, bgmTremolo);
   if (beat) drums(data, 0, SHORT_LENGTH, beatLevel, beat, random);
   if (speech) {
-    for (const [from, to] of sparse ? SPARSE_UTTERANCES : UTTERANCES) speak(data, from, to, speechLevel, random);
+    for (const [from, to] of sparse ? SPARSE_UTTERANCES : UTTERANCES)
+      speak(data, from, to, speechLevel, random, vowel);
   }
   return writeWav(name, data);
 }

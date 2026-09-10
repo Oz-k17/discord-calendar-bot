@@ -66,6 +66,31 @@ export const SHORT_FIXTURES = [
     options: { speech: false, beat: 4, noiseLevel: 0.0005, seed: 8 },
   },
   {
+    name: 'music-tremolo.wav',
+    note: '声と同じ速さで震える楽器だけ（声は無い）',
+    speech: false,
+    hard: true,
+    options: { speech: false, bgm: true, bgmLevel: 0.3, bgmTremolo: 4.5, noiseLevel: 0.0005, seed: 10 },
+  },
+  {
+    // 「形の変化」で判定する手を潰しにいく素材。背景がほとんど無いので、
+    // 声が背景と混ざる効果に頼っていると、ここで声を見失う。
+    name: 'speech-dry.wav',
+    note: '背景がほぼ無い、乾いた声だけ',
+    speech: true,
+    hard: true,
+    options: { noiseLevel: 0.00002, seed: 11 },
+  },
+  {
+    // 上と同じ乾いた録音だが、声が母音を移り変わらせる（本物の声に近い）。
+    // 上で見失うのが「乾いているから」なのか「声の作りが平板だから」なのかを分ける。
+    name: 'speech-dry-vowel.wav',
+    note: '乾いた声だけ・母音が移り変わる',
+    speech: true,
+    hard: true,
+    options: { noiseLevel: 0.00002, vowel: true, seed: 12 },
+  },
+  {
     name: 'speech-sparse-bgm.wav',
     note: 'BGM の上でたまにしゃべるだけ（20%）',
     speech: true,

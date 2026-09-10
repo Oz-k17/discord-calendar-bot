@@ -19,6 +19,7 @@ import { isSpeechAt, SHORT_FIXTURES } from '../fixtures/spec.mjs';
 
 const { analyzeLoudness } = await import('./src/loudness.ts');
 const { analyzeFeatures, FEATURE_NAMES } = await import('./src/features.ts');
+const { autoThresholdDb } = await import('./src/silence.ts');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const out = path.join(root, 'lab/fixtures/out');
@@ -128,6 +129,40 @@ console.log(`${pad('  平均', 22)}${average}`);
   console.log(`対象コマ: 声 ${samples.positive.length} / それ以外 ${samples.negative.length}（無音は除外）`);
 }
 
-console.log('\n※ は意地悪な素材（BGM が大きい / 声と同じ速さで刻む打楽器）。');
-console.log('声の無い素材（bgm・drums）は「声のコマ」が無いので測れない（—）。');
+// --- 声の無い素材は AUC では測れない ---
+// AUC は「声のコマ」と「それ以外のコマ」を比べる指標なので、声が 1 つも無い素材は
+// 上の表では — になる。**守りたいのはまさにそこ**（音楽だけの素材を切り刻まないこと）
+// なので、別の見方で並べる。声らしさをそのまま信じるとどれだけ誤るか、と、
+// 形の動きでそれを弾けるか。
+{
+  console.log('\n声の無い素材で、どれだけ誤って「声だ」と言うか\n');
+  console.log(`${pad('素材', 22)}${pad('声らしいコマの割合', 20)}${pad('形が動いた秒数', 16)}`);
+  console.log('-'.repeat(58));
+  for (const fixture of SHORT_FIXTURES) {
+    if (fixture.speech) continue;
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track);
+    const threshold = autoThresholdDb(track, 0.25);
+    let sounding = 0;
+    let speechLike = 0;
+    let moving = 0;
+    for (let i = 0; i < track.db.length; i += 1) {
+      if (track.db[i] <= threshold) continue;
+      sounding += 1;
+      if (features.speechScore[i] >= 0.2) speechLike += 1;
+      if (features.shapeChange[i] >= 0.09) moving += 1;
+    }
+    const ratio = sounding > 0 ? speechLike / sounding : 0;
+    console.log(
+      `${pad('※ ' + fixture.name, 22)}${pad(`${(ratio * 100).toFixed(0)}%`, 20)}${pad(`${(moving * track.hop).toFixed(2)} 秒`, 16)}`,
+    );
+  }
+  console.log('割合が高いのに形が動かない素材は、声らしさだけでは弾けない（震える楽器がそれ）。');
+}
+
+console.log('\n※ は意地悪な素材（BGM が大きい / 声と同じ速さで刻む打楽器 / 震える楽器）。');
+console.log('声の無い素材（bgm・drums・music-tremolo）は「声のコマ」が無いので AUC では測れない（—）。');
 console.log('0.5 を下回るのは「逆向きに効いている」という意味で、それはそれで使える。');

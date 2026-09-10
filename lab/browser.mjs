@@ -8,6 +8,7 @@
  */
 
 import { execSync, spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import path from 'node:path';
@@ -51,8 +52,16 @@ export function freePort() {
  */
 export async function serve(root, { timeoutMs = 40000 } = {}) {
   const port = await freePort();
-  const child = spawn('npx', ['vite', root, '--port', String(port), '--strictPort'], {
+  // npx を挟まず node_modules の vite を直に起動する。
+  // npx 経由だと、こちらが kill できるのは npx の側だけで、その下の vite が
+  // 残ってしまい、確認そのものは全部通っているのにコマンドが終わらない。
+  const bin = path.join(process.cwd(), 'node_modules', '.bin', 'vite');
+  const command = fs.existsSync(bin) ? bin : 'npx';
+  const args = command === 'npx' ? ['vite'] : [];
+  const child = spawn(command, [...args, root, '--port', String(port), '--strictPort'], {
     stdio: ['ignore', 'pipe', 'pipe'],
+    // それでも孫が残ることがあるので、まとめて畳めるように別の集団にしておく。
+    detached: true,
   });
   const url = `http://127.0.0.1:${port}/`;
 
@@ -72,7 +81,17 @@ export async function serve(root, { timeoutMs = 40000 } = {}) {
     });
   });
 
-  return { url, stop: () => child.kill() };
+  return {
+    url,
+    stop: () => {
+      // 集団ごと落とす。駄目なら単体で。
+      try {
+        process.kill(-child.pid, 'SIGTERM');
+      } catch {
+        child.kill();
+      }
+    },
+  };
 }
 
 /** swiftshader 指定は、GPU の無い環境でも canvas が描けるようにするため。 */

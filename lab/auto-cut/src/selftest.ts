@@ -17,7 +17,13 @@ export interface TestResult {
   detail: string;
 }
 
-/** 音量が指定の速さで揺れる音。声の音節らしさを模す。 */
+/**
+ * 音量だけが指定の速さで揺れる、単一の音程の音。
+ *
+ * もとは「声の音節らしさを模したもの」として置いていたが、**それは間違いだった**。
+ * 中身は音程が変わらないままトレモロがかかった楽器で、声ではない。
+ * いまは「音量は声のように揺れるが、声ではないもの」の代表として使っている。
+ */
 function makeModulated(seconds: number, sampleRate: number, hz: number, amp = 0.5): AudioLike {
   const length = Math.round(seconds * sampleRate);
   const data = new Float32Array(length);
@@ -25,6 +31,42 @@ function makeModulated(seconds: number, sampleRate: number, hz: number, amp = 0.
     const t = i / sampleRate;
     const env = 0.55 + 0.45 * Math.sin(2 * Math.PI * hz * t);
     data[i] = amp * env * Math.sin(2 * Math.PI * 200 * t);
+  }
+  return { sampleRate, numberOfChannels: 1, length, getChannelData: () => data };
+}
+
+/**
+ * 声らしい音。音節の速さで揺れ、**かつ音色が移り変わる**。
+ *
+ * 母音が移ると倍音の並び方が変わる、というところまで模している。
+ * ここを模さないと「震える楽器」と区別が付かない
+ * （実際、区別できないまま `music-tremolo.wav` に満点を出していた）。
+ */
+function makeSpeechLike(seconds: number, sampleRate: number, hz = 4, amp = 0.5): AudioLike {
+  const length = Math.round(seconds * sampleRate);
+  const data = new Float32Array(length);
+  // 「あ」と「い」のつもりの倍音の重みを、音節と同じ速さで行き来させる。
+  //
+  // 速さも差の大きさも、両方いる。跳ばして切り替えると形の変化がその瞬間だけの棘になり、
+  // ゆっくり移すと 1 コマあたりの差が小さくなって、どちらも「動いていない」に見える。
+  // 差が小さいときも同じで、4 倍音で 0.7→0.15 程度だと形の変化が 0.057 までしか
+  // 上がらず、震える楽器（0.026）と見分けられる域に届かなかった。
+  const vowels = [
+    [1, 0.8, 0.3, 0.1, 0.05, 0.02],
+    [0.2, 0.1, 0.4, 0.8, 0.7, 0.4],
+  ];
+  for (let i = 0; i < length; i += 1) {
+    const t = i / sampleRate;
+    const env = 0.55 + 0.45 * Math.sin(2 * Math.PI * hz * t);
+    // 母音は音節と同じ速さで移る。ここを遅くすると 1 コマあたりの形の差が
+    // 小さくなり、「連続して動いているのに動いていないように見える」ことになる。
+    const blend = 0.5 + 0.5 * Math.sin(2 * Math.PI * hz * t + Math.PI / 2);
+    let v = 0;
+    for (let h = 0; h < vowels[0].length; h += 1) {
+      const weight = vowels[0][h] * (1 - blend) + vowels[1][h] * blend;
+      v += weight * Math.sin(2 * Math.PI * 200 * (h + 1) * t);
+    }
+    data[i] = (amp * env * v) / 2;
   }
   return { sampleRate, numberOfChannels: 1, length, getChannelData: () => data };
 }
@@ -175,11 +217,110 @@ export function runSelfTest(): TestResult[] {
     const noiseFeatures = analyzeFeatures(noiseBuffer, analyzeLoudness(noiseBuffer, 0.02));
     check('音程のある音は尖っている', mid(toneFeatures.tone) > 0.9, mid(toneFeatures.tone).toFixed(3));
     check('雑音は平坦', mid(noiseFeatures.tone) < mid(toneFeatures.tone) - 0.1, mid(noiseFeatures.tone).toFixed(3));
+
+    // 形の変化は行ったり来たりする量なので、1 コマだけで比べると
+    // たまたま折り返し点（変化がいちばん小さい所）を掴んで結論が変わる。
+    // 真ん中あたりを均して見る。
+    const midMean = (a: Float32Array) => {
+      const from = Math.floor(a.length * 0.25);
+      const to = Math.max(from + 1, Math.ceil(a.length * 0.75));
+      let sum = 0;
+      for (let i = from; i < to; i += 1) sum += a[i];
+      return sum / (to - from);
+    };
+
+    // --- 形の変化（音量倍率に不変であること） ---
+    // ここが不変でないと、音量が揺れているだけの音を「中身が動いている」と誤る。
+    const loud = makeSpeechLike(2, sr, 4, 0.5);
+    const soft = makeSpeechLike(2, sr, 4, 0.125);
+    const loudShape = midMean(analyzeFeatures(loud, analyzeLoudness(loud, 0.02)).shapeFlux);
+    const softShape = midMean(analyzeFeatures(soft, analyzeLoudness(soft, 0.02)).shapeFlux);
     check(
-      '声らしさは「揺れる音程のある音」でいちばん高い',
+      '形の変化は音量を 1/4 にしても変わらない',
+      Math.abs(loudShape - softShape) < 0.01,
+      `${loudShape.toFixed(4)} vs ${softShape.toFixed(4)}`,
+    );
+    // 音程が変わらないままトレモロがかかった音は、音量が揺れていても形は（ほとんど）動かない。
+    // ぴったり 0 にならないのは、窓の中で包絡が動くぶんの側帯波が出るため。
+    check(
+      '音量だけ揺れる音では形がほとんど動かない',
+      midMean(toneFeatures.shapeFlux) < 0.04,
+      midMean(toneFeatures.shapeFlux).toFixed(4),
+    );
+    const speechBuffer = makeSpeechLike(2, sr, 4);
+    const speechFeatures = analyzeFeatures(speechBuffer, analyzeLoudness(speechBuffer, 0.02));
+    check(
+      '音色が移り変わる音では形が動く',
+      midMean(speechFeatures.shapeFlux) > midMean(toneFeatures.shapeFlux) + 0.02,
+      `${midMean(speechFeatures.shapeFlux).toFixed(4)} > ${midMean(toneFeatures.shapeFlux).toFixed(4)}`,
+    );
+
+    // --- 声らしさ ---
+    check(
+      '声らしさは「揺れる音程のある音」で高い',
       mid(toneFeatures.speechScore) > mid(noiseFeatures.speechScore),
       `${mid(toneFeatures.speechScore).toFixed(3)} > ${mid(noiseFeatures.speechScore).toFixed(3)}`,
     );
+    // **ここが今回いちばん大事な検算。**
+    // 震える楽器は声ではないのに、声らしさ（揺れの速さ × 音色の尖り）では
+    // 本物の声と同じかそれ以上に見える。だから声らしさだけでは弾けない。
+    check(
+      '震える楽器は、声らしさだけでは声と見分けられない',
+      mid(toneFeatures.speechScore) >= mid(speechFeatures.speechScore) * 0.9,
+      `震える楽器 ${mid(toneFeatures.speechScore).toFixed(3)} / 声 ${mid(speechFeatures.speechScore).toFixed(3)}`,
+    );
+
+    // --- 素材単位で「形がどこでも動かないもの」を弾く ---
+    {
+      // 震える楽器だけの素材。声らしさは満点に近いが、形はどこでも動かない。
+      const tremoloTrack = analyzeLoudness(toneBuffer, 0.02);
+      const tremoloPlan = planJetCut(
+        tremoloTrack,
+        { mode: 'speech' },
+        toneFeatures.speechScore,
+        toneFeatures.shapeChange,
+      );
+      check('震える楽器だけの素材では何もしない', tremoloPlan.noSpeechFound, `削った ${tremoloPlan.removed.toFixed(2)} 秒`);
+      check('その理由が「形が動かない」と分かる', tremoloPlan.noSpeechReason === 'shape', String(tremoloPlan.noSpeechReason));
+      check(
+        'そのとき声らしさ自体は高いままである（割合では弾けていない）',
+        tremoloPlan.speechRatio > 0.5,
+        tremoloPlan.speechRatio.toFixed(3),
+      );
+      // 形の列を渡さなければ、形では判断しない。渡されないものを
+      // 「動いていない」と読むと、既存の呼び出しが軒並み何もしなくなる。
+      const withoutShape = planJetCut(tremoloTrack, { mode: 'speech' }, toneFeatures.speechScore);
+      check('形の列を渡さなければ形では判断しない', !withoutShape.noSpeechFound, '');
+
+      // 短い素材でも音楽は弾く（必要量を尺に比例させたせいで通ってしまわないこと）。
+      const shortTone = makeModulated(1, sr, 4);
+      const shortTrack = analyzeLoudness(shortTone, 0.02);
+      const shortFeatures = analyzeFeatures(shortTone, shortTrack);
+      const shortPlan = planJetCut(
+        shortTrack,
+        { mode: 'speech' },
+        shortFeatures.speechScore,
+        shortFeatures.shapeChange,
+      );
+      check('1 秒の震える楽器でも何もしない', shortPlan.noSpeechFound, String(shortPlan.noSpeechReason));
+
+      // 逆に、短い素材で声を弾かないこと。固定の 0.5 秒だけで見ていたときは、
+      // 3 秒に切り詰めた乾いた録音で声を弾いてしまっていた。
+      const shortSpeech = makeSpeechLike(3, sr, 4);
+      const shortSpeechTrack = analyzeLoudness(shortSpeech, 0.02);
+      const shortSpeechFeatures = analyzeFeatures(shortSpeech, shortSpeechTrack);
+      const shortSpeechPlan = planJetCut(
+        shortSpeechTrack,
+        { mode: 'speech' },
+        shortSpeechFeatures.speechScore,
+        shortSpeechFeatures.shapeChange,
+      );
+      check(
+        '3 秒の声では弾かない',
+        !shortSpeechPlan.noSpeechFound,
+        `形が動いた ${shortSpeechPlan.shapeSeconds.toFixed(2)} 秒`,
+      );
+    }
 
     // speech モードは、声らしさの列を渡さなければ level へ落ちる。黙って落ちないこと。
     const plain = analyzeLoudness(makeTone(3, sr, [{ from: 1, to: 2 }]), 0.02);

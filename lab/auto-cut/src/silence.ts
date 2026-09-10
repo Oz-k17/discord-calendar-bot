@@ -61,9 +61,54 @@ export interface JetCutOptions {
    * 高くすると、本当に声の入っている素材で何もしなくなる。
    * ここでは誰が見ても声の無い場合（打楽器だけ = 0%）だけを拾い、
    * 判断に迷う範囲は `speechRatio` として返して呼ぶ側に任せる。
+   *
+   * この割合で拾えない代表が「鳴りっぱなしの音楽」で、そちらは
+   * 下の `minShapeChange` / `minShapeSeconds` で見る。
    */
   minSpeechRatio: number;
+  /**
+   * 「スペクトルの形が動いた」とみなす下限（`FeatureTrack.shapeChange` の値）。
+   *
+   * 声らしさ（modulation × tone）は「音程のある音が音節の速さで揺れている」だけを見るので、
+   * 音程のある楽器を同じ速さで震わせると、声が 1 つも無いのに満点が出る。
+   * 割合でも弾けない（`music-tremolo.wav` は 100%）。
+   *
+   * そこで**別の性質**を見る。形の変化はスペクトルを自分の合計で割ってから比べるので、
+   * **音量が何倍になっても動かない**。トレモロは音量が変わっているだけなので反応しない。
+   * 一方、声のある素材はどこかで必ず形が動く（語頭・語尾・母音の移り変わり）。
+   */
+  minShapeChange: number;
+  /**
+   * 形が動いた時間がこれに満たなければ、声の入っていない素材とみなす（秒）。
+   *
+   * **素材の中の最大値ではなく「長さ」で見る**のは、1 コマの外れ値で決めないため。
+   * コマごとに掛ける門にはできなかった（乾いた録音では発話中の形の変化が
+   * 0.011〜0.046 までしか上がらず、震える楽器の 0.071 より下に来てしまう）。
+   * 素材のどこかに動く瞬間があるかを問うなら、そこには十分な開きがある。
+   *
+   * 実測（鳴っているコマで `shapeChange` が 0.09 以上だった秒数）:
+   *   音楽だけ 0.00 秒 / 震える楽器 0.00 秒
+   *   声のある素材は、いちばん少ない乾いた録音でも 1.78 秒
+   * しきい値 0.075〜0.120・長さ 0.1〜1.0 秒のどこを取っても結論は変わらない。
+   *
+   * ただしこれは**尺の長い素材での話**なので、短い素材では
+   * `SHAPE_SECONDS_OF_DURATION` のぶんまで引き下げる（下の定数を参照）。
+   */
+  minShapeSeconds: number;
 }
+
+/**
+ * 形が動いた時間の下限を、尺に対する割合としても持つ。
+ *
+ * `minShapeSeconds` を固定値だけにすると、**短い素材で本物の声を弾いてしまう**。
+ * 3 秒に切り詰めた `speech-dry.wav` は、声が入っているのに形が動いた時間が
+ * 0.40 秒しかなく、0.5 秒に届かなかった（ショート動画では 3 秒の素材は普通にある）。
+ *
+ * 声のある素材で形が動く時間は、尺の 14〜20% だった（いちばん少ない乾いた録音で 14%）。
+ * 5% はそこから 3 倍近い余裕を取った値。鳴りっぱなしの音楽は尺に関わらず 0 秒なので、
+ * ここを下げても音楽を通すことにはならない。
+ */
+const SHAPE_SECONDS_OF_DURATION = 0.05;
 
 export const DEFAULT_JET_CUT: JetCutOptions = {
   thresholdDb: null,
@@ -75,6 +120,8 @@ export const DEFAULT_JET_CUT: JetCutOptions = {
   speechThreshold: 0.2,
   speechExit: 0.1,
   minSpeechRatio: 0.05,
+  minShapeChange: 0.09,
+  minShapeSeconds: 0.5,
 };
 
 export interface JetCutPlan {
@@ -101,6 +148,17 @@ export interface JetCutPlan {
    * 音楽だけの素材を掛け違えて丸ごと消してしまうより、何もしないほうがよい。
    */
   noSpeechFound: boolean;
+  /**
+   * `noSpeechFound` になった理由。
+   * - `ratio`: 声らしいコマがほとんど無かった（打楽器だけなど）
+   * - `shape`: 声らしくは見えるが、素材のどこでもスペクトルの形が動かなかった
+   *   （鳴りっぱなしの音楽・震える楽器）
+   *
+   * 分けて返すのは、同じ「何もしない」でも次にすべきことが違うため。
+   */
+  noSpeechReason: 'ratio' | 'shape' | null;
+  /** スペクトルの形が動いていた秒数。`shape` の判断の根拠を見せるため。 */
+  shapeSeconds: number;
   /**
    * 鳴っているコマのうち、声らしいと判断できたものの割合（0〜1）。
    * `level` のときは 1。低いときは「声の少ない素材に掛けていないか」を疑う手がかりになる。
@@ -152,11 +210,14 @@ function complement(keep: Range[], duration: number): Range[] {
 /**
  * @param speechScore コマごとの声らしさ（0〜1）。`mode: 'speech'` のときだけ使う。
  *   音そのものを見ないと出せない値なので、features.ts で作って渡してもらう。
+ * @param shapeChange コマごとのスペクトルの形の変化。渡さなければ形での判断はしない
+ *   （渡されないものを「動いていない」と読むと、丸ごと何もしなくなってしまう）。
  */
 export function planJetCut(
   track: LoudnessTrack,
   options: Partial<JetCutOptions> = {},
   speechScore?: Float32Array,
+  shapeChange?: Float32Array,
 ): JetCutPlan {
   const opts = { ...DEFAULT_JET_CUT, ...options };
   const thresholdDb = opts.thresholdDb ?? autoThresholdDb(track, opts.sensitivity);
@@ -169,6 +230,8 @@ export function planJetCut(
   let inSpeech = false;
   let soundingFrames = 0;
   let speechFrames = 0;
+  const useShape = !!shapeChange && shapeChange.length === track.db.length;
+  let shapeFrames = 0;
 
   const loud: Range[] = [];
   for (let i = 0; i < track.db.length; i += 1) {
@@ -177,6 +240,10 @@ export function planJetCut(
       continue;
     }
     soundingFrames += 1;
+    // 形が動いたかは、声らしさの判定とは独立に数える。
+    // 声らしさで絞ってから数えると、震える楽器では「声らしいコマ」が
+    // 全編になるので、動かないことを見つけられなくなる。
+    if (useShape && (shapeChange as Float32Array)[i] >= opts.minShapeChange) shapeFrames += 1;
     if (usedMode === 'speech') {
       // 入る値と出る値を分ける（ヒステリシス）。しゃべっている最中の
       // 一瞬のへこみで切れ目を作らないため。
@@ -192,9 +259,14 @@ export function planJetCut(
   }
 
   const speechRatio = usedMode === 'speech' ? (soundingFrames > 0 ? speechFrames / soundingFrames : 0) : 1;
+  const shapeSeconds = shapeFrames * track.hop;
 
-  // 声が 1 つも見つからなかったら、何もしない。
-  if (usedMode === 'speech' && soundingFrames > 0 && speechRatio < opts.minSpeechRatio) {
+  // 声が 1 つも見つからなかったら、何もしない。理由は 2 通りあり、どちらも
+  // 単独では取りこぼす（割合は音楽を、形は打楽器を見逃す）ので、両方を見る。
+  const lowRatio = soundingFrames > 0 && speechRatio < opts.minSpeechRatio;
+  const needShapeSeconds = Math.min(opts.minShapeSeconds, duration * SHAPE_SECONDS_OF_DURATION);
+  const noShape = useShape && soundingFrames > 0 && shapeSeconds < needShapeSeconds;
+  if (usedMode === 'speech' && (lowRatio || noShape)) {
     const whole = duration > 0 ? [{ start: 0, end: duration }] : [];
     return {
       thresholdDb,
@@ -205,7 +277,9 @@ export function planJetCut(
       removed: 0,
       usedMode,
       noSpeechFound: true,
+      noSpeechReason: lowRatio ? 'ratio' : 'shape',
       speechRatio,
+      shapeSeconds,
     };
   }
 
@@ -223,6 +297,8 @@ export function planJetCut(
     removed: Math.max(0, duration - kept),
     usedMode,
     noSpeechFound: false,
+    noSpeechReason: null,
     speechRatio,
+    shapeSeconds,
   };
 }
