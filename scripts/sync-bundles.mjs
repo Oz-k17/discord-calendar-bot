@@ -4,6 +4,10 @@
  *  - docs/                      … そのまま開ける Web 版。GitHub Pages の公開元にもできる
  *  - ios/ViVidEdit.swiftpm/...  … iOS 版に同梱する分
  *
+ * ラボ（lab/auto-cut）のビルド結果があれば docs/lab/ にも置く。
+ * docs/ は毎回まるごと作り直すので、ここで一緒に配らないと消えてしまう。
+ * iOS 版には入れない（同梱するのは製品のほうだけ）。
+ *
  * 通常ならビルド生成物はコミットしないが、ここでは
  * 「リポジトリを落として index.html を開けば動く」「iPad には npm が無い」
  * という 2 点を優先して、あえてリポジトリに含めている。
@@ -40,6 +44,15 @@ for (const target of targets) {
   await cp(dist, target, { recursive: true });
   const bytes = await totalBytes(target);
   console.log(`同梱しました: ${path.relative(root, target)} (${(bytes / 1024).toFixed(0)} KB)`);
+}
+
+const labDist = path.join(root, 'lab', 'auto-cut', 'dist');
+if (existsSync(labDist)) {
+  const labTarget = path.join(root, 'docs', 'lab');
+  await cp(labDist, labTarget, { recursive: true });
+  console.log(`同梱しました: ${path.relative(root, labTarget)} (${((await totalBytes(labTarget)) / 1024).toFixed(0)} KB)`);
+} else {
+  console.log('ラボのビルドが無いので docs/lab は作りませんでした（`npm run lab:build` で作れます）。');
 }
 
 // GitHub Pages は既定で Jekyll が走り、_ で始まるファイルなどを無視してしまう。
