@@ -1,4 +1,6 @@
-# NAS に置いて、何人かで使う
+# UGREEN NAS に置いて、何人かで使う
+
+（UGOS Pro での手順です。Synology / QNAP / 自作でも、パスを読み替えれば同じ形で動きます。）
 
 ViViD Edit は全部ブラウザの中で動くので、サーバは「ファイルを配るだけ」で足ります。
 NAS に nginx を 1 つ立てて、**アプリと共有素材を同じ口から配る**のがここでの構成です。
@@ -18,20 +20,27 @@ NAS に nginx を 1 つ立てて、**アプリと共有素材を同じ口から�
 1 つの nginx から `/` と `/media/` として出せば、同じオリジンになるのでこの問題が起きません。
 
 UGREEN NAS の WebDAV（既定 5005 / 5006）を使わないのはこのためです。
+WebDAV は口が別なので、そちらに素材を置くと同じ問題にぶつかります。
 
 ## 置くもの
 
 ```
-NAS のどこか/vivid-edit/
+/volume1/docker/vivid-edit/
 ├── app/              ← このリポジトリの docs/ の中身をそのままコピー
 │   ├── index.html
 │   ├── assets/
 │   └── lab/
-├── nginx.conf        ← deploy/nas/nginx.conf
-└── docker-compose.yml ← deploy/nas/docker-compose.yml
+└── nginx.conf        ← deploy/nas/nginx.conf をこの名前で
 ```
 
-共有素材は別のフォルダで構いません（むしろ別の方がよい）。例:
+`docker-compose.yml` はここに置かなくて構いません。UGOS の画面に貼り付けるだけです。
+
+**パスはすべて絶対で書いてください。** UGOS はプロジェクト用のフォルダを自分で決めるので、
+`./nginx.conf` のような相対パスだと、こちらが置いた場所ではなくそのフォルダを見に行きます。
+ここで一度つまずくと原因が分かりにくいので、compose 側も全部 `/volume1/...` にしてあります。
+
+共有素材は別のフォルダにしてください。アプリの入れ替えで巻き込まないためです。
+UGOS の共有フォルダは `/volume1/<共有フォルダ名>` になります（共有フォルダ名が `video` なら `/volume1/video`）。
 
 ```
 /volume1/video/shared/
@@ -41,30 +50,38 @@ NAS のどこか/vivid-edit/
 └── ロゴ.png
 ```
 
-## 手順（UGREEN NAS / UGOS Pro）
+## 手順
+
+**前に確かめること**: Docker は UGOS Pro の App Center から入れます（DXP 系・DH4300 Plus で使えます）。
 
 1. **ファイルを置く**
-   共有フォルダに `vivid-edit/app/` を作り、このリポジトリの `docs/` の中身をコピーします。
-   `nginx.conf` と `docker-compose.yml` はその 1 つ上に置きます。
+   ファイルマネージャで `docker` 共有フォルダに `vivid-edit/app/` を作り、
+   このリポジトリの `docs/` の**中身**をコピーします（`docs` フォルダごとではなく中身）。
+   `deploy/nas/nginx.conf` は `vivid-edit/nginx.conf` として置きます。
 
-2. **compose の 2 行を書き換える**
-   `docker-compose.yml` の `volumes` の、左側のパスを実際の場所に合わせます。
+2. **素材フォルダのパスを確かめる**
+   ファイルマネージャで共有フォルダを右クリック → プロパティで実際のパスが見られます。
+   だいたい `/volume1/<共有フォルダ名>` です。
+
+3. **compose の 3 行を書き換える**
+   `deploy/nas/docker-compose.yml` の `volumes` の左側を、実際の場所に合わせます。
 
    ```yaml
-   - /volume1/docker/vivid-edit/app:/srv/app:ro   # ← アプリを置いた場所
-   - /volume1/video/shared:/srv/media:ro          # ← 共有したい素材フォルダ
+   - /volume1/docker/vivid-edit/app:/srv/app:ro                              # ① アプリ
+   - /volume1/docker/vivid-edit/nginx.conf:/etc/nginx/conf.d/default.conf:ro # ② 設定
+   - /volume1/video/shared:/srv/media:ro                                     # ③ 共有素材
    ```
 
    素材側の `:ro`（読み取り専用）は外さないでください。編集アプリから素材を消せる必要はありません。
 
-3. **Docker で立ち上げる**
-   UGOS Pro の `Docker` → `プロジェクト` → `作成` を開き、`docker-compose.yml` の中身を貼って作成します。
+4. **Docker で立ち上げる**
+   `Docker` → `プロジェクト` → `作成` を開き、compose の中身を貼って作成します。
    コマンドラインは要りません。
 
-4. **開く**
-   `http://<NAS の IP>:8080/` を全員に配ります。
+5. **開く**
+   `http://<NAS の IP>:8080/` を全員に配ります。`8080` が他と当たるなら compose の左側だけ変えてください。
 
-5. **素材を入れる**
+6. **素材を入れる**
    編集画面の素材パネル → **「共有」** を押すと、`/media/` の中身が一覧されます。
    選んで追加すると、**コピーせずに参照**として入ります。
 
@@ -88,6 +105,18 @@ NAS のどこか/vivid-edit/
 - **LAN 内の誰でも開けます。** 絞るなら nginx 側で Basic 認証をかけるか、NAS のファイアウォールで。
 - **外からは繋がりません。** 社外から使うなら VPN を挟んでください。
 - **iPad の Safari は、長く使わないサイトのデータを消すことがあります。** 大事な編集途中のものは、こまめに書き出しておいてください。
+
+## うまくいかないとき
+
+**素材が 403 で読めない**
+nginx のワーカーから素材フォルダが読めていません。共有フォルダの権限を確かめてください
+（`everyone` に読み取りがあるか、少なくとも辿れるか）。
+
+**一覧は出るのに再生できない**
+素材フォルダのマウント（③）は合っているが、その中のファイルに読み取り権限が無い場合です。
+
+**設定を変えたのに反映されない**
+`nginx.conf` を書き換えたら、UGOS の Docker 画面でコンテナを再起動してください。
 
 ## 素材の一覧が出ないとき
 
