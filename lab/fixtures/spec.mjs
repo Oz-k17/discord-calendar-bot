@@ -73,6 +73,25 @@ export const SHORT_FIXTURES = [
     options: { speech: false, bgm: true, bgmLevel: 0.3, bgmTremolo: 4.5, noiseLevel: 0.0005, seed: 10 },
   },
   {
+    // 「包絡（スペクトルの形）が動いたか」で声を見分ける手を潰しにいく素材。
+    // 音量だけでなく**形そのもの**が声と同じ速さで動くので、
+    // トレモロを弾けた手（shapeChange）でも弾けないはず。
+    name: 'music-wah.wav',
+    note: '声と同じ速さでフォルマントが動く楽器（声は無い）',
+    speech: false,
+    hard: true,
+    options: { speech: false, wah: 4.2, noiseLevel: 0.0005, seed: 13 },
+  },
+  {
+    // 「どこかで形が動いたら声がある」とみなす素材単位の判定を潰しにいく素材。
+    // 本物の曲はたいてい和音が変わるので、鳴りっぱなしの bgm.wav よりこちらが普通。
+    name: 'music-chords.wav',
+    note: '和音が 1.5 秒ごとに変わる音楽（声は無い）',
+    speech: false,
+    hard: true,
+    options: { speech: false, chordEvery: 1.5, noiseLevel: 0.0005, seed: 14 },
+  },
+  {
     // 「形の変化」で判定する手を潰しにいく素材。背景がほとんど無いので、
     // 声が背景と混ざる効果に頼っていると、ここで声を見失う。
     name: 'speech-dry.wav',

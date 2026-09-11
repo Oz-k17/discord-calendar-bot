@@ -36,6 +36,34 @@ export interface FeatureTrack {
    * 人がしゃべると母音が移り変わってスペクトルの形そのものが動くので、そこで差が出る。
    */
   shapeFlux: Float32Array;
+  /**
+   * スペクトルの**包絡**（フォルマントの居場所）の動き。0 以上の距離で、割合ではない。
+   *
+   * `shapeFlux` との違いは、**倍音の細かい縞と音量を先に落としている**こと。
+   * メル帯域でまとめて対数を取り、低い次数のケプストラムだけを残すと、
+   * 残るのは「どの高さに共鳴の山があるか」というなだらかな形だけになる。
+   * 音量は 0 次にしか出ないので、1 次以上を見るかぎり**音量倍率に不変**。
+   *
+   * 狙いは「背景に頼らずに声の音色の動きを拾う」こと。`shapeFlux` が動くのは
+   * 主に声と背景の混ざり方が変わるからで、背景の無い素材では声でも動かなかった。
+   * 実測（鳴っているコマの中央値。2026-09-11）:
+   *
+   * | 素材 | shapeChange | envelopeChange |
+   * | --- | --- | --- |
+   * | 乾いた声・母音が移り変わる | 0.049 | **0.151** |
+   * | 震える楽器（声なし） | 0.050 | **0.009** |
+   *
+   * `shapeChange` では両者が並んでしまう（0.049 と 0.050）が、包絡なら 17 倍開く。
+   * **背景がまったく無くても声の口の動きを拾える。** そこは狙いどおりだった。
+   *
+   * **ただし音程の動きには不変ではない。** 口の形を止めたまま音程だけを 1 オクターブ
+   * 動かしても、共鳴だけを動かしたときの 4〜8 割の大きさで反応する
+   * （44.1kHz で 0.373 対 0.443、16kHz で 0.176 対 0.392。窓に入る波の数で変わる）。
+   * メル帯域は低い所では倍音 1 本 1 本を分けてしまうので、音程が動くと帯域の中身も動く。
+   * つまりこれは「口が動いた」ではなく「音色か音程が動いた」を測っている。
+   * ビブラートのかかった楽器は、この量では声と区別できないはず（まだ素材が無い）。
+   */
+  envelopeFlux: Float32Array;
   /** 声の帯域（300〜3400Hz）が全体に占める割合。 */
   voiceBand: Float32Array;
   /** ゼロ交差率。高いほど雑音的・高域寄り。 */
@@ -57,6 +85,8 @@ export interface FeatureTrack {
    * 鳴りっぱなしの音楽はどこにもそういう瞬間が無い。silence.ts はそちらを使う。
    */
   shapeChange: Float32Array;
+  /** `envelopeFlux` を 0.15 秒で均したもの。1 コマの跳ねで決めないため。 */
+  envelopeChange: Float32Array;
   /**
    * 声らしさ。揺れの速さ（modulation）と音色の尖り具合（tone）の積。
    *
@@ -85,6 +115,43 @@ const MOD_WINDOW = 1.0;
 const F0_LOW = 70;
 const F0_HIGH = 320;
 /**
+ * 包絡（フォルマントの居場所）を見る帯域の数と範囲。
+ *
+ * メル尺度（人の耳の分解能に近い）で等間隔に並べる。低い所を細かく、高い所を粗く見るので、
+ * フォルマントの居る 300〜3000Hz あたりに帯域が集まる。
+ * 上を 8000Hz で止めるのは、それより上に口の形の手がかりがほとんど無いわりに、
+ * 息や環境ノイズが乗って値が暴れるため。下は部屋の唸りを避けて 50Hz から。
+ *
+ * **線形周波数のまま同じことをやったら駄目だった。** 帯域を歪めずに 50〜8000Hz を
+ * そのまま並べてケプストラムを取ると、狙いである「乾いた声の口の動き」と
+ * 「鳴りっぱなしの音楽」の開きが 17 倍から 2.5 倍まで落ちた（2026-09-11 に測った）。
+ * フォルマントは低い所に密に並んでいるので、そこを細かく見る尺度でないと届かない。
+ */
+const MEL_BANDS = 26;
+const MEL_LOW = 50;
+const MEL_HIGH = 8000;
+/**
+ * 対数を取るときの下限（そのコマの全エネルギーに対する割合）。
+ *
+ * **ここが効きを決める。** 低くすると、ほとんど鳴っていない帯域（倍音と倍音の間）が
+ * 対数の底で暴れ、鳴りっぱなしの音楽まで「包絡が動いている」ことになる。
+ * 実測（鳴っているコマでの `envelopeChange` の中央値）:
+ *   下限      1e-7   1e-5   1e-4   1e-3   1e-2
+ *   母音が動く声   0.174  0.165  0.161  0.151  0.120
+ *   震える楽器    0.506  0.138  0.047  0.009  0.003
+ *   音楽だけ     0.334  0.038  0.008  0.003  0.003
+ * 1e-3 で、声と鳴りっぱなしの音楽が 15 倍以上開く。これ以上上げても開きは増えず、
+ * 声の側が削られていくだけなので 1e-3 を採った。
+ */
+const MEL_FLOOR = 1e-3;
+/**
+ * 残すケフレンシー（ケプストラムの次数）の数。
+ *
+ * 低い次数ほど「なだらかな山」を表す。12 次までなら倍音の細かい縞は残らず、
+ * 共鳴の山のだいたいの居場所だけが残る。
+ */
+const CEPS_KEEP = 12;
+/**
  * 声らしさの谷を埋める窓の長さ（秒）。
  *
  * 窓を広げるほど声を取りこぼさなくなるが、余計なものも残るようになる。
@@ -101,6 +168,8 @@ const SCORE_SMOOTH = 0.1;
  * 「この辺りが動いているか」を見たいので、谷を埋める最大値ではなく平均で均す。
  */
 const SHAPE_SMOOTH = 0.15;
+/** 包絡の動きを均す窓の長さ（秒）。`shapeChange` と揃えてある（比べるため）。 */
+const ENVELOPE_SMOOTH = 0.15;
 
 /** 窓の中の平均。均一に均すので、山も谷も同じだけ動く。 */
 function smoothMean(values: Float32Array, halfWidth: number): Float32Array {
@@ -210,6 +279,68 @@ function harmonicityOf(mag: Float64Array, binHz: number): number {
   return Math.min(1, best / total);
 }
 
+/** メル尺度への変換。人の耳は低い所ほど細かく聞き分けるので、それに合わせて帯域を並べる。 */
+const toMel = (hz: number) => 2595 * Math.log10(1 + hz / 700);
+const fromMel = (mel: number) => 700 * (10 ** (mel / 2595) - 1);
+
+interface MelBank {
+  /** 帯域の境目（bin 番号）。3 つ組で 1 つの三角形を作る。 */
+  edges: Int32Array;
+}
+
+const melCache = new Map<string, MelBank>();
+
+/** 三角形の窓を並べたメル帯域。窓の長さと標本化周波数が同じなら作り直さない。 */
+function melBank(bins: number, binHz: number): MelBank {
+  const key = `${bins}/${binHz.toFixed(4)}`;
+  const found = melCache.get(key);
+  if (found) return found;
+  const lowMel = toMel(MEL_LOW);
+  const highMel = toMel(Math.min(MEL_HIGH, binHz * (bins - 1)));
+  const edges = new Int32Array(MEL_BANDS + 2);
+  for (let i = 0; i < MEL_BANDS + 2; i += 1) {
+    const mel = lowMel + ((highMel - lowMel) * i) / (MEL_BANDS + 1);
+    edges[i] = Math.min(bins - 1, Math.max(1, Math.round(fromMel(mel) / binHz)));
+  }
+  const made = { edges };
+  melCache.set(key, made);
+  return made;
+}
+
+/**
+ * 振幅スペクトル → 低次のケプストラム（＝なだらかな包絡の形）。
+ *
+ * **先に全体の合計で割ってから対数を取る。** こうしないと下限（MEL_FLOOR）が
+ * 音量によって効いたり効かなかったりして、「音量倍率に不変」が崩れる。
+ * 0 次（全体の大きさ＝音量）は初めから作らない。ここが不変性の要。
+ *
+ * 帯域が 26 本しかないので、DCT は素直な二重ループで足す（FFT を使うほどの量ではない）。
+ */
+function cepstrum(mag: Float64Array, bank: MelBank, energies: Float64Array, out: Float64Array) {
+  let total = 0;
+  for (let b = 1; b < mag.length; b += 1) total += mag[b] * mag[b];
+  const scale = total > 0 ? 1 / total : 0;
+  for (let m = 0; m < MEL_BANDS; m += 1) {
+    const from = bank.edges[m];
+    const center = bank.edges[m + 1];
+    const to = bank.edges[m + 2];
+    let sum = 0;
+    for (let b = from; b <= to; b += 1) {
+      // 三角形の重み。中心で 1、両端で 0。
+      const w = b <= center ? (center > from ? (b - from) / (center - from) : 1) : to > center ? (to - b) / (to - center) : 1;
+      sum += w * mag[b] * mag[b];
+    }
+    energies[m] = Math.log(sum * scale + MEL_FLOOR);
+  }
+  for (let k = 1; k <= CEPS_KEEP; k += 1) {
+    let sum = 0;
+    for (let m = 0; m < MEL_BANDS; m += 1) {
+      sum += energies[m] * Math.cos((Math.PI * k * (m + 0.5)) / MEL_BANDS);
+    }
+    out[k - 1] = (sum * 2) / MEL_BANDS;
+  }
+}
+
 export interface FeatureOptions {
   /** 声らしさの谷を埋める窓の長さ（秒）。0 で無効。 */
   smoothSeconds: number;
@@ -238,6 +369,7 @@ export function analyzeFeatures(
   const flatness = new Float32Array(frames);
   const flux = new Float32Array(frames);
   const shapeFlux = new Float32Array(frames);
+  const envelopeFlux = new Float32Array(frames);
   const voiceBand = new Float32Array(frames);
   const zcr = new Float32Array(frames);
   const harmonicity = new Float32Array(frames);
@@ -250,6 +382,14 @@ export function analyzeFeatures(
     for (const data of channels) v += data[i] ?? 0;
     return v / channels.length;
   };
+
+  const bank = melBank(scratch.mag.length, binHz);
+  // 帯域ごとの対数エネルギーの入れ物。キャッシュ（melBank）には持たせない。
+  // 書き換える配列を共有すると、呼び出しが重なったときに静かに壊れる。
+  const melEnergies = new Float64Array(MEL_BANDS);
+  const ceps = new Float64Array(CEPS_KEEP);
+  const previousCeps = new Float64Array(CEPS_KEEP);
+  let hasPreviousCeps = false;
 
   const previous = new Float64Array(scratch.mag.length);
   // 形の比較用。合計で割ったものを別に持つ（previous は生の大きさなので使い回せない）。
@@ -311,6 +451,24 @@ export function analyzeFeatures(
       shapeFlux[i] = 0;
     }
 
+    // 包絡（フォルマントの居場所）の動き。倍音の櫛と音量を落としてから比べる。
+    if (sum > 0) {
+      cepstrum(mag, bank, melEnergies, ceps);
+      if (hasPreviousCeps) {
+        let d = 0;
+        for (let k = 0; k < CEPS_KEEP; k += 1) {
+          const diff = ceps[k] - previousCeps[k];
+          d += diff * diff;
+        }
+        envelopeFlux[i] = Math.sqrt(d);
+      }
+      previousCeps.set(ceps);
+      hasPreviousCeps = true;
+    } else {
+      hasPreviousCeps = false;
+      envelopeFlux[i] = 0;
+    }
+
     centroid[i] = sum > 0 ? weighted / sum : 0;
     // 平坦さ＝幾何平均 ÷ 算術平均。雑音なら 1 に近づき、音程があると 0 に近づく。
     flatness[i] = sum > 0 ? Math.exp(logSum / counted) / (sum / counted) : 0;
@@ -330,6 +488,7 @@ export function analyzeFeatures(
   // そこで切ると、語中で切り刻むことになる。少し均してから使う。
   const speechScore = smooth(raw, Math.round(opts.smoothSeconds / track.hop));
   const shapeChange = smoothMean(shapeFlux, Math.round(opts.shapeSmoothSeconds / track.hop));
+  const envelopeChange = smoothMean(envelopeFlux, Math.round(ENVELOPE_SMOOTH / track.hop));
 
   return {
     hop: track.hop,
@@ -341,11 +500,13 @@ export function analyzeFeatures(
     flatness,
     flux,
     shapeFlux,
+    envelopeFlux,
     voiceBand,
     zcr,
     harmonicity,
     tone,
     shapeChange,
+    envelopeChange,
     speechScore,
   };
 }
@@ -357,6 +518,7 @@ export const FEATURE_NAMES = [
   'flatness',
   'tone',
   'shapeFlux',
+  'envelopeFlux',
   'centroid',
   'zcr',
   'harmonicity',

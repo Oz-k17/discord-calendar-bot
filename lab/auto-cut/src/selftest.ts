@@ -71,6 +71,42 @@ function makeSpeechLike(seconds: number, sampleRate: number, hz = 4, amp = 0.5):
   return { sampleRate, numberOfChannels: 1, length, getChannelData: () => data };
 }
 
+/**
+ * 倍音列に、対数周波数上のガウス共鳴（フォルマント）を掛けた音。
+ *
+ * 「口の形（共鳴の居場所）」と「音程（f0）」を**別々に動かせる**ようにしてある。
+ * 包絡の動きを測る量が、そのどちらに反応しているのかを切り分けるために要る。
+ * 声らしい音（makeSpeechLike）はこの 2 つが一緒に動いてしまうので、それでは分からない。
+ */
+function makeFormantTone(
+  seconds: number,
+  sampleRate: number,
+  { f0 = 200, glide = 0, formant = 800, sweep = 0, rate = 4, amp = 0.5, tremolo = false } = {},
+): AudioLike {
+  const length = Math.round(seconds * sampleRate);
+  const data = new Float32Array(length);
+  let phase = 0;
+  for (let i = 0; i < length; i += 1) {
+    const t = i / sampleRate;
+    const f = f0 * (1 + glide * (0.5 + 0.5 * Math.sin(2 * Math.PI * rate * t)));
+    // 音程を動かすので、位相は積み上げる（周波数をそのまま時刻に掛けると跳ぶ）。
+    phase += (2 * Math.PI * f) / sampleRate;
+    const center = formant * Math.exp(sweep * Math.sin(2 * Math.PI * rate * t));
+    const env = tremolo ? 0.55 + 0.45 * Math.sin(2 * Math.PI * rate * t) : 1;
+    let v = 0;
+    let norm = 0;
+    for (let h = 1; h <= 20; h += 1) {
+      if (f * h > sampleRate / 2) break;
+      const d = Math.log((f * h) / center) / 0.7;
+      const gain = Math.exp(-d * d) / h;
+      v += gain * Math.sin(phase * h);
+      norm += gain;
+    }
+    data[i] = norm > 0 ? (amp * env * v) / norm : 0;
+  }
+  return { sampleRate, numberOfChannels: 1, length, getChannelData: () => data };
+}
+
 /** 白色雑音。音色が平坦な音の代表として使う。 */
 function makeNoise(seconds: number, sampleRate: number, amp = 0.3): AudioLike {
   const length = Math.round(seconds * sampleRate);
@@ -253,6 +289,55 @@ export function runSelfTest(): TestResult[] {
       '音色が移り変わる音では形が動く',
       midMean(speechFeatures.shapeFlux) > midMean(toneFeatures.shapeFlux) + 0.02,
       `${midMean(speechFeatures.shapeFlux).toFixed(4)} > ${midMean(toneFeatures.shapeFlux).toFixed(4)}`,
+    );
+
+    // --- 包絡（フォルマントの居場所）の動き ---
+    // 形の変化（shapeFlux）は、声と背景の混ざり方が変わることで動いていた。
+    // 背景の無い素材では声でも動かないので、そこを分けられるかを確かめる。
+    // 同じ音を何度も測るので、一度出した値は覚えておく（解析は毎回そこそこ重い）。
+    const envCache = new Map<AudioLike, number>();
+    const envMean = (b: AudioLike) => {
+      const found = envCache.get(b);
+      if (found !== undefined) return found;
+      const value = midMean(analyzeFeatures(b, analyzeLoudness(b, 0.02)).envelopeFlux);
+      envCache.set(b, value);
+      return value;
+    };
+
+    check(
+      '包絡の動きは音量を 1/4 にしても変わらない',
+      Math.abs(envMean(loud) - envMean(soft)) < 0.001,
+      `${envMean(loud).toFixed(4)} vs ${envMean(soft).toFixed(4)}`,
+    );
+    // ここが今回の要。震える楽器は音量しか動いていないので、包絡は動かない。
+    check(
+      '音量だけ揺れる音では包絡がほとんど動かない',
+      envMean(toneBuffer) < 0.05,
+      envMean(toneBuffer).toFixed(4),
+    );
+    check(
+      '音色が移り変わる音では包絡が大きく動く',
+      envMean(speechBuffer) > envMean(toneBuffer) * 10,
+      `${envMean(speechBuffer).toFixed(4)} > ${envMean(toneBuffer).toFixed(4)} の 10 倍`,
+    );
+    // 形の変化では、この 2 つがここまで開かない（実素材では並んでしまう）。
+    check(
+      '同じ 2 つを形の変化で見ると、開きはずっと小さい',
+      midMean(speechFeatures.shapeFlux) < midMean(toneFeatures.shapeFlux) * 10,
+      `${midMean(speechFeatures.shapeFlux).toFixed(4)} / ${midMean(toneFeatures.shapeFlux).toFixed(4)}`,
+    );
+
+    // 共鳴の居場所だけを動かす（＝口の形だけが動く）と、包絡は動く。
+    const sweeping = makeFormantTone(2, sr, { sweep: Math.log(2) / 2 });
+    check('共鳴の居場所が動くと包絡が動く', envMean(sweeping) > 0.2, envMean(sweeping).toFixed(4));
+    // **ここは「できないこと」を固定しておくための検算。**
+    // 口の形を止めたまま音程だけを動かしても、この量は同じくらい動いてしまう。
+    // 「口の動きだけを見ている」と思い込むと、ビブラートのかかった楽器で足をすくわれる。
+    const gliding = makeFormantTone(2, sr, { glide: 1 });
+    check(
+      '音程だけ動かしても包絡は動く（音程には不変ではない）',
+      envMean(gliding) > envMean(sweeping) * 0.3,
+      `音程 ${envMean(gliding).toFixed(4)} / 共鳴 ${envMean(sweeping).toFixed(4)}`,
     );
 
     // --- 声らしさ ---

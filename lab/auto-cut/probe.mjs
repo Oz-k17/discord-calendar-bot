@@ -136,8 +136,8 @@ console.log(`${pad('  平均', 22)}${average}`);
 // 形の動きでそれを弾けるか。
 {
   console.log('\n声の無い素材で、どれだけ誤って「声だ」と言うか\n');
-  console.log(`${pad('素材', 22)}${pad('声らしいコマの割合', 20)}${pad('形が動いた秒数', 16)}`);
-  console.log('-'.repeat(58));
+  console.log(`${pad('素材', 22)}${pad('声らしいコマの割合', 20)}${pad('形が動いた秒数', 16)}${pad('包絡が動いた秒数', 18)}`);
+  console.log('-'.repeat(76));
   for (const fixture of SHORT_FIXTURES) {
     if (fixture.speech) continue;
     const file = path.join(out, fixture.name);
@@ -149,18 +149,70 @@ console.log(`${pad('  平均', 22)}${average}`);
     let sounding = 0;
     let speechLike = 0;
     let moving = 0;
+    let envMoving = 0;
     for (let i = 0; i < track.db.length; i += 1) {
       if (track.db[i] <= threshold) continue;
       sounding += 1;
       if (features.speechScore[i] >= 0.2) speechLike += 1;
       if (features.shapeChange[i] >= 0.09) moving += 1;
+      // 包絡のほうは、まだ判定に使っていないので silence.ts に定数が無い。
+      // 声（乾いた素材でも 0.14 以上）と鳴りっぱなしの音楽（0.01 まで）の間を取る。
+      if (features.envelopeChange[i] >= 0.09) envMoving += 1;
     }
     const ratio = sounding > 0 ? speechLike / sounding : 0;
     console.log(
-      `${pad('※ ' + fixture.name, 22)}${pad(`${(ratio * 100).toFixed(0)}%`, 20)}${pad(`${(moving * track.hop).toFixed(2)} 秒`, 16)}`,
+      `${pad('※ ' + fixture.name, 22)}${pad(`${(ratio * 100).toFixed(0)}%`, 20)}${pad(`${(moving * track.hop).toFixed(2)} 秒`, 16)}${pad(`${(envMoving * track.hop).toFixed(2)} 秒`, 18)}`,
     );
   }
   console.log('割合が高いのに形が動かない素材は、声らしさだけでは弾けない（震える楽器がそれ）。');
+}
+
+// --- AUC では見えない比べ方 ---
+// 上の AUC は「声のコマ」と「それ以外のコマ（無音を含む）」を比べている。
+// ところが無音のコマは、乾いた素材ではほぼ雑音なので、形も包絡も毎コマ暴れる。
+// そのせいで「声かどうか」ではなく「鳴っているかどうか」を測ってしまい、
+// 形や包絡の良し悪しがまったく見えない（実際 shapeFlux も envelopeFlux も
+// 乾いた素材では AUC 0.005 になる。声のほうが小さい、という意味）。
+//
+// 判定が本当に見たいのは「鳴っているコマの中で、声と音楽を分けられるか」なので、
+// そちらを直に並べる。
+{
+  console.log('\n鳴っているコマだけで、声と音楽を直に比べる（中央値）\n');
+  console.log(`${pad('素材', 24)}${pad('区分', 6)}${pad('shapeChange', 14)}${pad('envelopeChange', 14)}`);
+  console.log('-'.repeat(58));
+  const median = (values) => {
+    if (values.length === 0) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  };
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track);
+    const threshold = autoThresholdDb(track, 0.25);
+    const groups = { 声: { shape: [], env: [] }, 他: { shape: [], env: [] } };
+    for (let i = 0; i < track.db.length; i += 1) {
+      if (track.db[i] <= threshold) continue;
+      const t = i * track.hop;
+      // 境目のコマはどちらとも言えないので外す（上の AUC と同じ扱い）。
+      if (isSpeechAt(fixture, t - 0.15) !== isSpeechAt(fixture, t + 0.15)) continue;
+      const group = groups[isSpeechAt(fixture, t) ? '声' : '他'];
+      group.shape.push(features.shapeChange[i]);
+      group.env.push(features.envelopeChange[i]);
+    }
+    for (const [label, group] of Object.entries(groups)) {
+      if (group.shape.length === 0) continue;
+      console.log(
+        `${pad((fixture.hard ? '※ ' : '  ') + fixture.name, 24)}${pad(label, 6)}` +
+          `${pad(num(median(group.shape), 6), 14)}${pad(num(median(group.env), 6), 14)}`,
+      );
+    }
+  }
+  console.log('\n「乾いた声・母音が移り変わる」と「震える楽器」を見比べること。');
+  console.log('形では並んでしまう（0.049 と 0.050）が、包絡なら開く（0.151 と 0.009）。');
+  console.log('ただし music-wah（声と同じ速さでフォルマントが動く楽器）は、どちらでも弾けない。');
 }
 
 console.log('\n※ は意地悪な素材（BGM が大きい / 声と同じ速さで刻む打楽器 / 震える楽器）。');

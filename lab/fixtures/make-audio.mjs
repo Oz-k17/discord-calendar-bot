@@ -127,6 +127,75 @@ function music(data, from, to, level, tremolo = 0) {
   }
 }
 
+/**
+ * 「フォルマントが動く楽器」。和音を倍音の多い音で鳴らし、
+ * そこへ**声の音節と同じ速さで動く共鳴（フォルマント）**を掛ける。
+ *
+ * これは **わざと意地悪な素材** を作るためのもの。
+ * 「スペクトルの形（包絡）が動いているか」で声を見分けようとすると、
+ * 音量の揺れだけの `music-tremolo` は弾けるが、**包絡そのものが動く音**は弾けない。
+ * 包絡の動きに賭ける手が本当に成り立つのかを確かめるには、
+ * 「声でないのに包絡が動く音」が手元に無いと話にならない。
+ *
+ * 声と違うのは**音程が 2 つ同時に鳴っている**こと（和音なので基本周波数が 1 つに定まらない）。
+ * そこが残された手がかりになるかどうかも、この素材で測れる。
+ */
+function wahChord(data, from, to, level, rate) {
+  const chord = [220, 277.18];
+  const period = 1 / rate;
+  for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
+    const t = i / SR;
+    // 2 秒ごとに 0.6 秒の休符を置く（フレーズの切れ目のつもり）。
+    // 音量の幅が無いと、しきい値が「全編が鳴っている」に落ちて何も起きず、
+    // 判定が破れていても被害が見えない。実害の出る形にしておく。
+    if (t % 2 >= 1.4) continue;
+    // 音節と同じ速さで「タタタタ」と音を置く。
+    const local = t % period;
+    const note = Math.min(1, local / 0.01, (period * 0.75 - local) / 0.03);
+    if (note <= 0) continue;
+    // 共鳴の中心を 400〜1600Hz の間で行き来させる（対数で動かす。人の口の動きに近い）。
+    const center = Math.exp(Math.log(400) + (Math.log(1600) - Math.log(400)) * (0.5 + 0.5 * Math.sin(2 * Math.PI * rate * t)));
+    let v = 0;
+    let norm = 0;
+    for (const f0 of chord) {
+      for (let h = 1; h <= 12; h += 1) {
+        const f = f0 * h;
+        if (f > SR / 2) break;
+        // 対数周波数での距離で共鳴の効きを決める（共鳴の幅は 1 オクターブ弱）。
+        const d = Math.log(f / center) / 0.6;
+        const gain = Math.exp(-d * d) / h;
+        v += gain * Math.sin(2 * Math.PI * f * t);
+        norm += gain;
+      }
+    }
+    data[i] += norm > 0 ? (level * note * v) / norm : 0;
+  }
+}
+
+/**
+ * 和音が途中で変わる音楽。**わざと意地悪な素材**。
+ *
+ * 鳴りっぱなしの音楽はスペクトルの形が動かないので「どこかで形が動いたか」で弾けるが、
+ * 和音が変わればそこで形は動く。本物の曲はたいてい和音が変わるので、
+ * 「形がどこかで動いたら声がある」とみなす判定は、そこで破れるはず。破れ方を測るために要る。
+ */
+function chordProgression(data, from, to, level, everySeconds) {
+  const progression = [
+    [220, 277.18, 329.63],
+    [246.94, 293.66, 369.99],
+    [196, 246.94, 293.66],
+    [174.61, 220, 261.63],
+  ];
+  for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
+    const t = i / SR;
+    const chord = progression[Math.floor(t / everySeconds) % progression.length];
+    const swell = 0.85 + 0.15 * Math.sin(2 * Math.PI * 0.5 * t);
+    let v = 0;
+    for (const f of chord) v += Math.sin(2 * Math.PI * f * t) + 0.4 * Math.sin(2 * Math.PI * f * 2 * t);
+    data[i] += (level * swell * v) / (chord.length * 1.4);
+  }
+}
+
 function noise(data, level, random) {
   for (let i = 0; i < data.length; i += 1) data[i] += (random() - 0.5) * 2 * level;
 }
@@ -158,6 +227,12 @@ function makeShort(
     bgm = false,
     bgmLevel = 0.12,
     bgmTremolo = 0,
+    /** 声の音節と同じ速さで共鳴が動く楽器（Hz）。0 で鳴らさない。 */
+    wah = 0,
+    wahLevel = 0.3,
+    /** 和音が何秒ごとに変わるか。0 で鳴らさない。 */
+    chordEvery = 0,
+    chordLevel = 0.25,
     beat = 0,
     beatLevel = 0.25,
     noiseLevel = 0.002,
@@ -170,6 +245,8 @@ function makeShort(
   const data = new Float32Array(Math.round(SHORT_LENGTH * SR));
   noise(data, noiseLevel, random);
   if (bgm) music(data, 0, SHORT_LENGTH, bgmLevel, bgmTremolo);
+  if (wah) wahChord(data, 0, SHORT_LENGTH, wahLevel, wah);
+  if (chordEvery) chordProgression(data, 0, SHORT_LENGTH, chordLevel, chordEvery);
   if (beat) drums(data, 0, SHORT_LENGTH, beatLevel, beat, random);
   if (speech) {
     for (const [from, to] of sparse ? SPARSE_UTTERANCES : UTTERANCES)
