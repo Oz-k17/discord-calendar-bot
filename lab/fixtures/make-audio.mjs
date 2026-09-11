@@ -58,49 +58,155 @@ function writeWav(name, samples) {
 }
 
 /**
- * 声らしい音。倍音を重ねたうえで、音節くらいの速さで音量を揺らす。
- * 本物の声ではないが、「鳴っている／黙っている」を見分ける処理を試すには足りる。
+ * 母音のつもりの共鳴（フォルマント）の居場所（Hz）。あ・い・う・え・お。
  *
- * `vowel` を真にすると、音節ごとに倍音の重みを行き来させる（母音が移り変わる）。
- * **既定を偽のままにしてあるのは、既存の素材を 1 ビットも変えないため。**
- * 種を固定してある意味が無くなり、記録に残した過去の数字と比べられなくなる。
- *
- * なお、`vowel` が偽のときのこの音は、発話中ずっと倍音の重みも f0 も変わらない。
- * **つまりスペクトルの形は動かず、トレモロのかかった楽器と同じ形をしている。**
- * 「声とは何か」を模した音としては、そこが抜けている。
+ * 数字は日本語の母音のおおよその実測値から取った。正確さそのものより、
+ * **母音どうしが F1・F2 の面の上で十分に離れている**ことが要る。
+ * 近い所に固まっていると、母音が移り変わっても包絡がほとんど動かず、
+ * 「声は音色が動く」という素材の狙いが立たない。
  */
-function speak(data, from, to, level, random, vowel = false) {
+const VOWELS = [
+  [800, 1200, 2800], // あ
+  [300, 2300, 3000], // い
+  [350, 1250, 2200], // う
+  [500, 1900, 2600], // え
+  [500, 900, 2600], // お
+];
+/** 共鳴の幅（対数周波数での標準偏差）と高さ。高い共鳴ほど浅く、広く。 */
+const FORMANT_WIDTH = [0.3, 0.35, 0.45];
+const FORMANT_LEVEL = [1, 0.7, 0.35];
+
+/** その周波数が共鳴でどれだけ持ち上がるか。対数周波数上のガウスを 3 つ重ねる。 */
+function formantGain(hz, formants) {
+  let gain = 0;
+  for (let k = 0; k < formants.length; k += 1) {
+    const d = Math.log(hz / formants[k]) / FORMANT_WIDTH[k];
+    gain += FORMANT_LEVEL[k] * Math.exp(-d * d);
+  }
+  // 共鳴から外れた帯域も完全には消えない（息の成分）。0 にすると倍音が虫食いになる。
+  return gain + 0.02;
+}
+
+/**
+ * 声らしい音。倍音列に母音の共鳴を掛け、音節ごとに母音と音程を動かす。
+ *
+ * **2026-09-11 にここを作り直した。** それまでは倍音の重みも f0 も発話中ずっと固定で、
+ * スペクトルの形の上では「トレモロのかかった楽器」とまったく同じものだった
+ * （`music-tremolo.wav` を声と区別できない、という意味）。そのせいで
+ * 「包絡が動いたら声」という判定を試そうにも、**素材のほうが先に破れて**いた。
+ * 判定の限界ではなく素材の限界で止まっていたので、素材の側を直した。
+ *
+ * 本物の声に寄せたのは 3 つ。どれも「声とは何か」を測る手がかりに直に効く:
+ *
+ * - **音節ごとに母音が変わる**（`VOWELS` から選ぶ）。包絡が動く理由がここで生まれる。
+ * - **音節の長さが揃っていない**（0.16〜0.32 秒）。以前は 4.2Hz ちょうどの正弦波で
+ *   揺らしていたので、**楽器のトレモロと同じく等間隔**だった。「動きが規則正しすぎないか」で
+ *   音楽と分ける手を試せなかったのは、素材のこの性質のせい。
+ * - **f0 が動く**（発話の終わりに向かって下がる＋音節ごとの揺れ）。
+ *
+ * `flat: true` を渡すと 2026-09-11 以前の平板な声に戻る。
+ * 乱数の消費数も当時と同じ（f0 の 1 回だけ）なので、**同じ種なら 1 ビットも変わらない**。
+ * 記録に残した過去の数字を測り直したくなったときのために残してある。
+ *
+ * `sustain: true` は、母音を長く伸ばしてしゃべる（0.45〜0.95 秒）。
+ * これは **わざと意地悪な素材** を作るためのもの。伸ばしている間は口が動かないので
+ * 包絡も動かない。「包絡が動いていないコマは声ではない」とコマ単位で判断すると、
+ * ここで本物の声を切る。**伸ばした母音は現実の話し声に普通にある**ので、
+ * 平板な合成音と違って「素材の欠陥」では済まされない。
+ *
+ * `steady: true` は、音節の長さを 0.24 秒に揃える（母音は動いたまま）。
+ * これも **わざと意地悪な素材**。「揺れが規則正しすぎるものは楽器だ」で
+ * 音楽を弾こうとすると、拍に乗ってしゃべる声（ラップ・詠唱・秒読み）がそこに落ちる。
+ * 不規則さを手がかりにしてよいかを確かめるには、規則正しい声が手元に無いと話にならない。
+ */
+function speak(data, from, to, level, random, { flat = false, sustain = false, steady = false } = {}) {
   const f0 = 120 + random() * 40;
-  // 「あ」と「い」のつもりの倍音の重み。
-  const shapes = [
-    [1, 0.6, 0.35, 0.2],
-    [1, 0.15, 0.7, 0.5],
-  ];
+  if (flat) {
+    for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
+      const t = i / SR;
+      const local = t - from;
+      // 音節（1 秒に 4 つくらい）と、語尾に向かって落ちる包絡。
+      const syllable = 0.55 + 0.45 * Math.sin(2 * Math.PI * 4.2 * local);
+      const fade = Math.min(1, local / 0.05, (to - from - local) / 0.08);
+      const env = level * syllable * Math.max(0, fade);
+      data[i] +=
+        env *
+        (Math.sin(2 * Math.PI * f0 * t) +
+          0.6 * Math.sin(2 * Math.PI * f0 * 2 * t) +
+          0.35 * Math.sin(2 * Math.PI * f0 * 3 * t) +
+          0.2 * Math.sin(2 * Math.PI * f0 * 5 * t)) *
+        0.28;
+    }
+    return;
+  }
+
+  // 音節の並びを先に決める。長さを振っておかないと、音量の揺れが
+  // 正弦波と変わらなくなる（＝楽器のトレモロと同じ形になる）。
+  const span = to - from;
+  const syllables = [];
+  for (let at = 0, previous = -1; at < span; ) {
+    // 乱数は steady でも同じ回数だけ引く。引く回数が変わると、そのあとの母音や
+    // 次の発話の f0 までずれて、「長さを揃えたから変わったのか」が見えなくなる。
+    const drawn = random();
+    const length = steady ? 0.24 : sustain ? 0.45 + drawn * 0.5 : 0.16 + drawn * 0.16;
+    // 同じ母音が続くと、そこだけ包絡が動かない区間になってしまう。
+    let vowel = Math.floor(random() * VOWELS.length);
+    if (vowel === previous) vowel = (vowel + 1) % VOWELS.length;
+    previous = vowel;
+    syllables.push({ at, length: Math.min(length, span - at), vowel });
+    at += length;
+  }
+
+  let phase = 0;
+  let index = 0;
   for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
     const t = i / SR;
     const local = t - from;
-    // 音節（1 秒に 4 つくらい）と、語尾に向かって落ちる包絡。
-    const syllable = 0.55 + 0.45 * Math.sin(2 * Math.PI * 4.2 * local);
-    const fade = Math.min(1, local / 0.05, (to - from - local) / 0.08);
-    const env = level * syllable * Math.max(0, fade);
-    if (vowel) {
-      // 音節と同じ速さで、2 つの母音の間を行き来する。
-      const blend = 0.5 + 0.5 * Math.sin(2 * Math.PI * 4.2 * local + Math.PI / 2);
-      let v = 0;
-      for (let h = 0; h < shapes[0].length; h += 1) {
-        const weight = shapes[0][h] * (1 - blend) + shapes[1][h] * blend;
-        v += weight * Math.sin(2 * Math.PI * f0 * (h + 1) * t);
-      }
-      data[i] += env * v * 0.28;
-      continue;
+    while (index + 1 < syllables.length && local >= syllables[index + 1].at) index += 1;
+    const syllable = syllables[index];
+    const inside = local - syllable.at;
+
+    // 音節の中の音量。立ち上がりと収まりだけを丸め、間は平らにする。
+    // 正弦波で揺らすと、伸ばした母音まで揺れてしまい「伸ばしている」ことにならない。
+    const shape = Math.max(0, Math.min(1, inside / 0.03, (syllable.length - inside) / 0.05));
+    // 音節の切れ目でも 0 までは落ちない（語の途中で息が切れるわけではない）。
+    const syllableEnv = 0.15 + 0.85 * shape;
+    const fade = Math.max(0, Math.min(1, local / 0.05, (span - local) / 0.08));
+    const env = level * syllableEnv * fade;
+
+    // 母音は瞬間には切り替わらない。前の母音から 60ms かけて移る（渡り）。
+    const previous = syllables[Math.max(0, index - 1)];
+    const glide = Math.min(0.06, syllable.length * 0.4);
+    const blend = glide > 0 ? Math.min(1, inside / glide) : 1;
+    // 周波数は対数で補間する（400→800 の途中は 600 ではなく 566）。
+    // 耳にも、そのあとで測るメル帯域にも、そちらのほうが素直。
+    const formants = [0, 1, 2].map((k) =>
+      Math.exp(Math.log(VOWELS[previous.vowel][k]) * (1 - blend) + Math.log(VOWELS[syllable.vowel][k]) * blend),
+    );
+
+    // 抑揚。発話の終わりに向かって 1 割ほど下がり、音節ごとに少し上下する。
+    const declination = 1.08 - 0.2 * (local / span);
+    const accent = 1 + 0.04 * Math.sin(2 * Math.PI * 1.7 * local);
+    const f = f0 * declination * accent;
+    // 音程が動くので位相は積み上げる（周波数を時刻に掛けると、そこで波が跳ぶ）。
+    phase += (2 * Math.PI * f) / SR;
+
+    let v = 0;
+    let power = 0;
+    for (let h = 1; h * f < 5000 && h * f < SR / 2; h += 1) {
+      // 声帯の音は倍音がだいたい 1/h で落ちる。そこへ口の共鳴を掛ける。
+      const a = formantGain(h * f, formants) / h;
+      v += a * Math.sin(h * phase);
+      power += a * a;
     }
-    data[i] +=
-      env *
-      (Math.sin(2 * Math.PI * f0 * t) +
-        0.6 * Math.sin(2 * Math.PI * f0 * 2 * t) +
-        0.35 * Math.sin(2 * Math.PI * f0 * 3 * t) +
-        0.2 * Math.sin(2 * Math.PI * f0 * 5 * t)) *
-      0.28;
+    // 実効値で揃える。倍音の数や共鳴の位置で音量が変わると、
+    // しきい値が素材ごとに動いて「何を測っているのか」が分からなくなる。
+    const norm = power > 0 ? Math.sqrt(power / 2) : 1;
+    // 最後の係数は、**平板だった頃と同じ音量になるように**測って決めた（0.217）。
+    // 声の大きさ（上位 10%）が speech.wav で -19.0dBFS、無音の底が -58.9dBFS で、
+    // どちらも 2026-09-07 に記録した値とぴったり同じ。音量が変わると自動しきい値も動いて、
+    // 「声の作りを変えたから変わったのか、音量が変わったから変わったのか」が切り分けられなくなる。
+    data[i] += (env * v * 0.217) / norm;
   }
 }
 
@@ -237,7 +343,12 @@ function makeShort(
     beatLevel = 0.25,
     noiseLevel = 0.002,
     speechLevel = 0.5,
-    vowel = false,
+    /** 2026-09-11 以前の平板な声で鳴らす（過去の数字を測り直すため）。 */
+    flat = false,
+    /** 母音を長く伸ばしてしゃべる。包絡をコマ単位の門にする手を潰しにいく素材。 */
+    sustain = false,
+    /** 音節の長さを揃えてしゃべる。「規則正しさ」で音楽を弾く手を潰しにいく素材。 */
+    steady = false,
     seed = 1,
   },
 ) {
@@ -250,7 +361,7 @@ function makeShort(
   if (beat) drums(data, 0, SHORT_LENGTH, beatLevel, beat, random);
   if (speech) {
     for (const [from, to] of sparse ? SPARSE_UTTERANCES : UTTERANCES)
-      speak(data, from, to, speechLevel, random, vowel);
+      speak(data, from, to, speechLevel, random, { flat, sustain, steady });
   }
   return writeWav(name, data);
 }
