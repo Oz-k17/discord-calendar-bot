@@ -460,5 +460,100 @@ export function runSelfTest(): TestResult[] {
     check('level のときは割合を 1 とする', planJetCut(sounding).speechRatio === 1, '');
   }
 
+  // --- 包絡の門と保持 ---
+  //
+  // 声らしさの列と包絡の列を直接組み立てて、門の道筋だけを裸で確かめる。
+  // 実際の音から作ると「包絡が動いたのか声らしさが動いたのか」が混ざって、
+  // 門が効いているのかどうかが分からなくなる。
+  {
+    const sr = 8000;
+    const sounding = analyzeLoudness(makeTone(4, sr, [{ from: 0, to: 4 }]), 0.02);
+    const frames = sounding.db.length;
+    const fill = (fn: (t: number) => number) => {
+      const out = new Float32Array(frames);
+      for (let i = 0; i < frames; i += 1) out[i] = fn(i * sounding.hop);
+      return out;
+    };
+    // 全編が声らしく見えている状態。ここから包絡の列だけを差し替えて効きを見る。
+    const loudScore = fill(() => 0.5);
+    const movingShape = fill(() => 0.2);
+    const bare = { mode: 'speech' as const, minSilence: 0.05, padding: 0, minKeep: 0 };
+    // 門だけを見たいので、「声が少なすぎたら何もしない」は外しておく。
+    // 外さないと、門がうまく閉まったときほど割合が下がって `noSpeechFound` に化け、
+    // 結果が「全部残す」になって門の効きが見えなくなる（実際そうなって気づいた）。
+    const onlyGate = { ...bare, minSpeechRatio: 0 };
+
+    // 声らしくは見えるが音色がどこでも動かない = 鳴りっぱなしの音楽。門で落ちる。
+    const stuck = planJetCut(sounding, bare, loudScore, movingShape, fill(() => 0.0));
+    check('音色が動かなければ、声らしく見えても声とみなさない', stuck.noSpeechFound, `削った ${stuck.removed.toFixed(2)} 秒`);
+    check('その理由は「声だと判断できたコマがほぼ無い」', stuck.noSpeechReason === 'ratio', String(stuck.noSpeechReason));
+
+    // 1.0 秒で 1 回だけ音色が動く。保持 0.5 秒なら 1.0〜1.5 秒だけが通る。
+    const oneMove = fill((t) => (t >= 1.0 && t < 1.02 ? 0.3 : 0.0));
+    const held = planJetCut(sounding, { ...onlyGate, envelopeHold: 0.5 }, loudScore, movingShape, oneMove);
+    check(
+      'いったん開いたら保持のあいだは通る',
+      held.keep.length === 1 && near(held.keep[0].start, 1.0, 0.05) && near(held.keep[0].end, 1.52, 0.05),
+      held.keep.map((r) => `${r.start.toFixed(2)}〜${r.end.toFixed(2)}`).join(' '),
+    );
+    // 保持を 0 にすれば、動いたそのコマだけになる。保持が効いていることの裏取り。
+    const noHold = planJetCut(sounding, { ...onlyGate, envelopeHold: 0 }, loudScore, movingShape, oneMove);
+    check('保持を 0 にすると、動いたコマだけになる', noHold.resultDuration < 0.1, `${noHold.resultDuration.toFixed(2)} 秒`);
+
+    // 保持は無音をまたがない。前の発話の余韻で、そのあとに来た音楽を通してしまわないため。
+    const gap = analyzeLoudness(
+      makeTone(4, sr, [
+        { from: 0, to: 1.5 },
+        { from: 2.5, to: 4 },
+      ]),
+      0.02,
+    );
+    const gapFill = (fn: (t: number) => number) => {
+      const out = new Float32Array(gap.db.length);
+      for (let i = 0; i < gap.db.length; i += 1) out[i] = fn(i * gap.hop);
+      return out;
+    };
+    // 1.4 秒（無音の直前）で動く。保持 2 秒でも、無音の向こうには届かないはず。
+    const beforeGap = planJetCut(
+      { ...gap },
+      { ...onlyGate, envelopeHold: 2 },
+      gapFill(() => 0.5),
+      gapFill(() => 0.2),
+      gapFill((t) => (t >= 1.4 && t < 1.42 ? 0.3 : 0.0)),
+    );
+    check(
+      '保持は無音をまたがない',
+      beforeGap.keep.every((r) => r.end <= 1.6),
+      beforeGap.keep.map((r) => `${r.start.toFixed(2)}〜${r.end.toFixed(2)}`).join(' ') || '（無し）',
+    );
+
+    // 渡されないものを「動いていない」と読まない。読むと、列を渡し忘れただけで
+    // 声が 1 コマも残らなくなる（shapeChange と同じ約束）。
+    const noColumn = planJetCut(sounding, bare, loudScore, movingShape);
+    check('包絡の列を渡さなければ門は置かない', !noColumn.noSpeechFound && noColumn.resultDuration > 3.5, `${noColumn.resultDuration.toFixed(2)} 秒`);
+    const open = planJetCut(sounding, { ...bare, minEnvelopeChange: 0 }, loudScore, movingShape, fill(() => 0));
+    check('門を 0 にすれば開けっぱなしにできる', !open.noSpeechFound && open.resultDuration > 3.5, `${open.resultDuration.toFixed(2)} 秒`);
+
+    // 門が開いていた秒数が返る（保持が音楽を引き伸ばしていないかを外から見るため）。
+    check('門が開いていた秒数が返る', near(held.envelopeSeconds, 0.52, 0.05), `${held.envelopeSeconds.toFixed(2)} 秒`);
+
+    // **これは「直すべき欠陥」ではなく「分かっている限界」を留める確認。**
+    // 保持より短い間隔で音色が動き続けると、門は一度も閉まらない。
+    // 実際 `music-chords-fast.wav`（和音が 0.4 秒ごとに変わる音楽・声なし）がこれで通り抜ける。
+    // ここが落ちるようになったら、門か保持の設計が変わったということなので、記録を読み直すこと。
+    const chained = planJetCut(
+      sounding,
+      { ...onlyGate, envelopeHold: 0.5 },
+      loudScore,
+      movingShape,
+      fill((t) => (t % 0.3 < 0.02 ? 0.3 : 0.0)),
+    );
+    check(
+      '保持より短い間隔で音色が動き続けると、門は閉まらない（既知の限界）',
+      chained.resultDuration > 3.5,
+      `${chained.resultDuration.toFixed(2)} 秒`,
+    );
+  }
+
   return results;
 }

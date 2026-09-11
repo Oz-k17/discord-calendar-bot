@@ -92,6 +92,18 @@ export const SHORT_FIXTURES = [
     options: { speech: false, chordEvery: 1.5, noiseLevel: 0.0005, seed: 14 },
   },
   {
+    // **包絡の門＋保持**（2026-09-11・3 回目）を潰しにいく素材。
+    // 保持は「いったん音色が動いたら 0.5 秒は開けたまま」なので、
+    // **保持より短い間隔で音色が動き続ける音楽**なら、門は一度も閉まらない。
+    // 和音を 0.4 秒ごとに変えれば、声がゼロでも門を開けっぱなしにできるはず。
+    // 現実の曲でも、刻みの速い伴奏はこれくらいの速さで音が変わる。
+    name: 'music-chords-fast.wav',
+    note: '和音が 0.4 秒ごとに変わる音楽（声は無い）',
+    speech: false,
+    hard: true,
+    options: { speech: false, chordEvery: 0.4, noiseLevel: 0.0005, seed: 16 },
+  },
+  {
     // 「形の変化」で判定する手を潰しにいく素材。背景がほとんど無いので、
     // 声が背景と混ざる効果に頼っていると、ここで声を見失う。
     name: 'speech-dry.wav',

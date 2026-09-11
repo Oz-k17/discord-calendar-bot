@@ -86,7 +86,7 @@ for (const file of files) {
 
   const t1 = performance.now();
   const features = analyzeFeatures(buffer, track);
-  const speech = planJetCut(track, { mode: 'speech' }, features.speechScore, features.shapeChange);
+  const speech = planJetCut(track, { mode: 'speech' }, features.speechScore, features.shapeChange, features.envelopeChange);
   const speechMs = performance.now() - t1;
 
   const cut = (plan) => (plan.originalDuration > 0 ? Math.round((1 - plan.resultDuration / plan.originalDuration) * 100) : 0);
@@ -100,12 +100,14 @@ for (const file of files) {
   const notes = [];
   if (verdict(level)) notes.push(`level: ${verdict(level)}`);
   if (speech.noSpeechFound) {
-    const why = speech.noSpeechReason === 'shape' ? '形がどこでも動かない' : '声らしいコマがほぼ無い';
+    const why = speech.noSpeechReason === 'shape' ? '形がどこでも動かない' : '声だと判断できたコマがほぼ無い';
     notes.push(`speech: 声が見つからないので何もしなかった（${why}）`);
   }
   else if (verdict(speech)) notes.push(`speech: ${verdict(speech)}`);
   notes.push(`声らしいコマの割合 ${(speech.speechRatio * 100).toFixed(0)}%`);
   notes.push(`形が動いた ${speech.shapeSeconds.toFixed(1)}s`);
+  // 保持が音楽の一瞬の動きを引き伸ばしていないかは、ここを見る。
+  notes.push(`音色が動いた ${speech.envelopeSeconds.toFixed(1)}s`);
   if (speech.usedMode !== 'speech') notes.push('speech モードに落ちられなかった');
   if (notes.length) console.log(`${' '.repeat(22)} └ ${notes.join(' / ')}`);
 

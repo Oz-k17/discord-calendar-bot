@@ -82,7 +82,8 @@ try {
   await page.waitForTimeout(400);
   const speechPlan = (await page.evaluate(() => window.__lab.state())).plan;
   ok('声らしさモードに切り替わる', speechPlan.usedMode === 'speech', speechPlan.usedMode);
-  ok('声らしさのつまみが出る', await page.locator('.speech-only').isVisible());
+  ok('声らしさのつまみが出る', await page.locator('.speech-only').first().isVisible());
+  ok('音色の保持のつまみも出る', await page.locator('#envelope-hold').isVisible());
   ok('切り替えても計画が出る', speechPlan.keep.length > 0, `${speechPlan.keep.length} 本`);
   ok('声がよく入っている素材では注意書きを出さない', !(await page.locator('#cut-warning').isVisible()));
 
@@ -104,13 +105,24 @@ try {
   ok('割合が低ければ注意書きを出す', await page.locator('#cut-warning').isVisible(),
     `割合 ${(sparse.speechRatio * 100).toFixed(0)}%`);
 
+  // 包絡の門が画面からも効くこと。BGM の上でたまにしゃべる素材は、
+  // 保持を伸ばすほど BGM だけの所まで残るようになるので、そこが動けば繋がっている。
+  await setRange(page, '#envelope-hold', '1.2');
+  await page.waitForTimeout(400);
+  const longHold = (await page.evaluate(() => window.__lab.state())).plan;
+  ok('保持を伸ばすと残る所が増える', longHold.resultDuration > sparse.resultDuration,
+    `${sparse.resultDuration.toFixed(2)} → ${longHold.resultDuration.toFixed(2)} 秒`);
+  ok('門が開いていた秒数も出る', longHold.envelopeSeconds > sparse.envelopeSeconds,
+    `${sparse.envelopeSeconds.toFixed(2)} → ${longHold.envelopeSeconds.toFixed(2)} 秒`);
+  await setRange(page, '#envelope-hold', '0.5');
+
   await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech.wav'));
   await page.waitForFunction(() => window.__lab.state().voice !== null, { timeout: 30000 });
   await page.waitForTimeout(400);
   await page.locator('input[name="mode"][value="level"]').check();
   await page.waitForTimeout(300);
   ok('戻すと音量だけの判定に戻る', (await page.evaluate(() => window.__lab.state())).plan.usedMode === 'level');
-  ok('戻すとつまみも隠れる', !(await page.locator('.speech-only').isVisible()));
+  ok('戻すとつまみも隠れる', !(await page.locator('.speech-only').first().isVisible()));
 
   // --- ダッキング ---
   await page.locator('#bgm-file').setInputFiles(path.join(fixtures, 'bgm.wav'));

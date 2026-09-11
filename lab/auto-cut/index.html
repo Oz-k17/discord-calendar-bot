@@ -52,6 +52,11 @@
             <input type="range" id="speech-threshold" min="0.02" max="0.6" step="0.01" value="0.2" />
             <small>上げるほど厳しくなる（既定 0.20 は素材で測って決めた値）</small>
           </label>
+          <label class="speech-only">
+            音色が止まっても残す長さ <output id="out-envelope-hold"></output>
+            <input type="range" id="envelope-hold" min="0" max="1.2" step="0.05" value="0.5" />
+            <small>0 にすると、口が動いた瞬間だけを残す。伸ばした母音を切りたくないので既定は 0.50 秒</small>
+          </label>
           <label>
             感度 <output id="out-sensitivity"></output>
             <input type="range" id="sensitivity" min="0" max="0.8" step="0.01" value="0.25" />

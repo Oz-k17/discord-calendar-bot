@@ -58,15 +58,18 @@ export interface JetCutOptions {
    * 鳴っているコマのうち、声らしいと判断できたものがこの割合に満たなければ、
    * 声の入っていない素材とみなして**何もしない**（丸ごと消してしまうより安全）。
    *
-   * 既定が 0.05 と低いのには理由がある。測ったところ:
-   *   音楽だけ 28% / BGM の上でたまにしゃべる（20%）43% / よくしゃべる 63〜100%
-   * つまり**この割合では「声が無い」と「たまにしか声が無い」を安全に分けられない**。
-   * 高くすると、本当に声の入っている素材で何もしなくなる。
-   * ここでは誰が見ても声の無い場合（打楽器だけ = 0%）だけを拾い、
-   * 判断に迷う範囲は `speechRatio` として返して呼ぶ側に任せる。
+   * 既定が 0.05 と低いのは、**包絡の門を入れる前はこの割合で音楽と声を分けられなかった**ため。
+   * 当時の実測は 音楽だけ 28% / BGM の上でたまにしゃべる（20%）43% / よくしゃべる 63〜100% で、
+   * 線を引けば必ずどちらかを壊した。そこで誰が見ても声の無い場合（打楽器だけ = 0%）だけを拾い、
+   * 判断に迷う範囲は `speechRatio` として返して呼ぶ側に任せている。
    *
-   * この割合で拾えない代表が「鳴りっぱなしの音楽」で、そちらは
-   * 下の `minShapeChange` / `minShapeSeconds` で見る。
+   * 門（`minEnvelopeChange`）を入れて割合は大きく動いたが、**線を引けないことは変わらなかった**:
+   *   音楽だけ 0% / 震える楽器 0% / 和音が 1.5 秒ごとに変わる音楽 7%
+   *   → ここまでは下がったが、
+   *   **和音が 0.4 秒ごとに変わる音楽 51% / たまにしゃべる声 29% / `music-wah` 100%**
+   * **声の無い素材が、声のある素材を追い越す。** 締めれば本物の声を弾く、緩めれば音楽を通す。
+   * 2026-09-11 の 3 回目に `music-chords-fast.wav` を作って確かめた（作る前は
+   * 「門を入れたから 9% 以下と 29% 以上で切れる」と思っていた）。0.05 のままにしてある。
    */
   minSpeechRatio: number;
   /**
@@ -94,9 +97,13 @@ export interface JetCutOptions {
    * 素材のどこかに動く瞬間があるかを問うなら、そこには十分な開きがある。
    *
    * 実測（鳴っているコマで `shapeChange` が 0.09 以上だった秒数。13 秒の素材）:
-   *   音楽だけ 0.00 秒 / 震える楽器 0.00 秒 / 和音が変わる音楽 0.04 秒
+   *   音楽だけ 0.00 秒 / 震える楽器 0.00 秒 / 和音が 1.5 秒ごとに変わる音楽 0.04 秒
+   *   **和音が 0.4 秒ごとに変わる音楽 0.30 秒**（2026-09-11 の 3 回目に足した素材）
    *   声のある素材は、いちばん少ない「BGM の上でたまにしゃべる」でも 2.76 秒
-   * 開きは 60 倍以上あり、しきい値をどこに置いても結論は変わらない。
+   * **開きは 9 倍。** 以前ここには「60 倍以上あり、しきい値をどこに置いても結論は変わらない」と
+   * 書いてあったが、和音の変化を速くしただけで 0.04 → 0.30 秒に上がった。0.5 秒との差は 1.7 倍しか
+   * 無いので、**もう少し速い曲を持ってくれば破れる**。いまここを締められないのは、
+   * 下限をこれ以上上げると短い素材で本物の声を弾くため（下の `SHAPE_SECONDS_OF_DURATION`）。
    *
    * ここは**声のある素材を弾かない**ことだけを見ればよい。声の無い素材を通しても
    * 害は無い（そのあとの声らしさで弾かれる）が、声のある素材を弾くと
@@ -106,6 +113,45 @@ export interface JetCutOptions {
    * `SHAPE_SECONDS_OF_DURATION` のぶんまで引き下げる（下の定数を参照）。
    */
   minShapeSeconds: number;
+  /**
+   * コマ単位の門。包絡（フォルマントの居場所）がこれだけ動いたコマだけを声とみなす
+   * （`FeatureTrack.envelopeChange` の値）。0 にすると門を開けっぱなしにできる。
+   *
+   * 素材単位の `minShapeChange` との違いは、**そのコマを残すかどうかを直に決める**こと。
+   * 素材単位の判定は「この素材に声があるか」しか言えないので、`music-wah` のように
+   * 声が無いのに声らしく見える素材を通してしまうと、そこから先は何も守れない。
+   *
+   * 値が 0.09 なのは、2026-09-11 の 2 回目に測った分かれ目から採った
+   * （鳴っているコマの中央値で、乾いた声 0.270 に対し震える楽器 0.009・音楽だけ 0.003）。
+   * ただし**この門だけでは母音を伸ばす声を切る**（残せた率 41%）。下の保持と必ず対で使う。
+   */
+  minEnvelopeChange: number;
+  /**
+   * 包絡の門がいったん開いたら、そのあと何秒は開けたままにするか（秒）。
+   *
+   * **母音を伸ばしている間は口が動かないので、包絡も動かない。** 門だけを置くと
+   * 「あー」と伸ばした所で声を切る。ところが**伸ばした母音の前には必ず声の立ち上がりがある**
+   * ので、いったん開いたら少し開けておけば、伸ばしている間も通る。
+   *
+   * 長くするほど声を取りこぼさなくなるが、余計なものも残るようになる。素直な交換。
+   * 実測（余白と「短い無音は残す」を外し、門の効きだけを裸で見たもの）:
+   *   保持                 0 秒  0.2  0.3  0.4  **0.5**  0.6  0.8
+   *   母音を伸ばす声の残せた率  56%  80%  85%  92%  **97%**  97%  97%
+   *   たまにしゃべる素材の精度  84%  76%  74%  72%  **70%**  68%  68%
+   * **0.5 秒で残せた率が頭打ちになる。** そこから先は精度が落ちるだけなので 0.5 を採った。
+   *
+   * なお JOURNAL の 2026-09-11（2 回目）に「0.6 秒」と見積もってあったが、
+   * それはコマ単位で数えた値で、**実際の切り口はそこまで悪くならない**
+   * （区間をまとめる工程が短い穴を埋めるため。既定の設定なら 0.2 秒で 100% に届く）。
+   * 裸で測り直して、頭打ちの位置を採り直した。
+   *
+   * **この保持には、鎖のように繋がる弱点がある。** 保持より短い間隔で音色が動き続けると、
+   * 門は一度も閉まらない。`music-chords-fast.wav`（和音が 0.4 秒ごとに変わる音楽・声なし）が
+   * まさにそれで、声だと判断されるコマの割合が 保持 0 秒で 23% → 0.5 秒で 51% まで伸びる。
+   * ただし**保持を 0 にしても 23% で、たまにしゃべる声（24%）と並ぶ**ので、
+   * これは保持のせいではなく門そのものの限界。保持を短くしても解決しない。
+   */
+  envelopeHold: number;
 }
 
 /**
@@ -139,6 +185,8 @@ export const DEFAULT_JET_CUT: JetCutOptions = {
   minSpeechRatio: 0.05,
   minShapeChange: 0.09,
   minShapeSeconds: 0.5,
+  minEnvelopeChange: 0.09,
+  envelopeHold: 0.5,
 };
 
 export interface JetCutPlan {
@@ -167,15 +215,25 @@ export interface JetCutPlan {
   noSpeechFound: boolean;
   /**
    * `noSpeechFound` になった理由。
-   * - `ratio`: 声らしいコマがほとんど無かった（打楽器だけなど）
-   * - `shape`: 声らしくは見えるが、素材のどこでもスペクトルの形が動かなかった
-   *   （鳴りっぱなしの音楽・震える楽器）
+   * - `ratio`: 声だと判断できたコマがほとんど無かった（打楽器だけなど）。
+   *   包絡の門も判断の一部なので、**「音色がどこでも動かない」もここに入る**。
+   *   門を入れてから、鳴りっぱなしの音楽と震える楽器はこちらで落ちるようになった
+   *   （以前は下の `shape` で落ちていた）。
+   * - `shape`: 声だと判断できたコマはあるが、素材のどこでもスペクトルの形が続けて動かなかった
    *
    * 分けて返すのは、同じ「何もしない」でも次にすべきことが違うため。
    */
   noSpeechReason: 'ratio' | 'shape' | null;
   /** スペクトルの形が動いていた秒数。`shape` の判断の根拠を見せるため。 */
   shapeSeconds: number;
+  /**
+   * 包絡の門が開いていた秒数（鳴っているコマのうち）。
+   *
+   * 保持のぶんも含む。**保持が音楽の一瞬の動きを引き伸ばしていないか**を
+   * 外から確かめるために出している。声の無い素材でここが伸びていたら、
+   * 保持が長すぎるということ。
+   */
+  envelopeSeconds: number;
   /**
    * 鳴っているコマのうち、声らしいと判断できたものの割合（0〜1）。
    * `level` のときは 1。低いときは「声の少ない素材に掛けていないか」を疑う手がかりになる。
@@ -229,12 +287,16 @@ function complement(keep: Range[], duration: number): Range[] {
  *   音そのものを見ないと出せない値なので、features.ts で作って渡してもらう。
  * @param shapeChange コマごとのスペクトルの形の変化。渡さなければ形での判断はしない
  *   （渡されないものを「動いていない」と読むと、丸ごと何もしなくなってしまう）。
+ * @param envelopeChange コマごとの包絡の動き。渡さなければ包絡の門は置かない。
+ *   `shapeChange` と同じ理由で、**渡されないものを「動いていない」と読まない**
+ *   （読んでしまうと、列を渡し忘れただけで声が 1 コマも残らなくなる）。
  */
 export function planJetCut(
   track: LoudnessTrack,
   options: Partial<JetCutOptions> = {},
   speechScore?: Float32Array,
   shapeChange?: Float32Array,
+  envelopeChange?: Float32Array,
 ): JetCutPlan {
   const opts = { ...DEFAULT_JET_CUT, ...options };
   const thresholdDb = opts.thresholdDb ?? autoThresholdDb(track, opts.sensitivity);
@@ -249,11 +311,19 @@ export function planJetCut(
   let speechFrames = 0;
   const useShape = !!shapeChange && shapeChange.length === track.db.length;
   let shapeFrames = 0;
+  // 包絡の門。開いたコマの番号を覚えておき、そこから holdFrames コマ先までは開けたままにする。
+  const useEnvelope = !!envelopeChange && envelopeChange.length === track.db.length && opts.minEnvelopeChange > 0;
+  const holdFrames = Math.max(0, Math.round(opts.envelopeHold / track.hop));
+  let envelopeOpenUntil = -1;
+  let envelopeFrames = 0;
 
   const loud: Range[] = [];
   for (let i = 0; i < track.db.length; i += 1) {
     if (track.db[i] <= thresholdDb || track.db[i] <= SILENCE_DB) {
       inSpeech = false;
+      // 無音を挟んだら保持も切る。前の発話の余韻で、そのあとに来た音楽まで通してしまわないため。
+      // 保持が守りたいのは「ひと続きの声の中で伸ばした母音」だけで、無音をまたぐ必要は無い。
+      envelopeOpenUntil = -1;
       continue;
     }
     soundingFrames += 1;
@@ -267,6 +337,15 @@ export function planJetCut(
       const score = (speechScore as Float32Array)[i];
       inSpeech = inSpeech ? score >= exit : score >= enter;
       if (!inSpeech) continue;
+      // 包絡の門。声らしさ（揺れ × 音程）は「音色が動いているか」を見ていないので、
+      // ここで口の動きを要求して、鳴りっぱなしの音を落とす。
+      // inSpeech（声らしさ側の状態）はここでは触らない。門で閉めたことを
+      // 「声でなくなった」と読むと、ヒステリシスが毎回入り直しになってしまう。
+      if (useEnvelope) {
+        if ((envelopeChange as Float32Array)[i] >= opts.minEnvelopeChange) envelopeOpenUntil = i + holdFrames;
+        if (i > envelopeOpenUntil) continue;
+        envelopeFrames += 1;
+      }
       speechFrames += 1;
     }
     loud.push({
@@ -277,6 +356,7 @@ export function planJetCut(
 
   const speechRatio = usedMode === 'speech' ? (soundingFrames > 0 ? speechFrames / soundingFrames : 0) : 1;
   const shapeSeconds = shapeFrames * track.hop;
+  const envelopeSeconds = envelopeFrames * track.hop;
 
   // 声が 1 つも見つからなかったら、何もしない。理由は 2 通りあり、どちらも
   // 単独では取りこぼす（割合は音楽を、形は打楽器を見逃す）ので、両方を見る。
@@ -297,6 +377,7 @@ export function planJetCut(
       noSpeechReason: lowRatio ? 'ratio' : 'shape',
       speechRatio,
       shapeSeconds,
+      envelopeSeconds,
     };
   }
 
@@ -317,5 +398,6 @@ export function planJetCut(
     noSpeechReason: null,
     speechRatio,
     shapeSeconds,
+    envelopeSeconds,
   };
 }

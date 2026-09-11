@@ -19,7 +19,7 @@ import { isSpeechAt, SHORT_FIXTURES } from '../fixtures/spec.mjs';
 
 const { analyzeLoudness } = await import('./src/loudness.ts');
 const { analyzeFeatures, FEATURE_NAMES } = await import('./src/features.ts');
-const { autoThresholdDb } = await import('./src/silence.ts');
+const { autoThresholdDb, DEFAULT_JET_CUT } = await import('./src/silence.ts');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const out = path.join(root, 'lab/fixtures/out');
@@ -155,9 +155,9 @@ console.log(`${pad('  平均', 22)}${average}`);
       sounding += 1;
       if (features.speechScore[i] >= 0.2) speechLike += 1;
       if (features.shapeChange[i] >= 0.09) moving += 1;
-      // 包絡のほうは、まだ判定に使っていないので silence.ts に定数が無い。
-      // 声（乾いた素材でも 0.27）と鳴りっぱなしの音楽（0.01 まで）の間を取る。
-      if (features.envelopeChange[i] >= 0.09) envMoving += 1;
+      // 2026-09-11 の 3 回目からは、これがそのままコマ単位の門になっている。
+      // ここで手打ちにすると判定とずれるので、判定側の既定値をそのまま使う。
+      if (features.envelopeChange[i] >= DEFAULT_JET_CUT.minEnvelopeChange) envMoving += 1;
     }
     const ratio = sounding > 0 ? speechLike / sounding : 0;
     console.log(
@@ -213,8 +213,10 @@ console.log(`${pad('  平均', 22)}${average}`);
   console.log('\n「乾いた声」と「震える楽器」を見比べること。');
   console.log('形では 3.8 倍しか開かない（0.188 と 0.050）が、包絡なら 30 倍開く（0.270 と 0.009）。');
   console.log('ただし ※ speech-sustained（母音を伸ばす声）は 0.037 まで落ちる。');
-  console.log('本物の声にある性質なので、包絡をコマ単位の門にするとここで声を切る。');
-  console.log('music-wah（声と同じ速さでフォルマントが動く楽器）は、いまもどちらでも弾けない。');
+  console.log('本物の声にある性質なので、門だけを置くとここで声を切る。');
+  console.log('（2026-09-11 の 3 回目に 0.5 秒の保持を足して、ここは戻した）');
+  console.log('music-wah（フォルマントが動く楽器）と music-chords-fast（和音が速く変わる音楽）は、');
+  console.log('声がゼロなのに包絡が動く。門を置いても、この 2 本は通り抜ける。');
 }
 
 console.log('\n※ は意地悪な素材（BGM が大きい / 刻む打楽器 / 震える楽器 / 母音を伸ばす声 など）。');

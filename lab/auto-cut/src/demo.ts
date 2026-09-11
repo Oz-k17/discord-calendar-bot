@@ -213,6 +213,7 @@ function refreshCut() {
   const mode = currentMode();
   document.body.classList.toggle('mode-speech', mode === 'speech');
   $<HTMLOutputElement>('out-speech').textContent = Number($<HTMLInputElement>('speech-threshold').value).toFixed(2);
+  $<HTMLOutputElement>('out-envelope-hold').textContent = `${Number($<HTMLInputElement>('envelope-hold').value).toFixed(2)} 秒`;
   if (!voice) return;
   plan = planJetCut(
     voice.track,
@@ -222,9 +223,11 @@ function refreshCut() {
       sensitivity: Number($<HTMLInputElement>('sensitivity').value),
       minSilence: Number($<HTMLInputElement>('min-silence').value),
       padding: Number($<HTMLInputElement>('padding').value),
+      envelopeHold: Number($<HTMLInputElement>('envelope-hold').value),
     },
     voice.features.speechScore,
     voice.features.shapeChange,
+    voice.features.envelopeChange,
   );
 
   $<HTMLOutputElement>('out-sensitivity').textContent = Number($<HTMLInputElement>('sensitivity').value).toFixed(2);
@@ -239,6 +242,9 @@ function refreshCut() {
     ['クリップ数', `${plan.keep.length} 本`],
     ['しきい値', `${plan.thresholdDb.toFixed(1)} dB`],
     ['判定', plan.usedMode === 'speech' ? '声らしさも見た' : '音量だけ'],
+    ...(plan.usedMode === 'speech'
+      ? [['音色が動いていた', `${plan.envelopeSeconds.toFixed(2)} 秒`] as [string, string]]
+      : []),
   ]
     .map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`)
     .join('');
@@ -253,8 +259,9 @@ function refreshCut() {
       plan.noSpeechReason === 'shape'
         ? '音の中身が最初から最後まで変わりません。鳴りっぱなしの音楽ではありませんか？ ' +
           '声だと思うなら「音量だけ」で試してください。'
-        : '声らしいところが見つからなかったので、何もしていません。' +
-          '音楽だけの素材ではありませんか？（切りたいなら「音量だけ」で試してください）';
+        : '声だと判断できるところが見つからなかったので、何もしていません。' +
+          '音楽だけの素材か、音色の動かない音（鳴りっぱなしの楽器）ではありませんか？' +
+          '（切りたいなら「音量だけ」で試してください）';
     warning.hidden = false;
   } else if (plan.usedMode === 'speech' && plan.speechRatio < 0.5) {
     warning.textContent =
@@ -372,7 +379,7 @@ bindFile('bgm-file', 'bgm-status', $<HTMLCanvasElement>('bgm-canvas'), (loaded) 
   refreshDuck();
 });
 
-for (const id of ['sensitivity', 'min-silence', 'padding', 'speech-threshold']) {
+for (const id of ['sensitivity', 'min-silence', 'padding', 'speech-threshold', 'envelope-hold']) {
   $<HTMLInputElement>(id).addEventListener('input', refreshCut);
 }
 for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="mode"]')) {
