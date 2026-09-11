@@ -3,9 +3,18 @@
  * 実体（Blob / HTMLMediaElement）は JSON にできないので、プロジェクト側は mediaId だけを持ち、
  * ここが Blob・再生要素・サムネイル・フォルダ分けを面倒みる。
  * Blob は IndexedDB に保存するので、リロードやページ移動をしても素材は残る。
+ *
+ * 素材の実体の持ち方は 2 通りある。
+ *
+ *  - **取り込み** … ファイルを選んで入れたもの。Blob ごと IndexedDB に入る。
+ *    その端末のそのブラウザの中にしか無いので、人に渡せない。
+ *  - **参照**（`src` あり）… NAS などに置いてある物を URL で指しているだけ。
+ *    実体は持たないので容量を食わず、同じ URL が見える人なら誰でも同じ素材を開ける。
+ *
+ * どちらも外向きは `url` に揃うので、再生・サムネイル・書き出しの側は区別しなくてよい。
  */
 
-import { BlobSource, Input } from 'mediabunny';
+import { BlobSource, Input, UrlSource } from 'mediabunny';
 import { VIDEO_INPUT_FORMATS } from './formats';
 
 export type MediaKind = 'video' | 'image' | 'audio';
@@ -27,6 +36,12 @@ export interface MediaAsset {
   createdAt: number;
   /** 解析しきれなかった素材に付く注意書き（登録自体はする）。 */
   warning?: string;
+  /**
+   * 参照している素材の在り処。取り込んだ素材では undefined。
+   * **ページからの相対パスのまま持つ**（`media/a.mp4` など）。
+   * 絶対 URL で持つと、NAS のホスト名や口を変えた瞬間に全プロジェクトが壊れる。
+   */
+  src?: string;
 }
 
 export const UNSORTED = '未分類';
@@ -61,7 +76,8 @@ function openDb(): Promise<IDBDatabase | null> {
 }
 
 interface StoredAsset extends Omit<MediaAsset, 'url'> {
-  blob: Blob;
+  /** 取り込んだ実体。参照（src あり）の素材では持たない。 */
+  blob?: Blob;
 }
 
 async function dbPut(record: StoredAsset): Promise<void> {
@@ -140,17 +156,36 @@ async function migrateLegacyAssets(): Promise<void> {
   if (typeof indexedDB !== 'undefined') indexedDB.deleteDatabase(LEGACY_DB_NAME);
 }
 
+// ---------- 参照素材の在り処 ----------
+
+/**
+ * 相対パスで覚えている在り処を、いまのページを基準に絶対 URL へ直す。
+ * 解けなければそのまま返す（絶対 URL を直に入れられた場合もここを通る）。
+ */
+export function absoluteSrc(src: string): string {
+  try {
+    return new URL(src, document.baseURI).href;
+  } catch {
+    return src;
+  }
+}
+
 // ---------- 解析 ----------
+
+/** 拡張子だけで種類を決める。URL 参照の素材では MIME が手元に無いので、こちらしか使えない。 */
+export function kindOfName(name: string): MediaKind | null {
+  const ext = name.split('?')[0].split('#')[0].split('.').pop()?.toLowerCase() ?? '';
+  if (['mp4', 'mov', 'webm', 'mkv', 'm4v'].includes(ext)) return 'video';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif'].includes(ext)) return 'image';
+  if (['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'].includes(ext)) return 'audio';
+  return null;
+}
 
 function kindOf(file: File): MediaKind | null {
   if (file.type.startsWith('video/')) return 'video';
   if (file.type.startsWith('image/')) return 'image';
   if (file.type.startsWith('audio/')) return 'audio';
-  const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-  if (['mp4', 'mov', 'webm', 'mkv', 'm4v'].includes(ext)) return 'video';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif'].includes(ext)) return 'image';
-  if (['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'].includes(ext)) return 'audio';
-  return null;
+  return kindOfName(file.name);
 }
 
 /**
@@ -234,10 +269,15 @@ export function normalizeFps(rate: number): number | undefined {
  * <video> 側からは取れない値なので mediabunny に任せる。デコードはしないため、
  * このブラウザで再生できないコーデックでも数えられる。
  */
-async function probeFrameRate(blob: Blob): Promise<number | undefined> {
+/**
+ * 素材そのもののフレームレートを読む。
+ * URL を渡した場合も全部は落とさない（mediabunny が Range で頭だけ読む）。
+ */
+async function probeFrameRate(from: Blob | string): Promise<number | undefined> {
   let input: Input | undefined;
   try {
-    input = new Input({ source: new BlobSource(blob), formats: VIDEO_INPUT_FORMATS });
+    const source = typeof from === 'string' ? new UrlSource(from) : new BlobSource(from);
+    input = new Input({ source, formats: VIDEO_INPUT_FORMATS });
     const track = await input.getPrimaryVideoTrack();
     if (!track) return undefined;
     // 全パケットを数えると長尺で時間がかかるので、頭の方だけで平均を取る。
@@ -413,7 +453,11 @@ class MediaRegistry {
     await migrateLegacyAssets();
     for (const record of await dbAll()) {
       const { blob, ...rest } = record;
-      this.assets.set(rest.id, { ...rest, url: URL.createObjectURL(blob) });
+      // 参照の素材は相対パスで持っているので、いまのページを基準に解く。
+      // 取り込みの素材は Blob から一時 URL を作る。
+      const url = rest.src ? absoluteSrc(rest.src) : blob ? URL.createObjectURL(blob) : '';
+      if (!url) continue; // 実体も在り処も無い壊れたレコード。読み飛ばす。
+      this.assets.set(rest.id, { ...rest, url });
     }
     this.emit();
   }
@@ -455,6 +499,73 @@ class MediaRegistry {
     return asset;
   }
 
+  /**
+   * NAS などに置いてある素材を、実体を持たずに参照として登録する。
+   *
+   * `src` はページからの相対パス（`media/a.mp4`）で渡すこと。絶対 URL で覚えると、
+   * NAS のホスト名や口が変わった途端に、それを使った全プロジェクトが開けなくなる。
+   * 同じ素材を二重に登録しても意味が無いので、既に同じ在り処のものがあればそれを返す。
+   */
+  async addFromUrl(src: string, folder = UNSORTED): Promise<MediaAsset> {
+    const known = [...this.assets.values()].find((a) => a.src === src);
+    if (known) return known;
+
+    const name = decodeURIComponent(src.split('/').pop() || src);
+    const kind = kindOfName(name);
+    if (!kind) throw new Error(`${name} は対応していない形式です`);
+    const url = absoluteSrc(src);
+    const base = { id: uid('m'), name, kind, size: 0, folder, createdAt: Date.now(), src };
+
+    let asset: MediaAsset;
+    if (kind === 'video') {
+      const [meta, fps] = await Promise.all([
+        probeVideo(url),
+        withDeadline<number | undefined>(probeFrameRate(url), () => undefined, 8000),
+      ]);
+      asset = {
+        ...base,
+        url,
+        duration: meta.duration,
+        width: meta.width,
+        height: meta.height,
+        fps,
+        thumbnail: meta.thumb,
+        warning: meta.warning,
+      };
+    } else if (kind === 'image') {
+      const meta = await probeImage(url);
+      if (!meta) throw new Error(`${name} を画像として読み込めませんでした`);
+      asset = { ...base, url, duration: 0, width: meta.width, height: meta.height, thumbnail: meta.thumb };
+    } else {
+      asset = { ...base, url, duration: await probeAudio(url), width: 0, height: 0, thumbnail: '' };
+    }
+
+    this.assets.set(asset.id, asset);
+    this.emit();
+    const { url: _ignored, ...rest } = asset;
+    void dbPut(rest);
+    return asset;
+  }
+
+  /**
+   * もらったプロジェクトファイルに入っていた参照素材を、そのまま迎え入れる。
+   * 在り処も寸法も向こうで調べ済みなので、ここでは読み直さない
+   * （NAS に一瞬繋がらなくても、開くところまでは進める方がよい）。
+   * 既にある id には触らない。自分の整理を、もらったファイルに崩されたくない。
+   */
+  async adopt(assets: (Omit<MediaAsset, 'url' | 'src'> & { src: string })[]): Promise<number> {
+    await this.restore();
+    let added = 0;
+    for (const incoming of assets) {
+      if (this.assets.has(incoming.id)) continue;
+      this.assets.set(incoming.id, { ...incoming, url: absoluteSrc(incoming.src) });
+      void dbPut({ ...incoming });
+      added += 1;
+    }
+    if (added > 0) this.emit();
+    return added;
+  }
+
   update(id: string, patch: Partial<Pick<MediaAsset, 'name' | 'folder'>>) {
     const asset = this.assets.get(id);
     if (!asset) return;
@@ -470,7 +581,8 @@ class MediaRegistry {
   remove(id: string) {
     const asset = this.assets.get(id);
     if (!asset) return;
-    URL.revokeObjectURL(asset.url);
+    // 参照の素材の url は NAS を指しているだけなので、取り消すものが無い。
+    if (!asset.src) URL.revokeObjectURL(asset.url);
     this.assets.delete(id);
     for (const [key, el] of [...this.elements]) {
       if (el.dataset.mediaId === id) this.releaseElement(key);

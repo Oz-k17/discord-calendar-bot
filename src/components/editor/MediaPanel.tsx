@@ -6,6 +6,7 @@ import { clipFromAsset } from '../../model/factory';
 import { adoptSourceFps, placeClip, tracksOf } from '../../model/ops';
 import { useEditor } from '../../store/editor';
 import { MEDIA_DND_TYPE } from './MultiTimeline';
+import { NasBrowser } from './NasBrowser';
 import { EmptyHint, Panel } from '../ui';
 
 const PAGE_SIZE = 6;
@@ -47,6 +48,7 @@ export function MediaPanel() {
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [browsing, setBrowsing] = useState(false);
 
   const folders = useMemo(() => ['すべて', ...mediaRegistry.folders()], [assets]);
   const filtered = useMemo(
@@ -88,11 +90,23 @@ export function MediaPanel() {
     <Panel
       title="素材"
       action={
-        <button type="button" className="ghost" onClick={() => inputRef.current?.click()} disabled={busy}>
-          {busy ? '読込中…' : '＋ 追加'}
-        </button>
+        <div className="panel-actions">
+          <button
+            type="button"
+            className="ghost"
+            title="NAS などの共有フォルダから、コピーせずに参照する"
+            onClick={() => setBrowsing(true)}
+            disabled={busy}
+          >
+            共有
+          </button>
+          <button type="button" className="ghost" onClick={() => inputRef.current?.click()} disabled={busy}>
+            {busy ? '読込中…' : '＋ 追加'}
+          </button>
+        </div>
       }
     >
+      {browsing && <NasBrowser onClose={() => setBrowsing(false)} />}
       <input
         ref={inputRef}
         type="file"

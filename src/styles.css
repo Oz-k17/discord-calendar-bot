@@ -2101,3 +2101,86 @@ hr {
     grid-column: 2;
   }
 }
+
+/* ---------- 共有フォルダ（NAS）から選ぶ窓 ---------- */
+
+.base-row {
+  display: flex;
+  gap: 6px;
+}
+
+.base-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 10px 0 8px;
+}
+
+/* いま開いているフォルダ（＝押せないパンくず）は、薄くせず現在地として見せる。 */
+.crumbs .chip:disabled {
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.nas-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 44vh;
+  overflow-y: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+}
+
+.nas-list > li + li {
+  border-top: 1px solid var(--line-soft);
+}
+
+.nas-list > li.muted {
+  padding: 12px;
+}
+
+.nas-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nas-row:hover {
+  background: var(--bg-raised);
+}
+
+.nas-row.picked {
+  background: var(--accent-soft);
+}
+
+.nas-kind {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.nas-size {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}

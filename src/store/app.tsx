@@ -214,6 +214,12 @@ export interface Settings {
   shortcuts: Record<ShortcutAction, string>;
   /** 編集画面のパネル配置。 */
   panels: PanelLayout;
+  /**
+   * 共有素材フォルダの場所（NAS など）。ページからの相対パスで持つ。
+   * 既定の `media/` は「アプリと素材を同じ Web サーバから配る」構成（deploy/nas/）に合わせたもの。
+   * 相対で持つのは、NAS のホスト名や口が変わってもプロジェクトが壊れないようにするため。
+   */
+  mediaBase: string;
 }
 
 /** 初回だけ画面幅で当たりをつける。以後はユーザーが選んだものを記憶する。 */
@@ -231,6 +237,7 @@ export const DEFAULT_SETTINGS: Settings = {
   snap: true,
   shortcuts: { ...DEFAULT_SHORTCUTS },
   panels: DEFAULT_PANELS,
+  mediaBase: 'media/',
 };
 
 export interface TextTemplate {
