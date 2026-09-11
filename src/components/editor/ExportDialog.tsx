@@ -104,6 +104,13 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
   const size = exportSize(aspect, quality);
   const running = progress !== null;
 
+  /**
+   * 1 コマずつの書き出し（WebCodecs）は「安全なコンテキスト」でしか使えない。
+   * http:// で配ると黙って実時間収録に落ちるので、押す前に知らせる。
+   * localhost は http でも安全扱いなので、手元で試すと気づけない。
+   */
+  const insecureFallback = !frameAccurate && typeof window !== 'undefined' && !window.isSecureContext;
+
   const estimatedBytes = useMemo(() => estimateExportBytes(duration, bitrate * 1_000_000), [duration, bitrate]);
   const likelyTooLarge = embedded && estimatedBytes > EMBEDDED_SAVE_LIMIT_BYTES;
 
@@ -171,6 +178,14 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
         <h2>書き出し</h2>
 
         {!supported && <p className="error-note">このブラウザは書き出しに対応していません。Chrome / Edge をお試しください。</p>}
+
+        {insecureFallback && (
+          <p className="warn small">
+            この URL は <code>http</code> なので、<strong>1 コマずつの書き出しが使えません</strong>。
+            実時間で録画する方式になるため、尺と同じだけ時間がかかり、端末が重いとコマを落とすことがあります。
+            <strong>https で開けるようにすると</strong>、速く・確実になります（ファイルも小さくなります）。
+          </p>
+        )}
 
         <Field label="アスペクト比">
           <div className="chip-row wrap">

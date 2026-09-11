@@ -243,8 +243,13 @@ ffmpeg.wasm のような重量級の変換エンジンは持ち込まず、エ�
   素材は**在り処だけ**が入るので、同じ共有フォルダが見える人ならそのまま開けます。
   取り込んだ（ファイル選択で入れた）素材は端末の中にしか無いので運べません。書き出すときに名前を知らせます。
 
-nginx と docker compose の一式、UGREEN NAS（UGOS Pro）での手順は
-[`deploy/nas/README.md`](./deploy/nas/README.md) にあります。
+nginx と docker compose の一式、UGREEN NAS（UGOS Pro）での手順、外から使うための
+Cloudflare Tunnel 版は [`deploy/nas/README.md`](./deploy/nas/README.md) にあります。
+
+**配るときは https を用意してください。** `http://` だとブラウザが「安全なコンテキスト」と
+みなさないため WebCodecs が使えず、書き出しが 1 コマずつではなく実時間の録画に落ちます
+（遅い・コマ落ちする・ファイルが数倍）。編集とプレビューは動くので気づきにくく、
+書き出しの画面にも注意を出すようにしてあります。
 
 同時編集はできません。共有されるのは素材だけで、プロジェクトと設定は各自のブラウザの中です。
 
