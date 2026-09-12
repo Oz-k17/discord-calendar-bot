@@ -3,7 +3,7 @@
  * 素材を用意しなくても壊れていないことが分かるように、画面から実行できるようにしてある。
  */
 
-import { analyzeLoudness, toDb, type AudioLike } from './loudness.ts';
+import { analyzeLoudness, toDb, type AudioLike, type LoudnessTrack } from './loudness.ts';
 import { autoThresholdDb, planJetCut } from './silence.ts';
 import { gainAt, planDucking } from './ducking.ts';
 import { toClipEdits } from './edits.ts';
@@ -297,6 +297,62 @@ export function runSelfTest(): TestResult[] {
     const fast = mid(modulationRatio(analyzeLoudness(makeModulated(3, sr, 4.2), 0.02)));
     const slow = mid(modulationRatio(analyzeLoudness(makeModulated(3, sr, 1.4), 0.02)));
     check('音節が遅い声は揺れが大きく下がる', slow < fast * 0.7, `1.4Hz ${slow.toFixed(3)} / 4.2Hz ${fast.toFixed(3)}`);
+
+    // --- 窓を伸ばしても遅い声は拾えない（2026-09-12・3 回目に測って分かった）---
+    //
+    // 前の回の記録には「窓を 1.28 秒（64 コマ）に伸ばせば刻みが 0.78Hz になり、
+    // 3Hz より下を巻き込まずに広げられる」と書いてあった。**測ったら逆だった。**
+    // 窓を伸ばすと、伸ばしたぶんだけ**いちばん遅い帯（0.78Hz）に取り分が移る**。
+    // そこには音節ではなく、発話そのものの入り切りと音量の流れが乗っている。
+    // `speech.wav` の声のコマで測ると 3〜6Hz の取り分は 50.9% → 27.5%、
+    // いちばん遅い帯は 34.9% → 63.6%。声も音楽も一緒に下がるので、
+    // 固定のしきい値に対しては**声だけが先に落ちる**（取りこぼしが増える）。
+    //
+    // ここでは発話の入り切りを模した列（1.2 秒鳴って 0.7 秒黙る・鳴っている間は 4Hz）で、
+    // 窓を伸ばすと取り分が下がることを固定しておく。
+    {
+      const hop = 0.02;
+      const frames = 500;
+      const db = new Float32Array(frames);
+      for (let i = 0; i < frames; i += 1) {
+        const t = i * hop;
+        const speaking = t % 1.9 < 1.2;
+        db[i] = speaking ? -20 + 6 * Math.sin(2 * Math.PI * 4 * t) : -55;
+      }
+      const track: LoudnessTrack = { hop, db, duration: frames * hop };
+      const narrow = mid(modulationRatio(track, 3, 6, 1.0));
+      const wide = mid(modulationRatio(track, 3, 6, 1.28));
+      check('窓を伸ばすと音節帯の取り分は下がる（上がらない）', wide < narrow, `0.64s ${narrow.toFixed(3)} → 1.28s ${wide.toFixed(3)}`);
+    }
+
+    // --- 分母に遅い揺れを敷いてあるのは、遅いうねりで音楽を弾くため ---
+    //
+    // 揺れの割合は「音節帯 ÷ 窓の中の揺れ全部」。分母に遅い帯が入っているので、
+    // ゆっくり大きくうねる音は、上に音節と同じ速さの刻みが乗っていても割合が低く出る。
+    // **これが効いている**ことを固定しておく。同じ回に「分母からいちばん遅い帯を外す」手を
+    // 試したが、外すと `music-swell.wav` の声らしさの中央値が 0.229 → 0.884 に跳ね、
+    // 本物の声のどれよりも高くなった（`bgm.wav` も声らしいコマが 14% → 95%）。
+    // 分母は「ほかにどんな揺れがあるか」を見る場所で、削ると比べる相手が消える。
+    {
+      const hop = 0.02;
+      const frames = 500;
+      const swelling = new Float32Array(frames);
+      const flat = new Float32Array(frames);
+      for (let i = 0; i < frames; i += 1) {
+        const t = i * hop;
+        const ripple = 0.6 * Math.sin(2 * Math.PI * 4.2 * t);
+        // 0.5Hz で 12dB 上下する、ゆっくり大きなうねり。
+        swelling[i] = -25 + 12 * Math.sin(2 * Math.PI * 0.5 * t) + ripple;
+        flat[i] = -25 + ripple;
+      }
+      const withSwell = mid(modulationRatio({ hop, db: swelling, duration: frames * hop }, 3, 6, 1.0));
+      const without = mid(modulationRatio({ hop, db: flat, duration: frames * hop }, 3, 6, 1.0));
+      check(
+        'ゆっくり大きなうねりは、同じ刻みでも揺れの割合を押し下げる',
+        withSwell < without * 0.5,
+        `うねり有 ${withSwell.toFixed(3)} / 無 ${without.toFixed(3)}`,
+      );
+    }
 
     // 音色: 音程のある音は尖っていて、雑音は平坦。
     const toneBuffer = makeModulated(2, sr, 4);

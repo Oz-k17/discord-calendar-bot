@@ -394,15 +394,26 @@ function speak(
  * 「音程がある（tone）× 音節の速さで揺れる（modulation）」で測っているので、
  * 音程のある楽器を音節と同じ速さで震わせると、声が 1 つも無いのに
  * 声らしさが高く出てしまう。この抜け道を塞げているかを確かめるために要る。
+ *
+ * `swellDepth` と `tremoloDepth` は揺れの深さ。既定値は従来の音をそのまま出す。
+ * **深さを別々に指定できるようにしたのは 2026-09-12（3 回目）で、
+ * 「ゆっくり大きくうねり、その上に浅く刻む音楽」を作るため。**
+ * 揺れの割合（modulation）は分母に全部の揺れを敷いているので、
+ * 遅いうねりが大きいほど音節帯の取り分は小さく出る。
+ * つまり**遅いうねりが、速い刻みを隠していた**。そこを分母から外す手を試すなら、
+ * 外したとたんに跳ね上がる素材が手元に無いと、良くなったのか緩くなったのかが分からない。
+ *
+ * 深さは 0〜1 のつもり。1 を超えると音量が負になって位相が反転するが、
+ * 弾いていない（試し用の素材を作るだけなので、渡す値はこのファイルの中で閉じている）。
  */
-function music(data, from, to, level, tremolo = 0) {
+function music(data, from, to, level, tremolo = 0, swellDepth = 0.15, tremoloDepth = 0.45) {
   const chord = [220, 277.18, 329.63, 440];
   for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
     const t = i / SR;
     // 2 秒周期で少し揺らして、まったくの定常にならないようにする。
-    const swell = 0.85 + 0.15 * Math.sin(2 * Math.PI * 0.5 * t);
+    const swell = 1 - swellDepth + swellDepth * Math.sin(2 * Math.PI * 0.5 * t);
     // ビブラート気味に深く揺らす。声の音節（4.2Hz）と同じ帯域を狙う。
-    const shake = tremolo ? 0.55 + 0.45 * Math.sin(2 * Math.PI * tremolo * t) : 1;
+    const shake = tremolo ? 1 - tremoloDepth + tremoloDepth * Math.sin(2 * Math.PI * tremolo * t) : 1;
     let v = 0;
     for (const f of chord) v += Math.sin(2 * Math.PI * f * t);
     data[i] += (level * swell * shake * v) / chord.length;
@@ -509,6 +520,10 @@ function makeShort(
     bgm = false,
     bgmLevel = 0.12,
     bgmTremolo = 0,
+    /** ゆっくりしたうねり（0.5Hz）の深さ。既定は従来どおりごく浅い。 */
+    bgmSwellDepth = 0.15,
+    /** トレモロの深さ。浅くすると「うねりに隠れた刻み」が作れる。 */
+    bgmTremoloDepth = 0.45,
     /** 声の音節と同じ速さで共鳴が動く楽器（Hz）。0 で鳴らさない。 */
     wah = 0,
     wahLevel = 0.3,
@@ -533,7 +548,7 @@ function makeShort(
   const random = rng(seed);
   const data = new Float32Array(Math.round(SHORT_LENGTH * SR));
   noise(data, noiseLevel, random);
-  if (bgm) music(data, 0, SHORT_LENGTH, bgmLevel, bgmTremolo);
+  if (bgm) music(data, 0, SHORT_LENGTH, bgmLevel, bgmTremolo, bgmSwellDepth, bgmTremoloDepth);
   if (wah) wahChord(data, 0, SHORT_LENGTH, wahLevel, wah);
   if (chordEvery) chordProgression(data, 0, SHORT_LENGTH, chordLevel, chordEvery);
   if (beat) drums(data, 0, SHORT_LENGTH, beatLevel, beat, random);
