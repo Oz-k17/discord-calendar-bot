@@ -215,8 +215,10 @@ console.log(`${pad('  平均', 22)}${average}`);
   console.log('ただし ※ speech-sustained（母音を伸ばす声）は 0.037 まで落ちる。');
   console.log('本物の声にある性質なので、門だけを置くとここで声を切る。');
   console.log('（2026-09-11 の 3 回目に 0.5 秒の保持を足して、ここは戻した）');
-  console.log('music-wah（フォルマントが動く楽器）と music-chords-fast（和音が速く変わる音楽）は、');
-  console.log('声がゼロなのに包絡が動く。門を置いても、この 2 本は通り抜ける。');
+  console.log('music-wah（フォルマントが動く楽器）と music-chords-fast / faster（和音が速く変わる音楽）は、');
+  console.log('声がゼロなのに包絡が動く。門を置いても、この 3 本は通り抜ける。');
+  console.log('とくに music-chords-faster（0.2 秒ごとに和音）は shapeChange の中央値が 0.093 で、');
+  console.log('しきい値 0.09 をすでに上回っている。素材単位の形の判定も、ここは支えられない。');
 }
 
 console.log('\n※ は意地悪な素材（BGM が大きい / 刻む打楽器 / 震える楽器 / 母音を伸ばす声 など）。');

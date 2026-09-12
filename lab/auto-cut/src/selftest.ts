@@ -107,6 +107,32 @@ function makeFormantTone(
   return { sampleRate, numberOfChannels: 1, length, getChannelData: () => data };
 }
 
+/**
+ * 和音が一定の間隔で切り替わる音楽。声は入っていない。
+ *
+ * **素材単位の形の判定が何を測っているのかを切り分けるためのもの。**
+ * 切り替わる間隔だけを変えて、ほかは 1 つも変えない。それで判定の結論がひっくり返るなら、
+ * その判定は「声があるか」ではなく「変化がどれくらいの間隔で来るか」を見ていることになる。
+ */
+function makeChordProgression(seconds: number, sampleRate: number, everySeconds: number, amp = 0.5): AudioLike {
+  const progression = [
+    [220, 277.18, 329.63],
+    [246.94, 293.66, 369.99],
+    [196, 246.94, 293.66],
+    [174.61, 220, 261.63],
+  ];
+  const length = Math.round(seconds * sampleRate);
+  const data = new Float32Array(length);
+  for (let i = 0; i < length; i += 1) {
+    const t = i / sampleRate;
+    const chord = progression[Math.floor(t / everySeconds) % progression.length];
+    let v = 0;
+    for (const f of chord) v += Math.sin(2 * Math.PI * f * t) + 0.4 * Math.sin(2 * Math.PI * f * 2 * t);
+    data[i] = (amp * v) / (chord.length * 1.4);
+  }
+  return { sampleRate, numberOfChannels: 1, length, getChannelData: () => data };
+}
+
 /** 白色雑音。音色が平坦な音の代表として使う。 */
 function makeNoise(seconds: number, sampleRate: number, amp = 0.3): AudioLike {
   const length = Math.round(seconds * sampleRate);
@@ -404,6 +430,41 @@ export function runSelfTest(): TestResult[] {
         '3 秒の声では弾かない',
         !shortSpeechPlan.noSpeechFound,
         `形が動いた ${shortSpeechPlan.shapeSeconds.toFixed(2)} 秒`,
+      );
+
+      // --- ここから下は「できないこと」を固定しておくための検算（2026-09-12） ---
+      //
+      // 素材単位の形の判定は「声があるか」を見ているつもりだったが、実際に見ているのは
+      // **スペクトルの変化がどれくらいの間隔で来るか**だった。
+      // 下の 2 つは和音の切り替わる間隔だけが違い、ほかは 1 つも変えていない。
+      // それで結論がひっくり返るので、この判定は声の有無を見ていない。
+      const planChords = (everySeconds: number) => {
+        const music = makeChordProgression(10, sr, everySeconds);
+        const chordTrack = analyzeLoudness(music, 0.02);
+        const chordFeatures = analyzeFeatures(music, chordTrack);
+        return planJetCut(
+          chordTrack,
+          { mode: 'speech' },
+          chordFeatures.speechScore,
+          chordFeatures.shapeChange,
+          chordFeatures.envelopeChange,
+        );
+      };
+      // 変化の間隔が均す窓（0.15 秒）より十分に広ければ、棘は均されて消える。
+      const slowChords = planChords(1.5);
+      check(
+        '和音がゆっくり変わる音楽は、形の判定で止まる',
+        slowChords.noSpeechFound && slowChords.noSpeechReason === 'shape',
+        `形が動いた ${slowChords.shapeSeconds.toFixed(2)} 秒`,
+      );
+      // 窓より狭い間隔で変わり続けると、均しても埋まらなくなる。
+      // **声が 1 つも入っていないのに、素材単位の判定を素通りする。**
+      // 0.2 秒ごとは 16 分音符（BPM 150）くらいで、刻みの速い伴奏なら現実にいくらでもある。
+      const fastChords = planChords(0.2);
+      check(
+        '和音が均す窓より速く変わると素通りする（既知の限界）',
+        !fastChords.noSpeechFound && fastChords.shapeSeconds >= 0.5,
+        `形が動いた ${fastChords.shapeSeconds.toFixed(2)} 秒 / 声らしい割合 ${(fastChords.speechRatio * 100).toFixed(0)}%`,
       );
     }
 
