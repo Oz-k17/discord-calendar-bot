@@ -221,6 +221,108 @@ console.log(`${pad('  平均', 22)}${average}`);
   console.log('しきい値 0.09 をすでに上回っている。素材単位の形の判定も、ここは支えられない。');
 }
 
+// --- 子音の痕跡（広帯域の雑音の粒）を測る ---
+// 2026-09-12 の 2 回目に `speak()` へ子音と息を足したので、ここを初めて測れるようになった。
+// 上の AUC の表では `zcr` が 0.000〜0.007 と出るが、あれは「声のコマ」を
+// **無音のコマと**比べているせい（乾いた素材の無音はほぼ雑音なので zcr が最も高い）。
+// 判定が見たいのは「鳴っているコマの中で、声と音楽を分けられるか」なので、そちらを出す。
+//
+// 子音は音節の 1〜3 割しか占めないので、**中央値では出ない**。
+// 「その素材に雑音の粒が混じっているか」を見るには上側の分位が要る。
+{
+  console.log('\n鳴っているコマの zcr と flux（子音は少数なので、中央値ではなく上位 10% を見る）\n');
+  console.log(
+    `${pad('素材', 24)}${pad('区分', 6)}${pad('zcr 中央', 11)}${pad('zcr 上位10%', 13)}` +
+      `${pad('flux 中央', 11)}${pad('flux 上位10%', 13)}${pad('平坦さ 上位10%', 15)}`,
+  );
+  console.log('-'.repeat(93));
+  const quantile = (values, p) => {
+    if (values.length === 0) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))];
+  };
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track);
+    const threshold = autoThresholdDb(track, 0.25);
+    const groups = { 声: { zcr: [], flux: [], flat: [] }, 他: { zcr: [], flux: [], flat: [] } };
+    for (let i = 0; i < track.db.length; i += 1) {
+      if (track.db[i] <= threshold) continue;
+      const t = i * track.hop;
+      if (isSpeechAt(fixture, t - 0.15) !== isSpeechAt(fixture, t + 0.15)) continue;
+      const group = groups[isSpeechAt(fixture, t) ? '声' : '他'];
+      group.zcr.push(features.zcr[i]);
+      group.flux.push(features.flux[i]);
+      group.flat.push(features.flatness[i]);
+    }
+    for (const [label, group] of Object.entries(groups)) {
+      if (group.zcr.length === 0) continue;
+      console.log(
+        `${pad((fixture.hard ? '※ ' : '  ') + fixture.name, 24)}${pad(label, 6)}` +
+          `${pad(num(quantile(group.zcr, 0.5), 6), 11)}${pad(num(quantile(group.zcr, 0.9), 6), 13)}` +
+          `${pad(num(quantile(group.flux, 0.5), 6), 11)}${pad(num(quantile(group.flux, 0.9), 6), 13)}` +
+          `${pad(num(quantile(group.flat, 0.9), 6), 15)}`,
+      );
+    }
+  }
+  console.log('\n※ speech-vowels-only（子音も息も無い声）を必ず併せて見ること。');
+  console.log('ここで声と音楽が分かれても、その素材が音楽の側に落ちるなら、');
+  console.log('その手がかりは「声があるか」ではなく「子音があるか」を見ているだけ。');
+}
+
+// --- 「音程のある粒と雑音の粒が隣り合っているか」 ---
+// 上の分位で分かるのは「雑音の粒があるか」だけで、それだけなら打楽器にも雑音はある。
+// 声に固有なのは **2 種類の粒が短い間に混じること**（子音の雑音 → 母音の音程）で、
+// 正弦波を足して作った楽器（和音・wah・トレモロ）には音程の粒しか無く、
+// 打楽器には雑音の粒しか無い。これが、子音を足して初めて測れるようになった手がかり。
+{
+  console.log('\n短い窓（0.3 秒）の中に「雑音の粒」と「音程の粒」が両方あるか\n');
+  console.log(`${pad('素材', 24)}${pad('声', 6)}${pad('雑音の粒', 11)}${pad('音程の粒', 11)}${pad('両方あった秒数', 16)}`);
+  console.log('-'.repeat(68));
+  // しきい値は勘で置かず、下の表を見て決め直せるように定数として出しておく。
+  const NOISY_FLATNESS = 0.18;
+  const TONAL_HARMONICITY = 0.3;
+  const WINDOW_SECONDS = 0.3;
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track);
+    const threshold = autoThresholdDb(track, 0.25);
+    const noisy = [];
+    const tonal = [];
+    for (let i = 0; i < track.db.length; i += 1) {
+      const sounding = track.db[i] > threshold;
+      noisy.push(sounding && features.flatness[i] >= NOISY_FLATNESS);
+      tonal.push(sounding && features.harmonicity[i] >= TONAL_HARMONICITY);
+    }
+    const half = Math.round(WINDOW_SECONDS / 2 / track.hop);
+    let both = 0;
+    for (let i = 0; i < noisy.length; i += 1) {
+      let n = false;
+      let t = false;
+      for (let k = -half; k <= half; k += 1) {
+        const j = i + k;
+        if (j < 0 || j >= noisy.length) continue;
+        if (noisy[j]) n = true;
+        if (tonal[j]) t = true;
+      }
+      if (n && t) both += 1;
+    }
+    const count = (list) => list.filter(Boolean).length * track.hop;
+    console.log(
+      `${pad((fixture.hard ? '※ ' : '  ') + fixture.name, 24)}${pad(fixture.speech ? 'あり' : 'なし', 6)}` +
+        `${pad(`${count(noisy).toFixed(2)} 秒`, 11)}${pad(`${count(tonal).toFixed(2)} 秒`, 11)}` +
+        `${pad(`${(both * track.hop).toFixed(2)} 秒`, 16)}`,
+    );
+  }
+  console.log(`\n判定に使ったしきい値: 平坦さ >= ${NOISY_FLATNESS} / 倍音らしさ >= ${TONAL_HARMONICITY}`);
+}
+
 console.log('\n※ は意地悪な素材（BGM が大きい / 刻む打楽器 / 震える楽器 / 母音を伸ばす声 など）。');
 console.log('声の無い素材（bgm・drums・music-tremolo）は「声のコマ」が無いので AUC では測れない（—）。');
 console.log('0.5 を下回るのは「逆向きに効いている」という意味で、それはそれで使える。');

@@ -88,6 +88,115 @@ function formantGain(hz, formants) {
 }
 
 /**
+ * 一次の高域通過。子音の雑音を、その子音らしい高さへ寄せるために使う。
+ *
+ * 白色雑音をそのまま鳴らすと、`s` も `p` も同じ音になってしまう。
+ * 摩擦音と破裂音を分けているのは主に**雑音の重心の高さ**なので、
+ * そこだけは作り分けないと「子音を足した」ことにならない。
+ * 素直な一次フィルタで足りる（帯域の形そのものではなく、重心の高低だけが要る）。
+ */
+function highpassState(cutoffHz) {
+  const rc = 1 / (2 * Math.PI * cutoffHz);
+  return { a: rc / (rc + 1 / SR), x1: 0, y1: 0, x2: 0, y2: 0 };
+}
+
+/** 一次を 2 段通す（1 段では肩がゆるすぎて、低い子音と高い子音が重なる）。 */
+function highpass(state, x) {
+  const y1 = state.a * (state.y1 + x - state.x1);
+  state.x1 = x;
+  state.y1 = y1;
+  const y2 = state.a * (state.y2 + y1 - state.x2);
+  state.x2 = y1;
+  state.y2 = y2;
+  return y2;
+}
+
+/**
+ * そのフィルタが白色雑音の実効値をどれだけ落とすか。
+ *
+ * 測って割っておくと、下の `level` を**母音に対する実効値の比**として読める。
+ * これをやらないと、子音の「音量」が帯域の指定に引きずられて、
+ * 「摩擦音を強くしたのか、高く寄せたのか」が切り分けられなくなる。
+ */
+const highpassGains = new Map();
+function highpassGain(cutoffHz) {
+  const found = highpassGains.get(cutoffHz);
+  if (found !== undefined) return found;
+  const state = highpassState(cutoffHz);
+  const random = rng(777);
+  const n = 40000;
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    const v = highpass(state, (random() - 0.5) * 2);
+    // 頭は過渡なので捨てる。
+    if (i >= n / 2) sum += v * v;
+  }
+  const gain = Math.sqrt(sum / (n / 2));
+  highpassGains.set(cutoffHz, gain);
+  return gain;
+}
+
+/**
+ * 子音の種類。**2026-09-12（2 回目）に足した。**
+ *
+ * それまでの合成の声は母音だけで、**息の雑音も子音も入っていなかった**。
+ * 手で考えた手がかりが 5 つとも自作の楽器の素材に負けたあとで記録を読み直すと、
+ * 破れた 5 つはどれも「音程・包絡・揺れ」しか見ていない。
+ * **本物の話し声が楽器と決定的に違うのは、広い帯域に散る雑音の粒が混じること**で、
+ * それは倍音を足して作った楽器の素材にはどれにも無い。
+ * つまり**いちばん効きそうな手がかりを、素材が表現できないせいで一度も試せていなかった**。
+ *
+ * `length` は音節の頭に置く長さ（秒）、`cutoff` は雑音を寄せる高さ（Hz）、
+ * `level` は母音の実効値に対する比。数字は実測値のおおよその範囲から取った
+ * （摩擦音は母音より 10〜20dB 低く、破裂音はそれより短く強い）。
+ * 正確さより、**種類どうしが zcr と重心の上で十分に離れている**ことが要る。
+ *
+ * `none` を 1 つ混ぜてあるのは、母音で始まる音節が現実にもあるため。
+ * ここが 0 だと「必ず頭に雑音がある」という、現実より都合のよい声になる。
+ */
+const CONSONANTS = [
+  { kind: 'fricative', length: 0.1, cutoff: 4500, level: 0.2 }, // s
+  { kind: 'fricative', length: 0.09, cutoff: 2000, level: 0.26 }, // sh
+  { kind: 'fricative', length: 0.07, cutoff: 1200, level: 0.13 }, // f・h（弱い）
+  { kind: 'plosive', length: 0.035, cutoff: 3000, level: 0.42 }, // t・k
+  { kind: 'plosive', length: 0.03, cutoff: 800, level: 0.34 }, // p・b
+  { kind: 'none', length: 0, cutoff: 0, level: 0 }, // 母音で始まる音節
+];
+
+/** 息の雑音の量（母音の実効値に対する比）と、寄せる高さ（Hz）。 */
+const BREATH_LEVEL = 0.05;
+const BREATH_CUTOFF = 1500;
+
+/**
+ * 子音 1 サンプルぶんの包絡。
+ *
+ * 破裂音は「閉鎖（無音）→ 破裂（ごく短い雑音）→ 帯気（尾を引く雑音）」の 3 段にする。
+ * **閉鎖の無音がいちばん効く**はず。母音の直前に 20ms ほど何も鳴らない所ができるので、
+ * スペクトルの変化（flux）がそこで必ず跳ねる。平らな雑音を置くだけでは、そこが出ない。
+ * 摩擦音は同じ長さを平らに鳴らし、立ち上がりと収まりだけ丸める。
+ *
+ * `length` は **その音節で実際に使える長さ**で、`c.length` とは別に渡す。
+ * 短い音節では子音が半分に切り詰められるので、`c.length` で収まりを計算すると
+ * **振幅いっぱいのまま途中で打ち切られて、そこがクリックになる**。
+ * クリックは広い帯域に散る雑音なので、まさにいま測ろうとしている量（`zcr`・`flux`・平坦さ）を
+ * 押し上げてしまう。「子音が効いた」の中身がクリックだったということになりかねないので、
+ * 切り詰めた長さのほうで丸める。
+ */
+function consonantEnvelope(c, inside, length) {
+  if (c.kind === 'plosive') {
+    const closure = length * 0.55;
+    if (inside < closure) return 0;
+    const after = inside - closure;
+    const burst = length * 0.15;
+    return after < burst ? 1 : Math.exp(-(after - burst) / (length * 0.18));
+  }
+  // 立ち上がりと収まりは、切り詰めた長さの 1/4 を超えないようにする
+  // （音節が極端に短いと、丸める余裕そのものが無くなる）。
+  const edge = Math.min(0.02, length / 4);
+  return Math.max(0, Math.min(1, inside / Math.min(0.012, length / 4), (length - inside) / edge));
+}
+
+/**
  * 声らしい音。倍音列に母音の共鳴を掛け、音節ごとに母音と音程を動かす。
  *
  * **2026-09-11 にここを作り直した。** それまでは倍音の重みも f0 も発話中ずっと固定で、
@@ -118,8 +227,27 @@ function formantGain(hz, formants) {
  * これも **わざと意地悪な素材**。「揺れが規則正しすぎるものは楽器だ」で
  * 音楽を弾こうとすると、拍に乗ってしゃべる声（ラップ・詠唱・秒読み）がそこに落ちる。
  * 不規則さを手がかりにしてよいかを確かめるには、規則正しい声が手元に無いと話にならない。
+ *
+ * **2026-09-12（2 回目）に子音と息を足した。** 音節の頭に摩擦音か破裂音を置き、
+ * 母音を鳴らしている間は薄い息の雑音を重ねる（詳しくは `CONSONANTS` の説明）。
+ * それまでの声は母音だけで、**広い帯域に散る雑音の粒がまったく無かった**。
+ * そのせいで、本物の話し声が楽器と最も違うはずの性質を一度も試せていなかった。
+ *
+ * `vowelsOnly: true` を渡すと子音も息も足さない（2026-09-12 の 1 回目までの声）。
+ * **子音を選ぶ乱数はそのとき引かない**ので、同じ種なら当時と 1 ビットも変わらない。
+ * 過去の数字を測り直すためと、**「子音が無い声でも見分けられるか」を測るため**に要る。
+ * 後者のほうが大事で、`speech-vowels-only.wav` としてわざと一覧にも置いてある
+ * （ハミング・伸ばした母音・歌のように、子音がほとんど無い発声は現実にある）。
+ * 子音に頼る判定を入れるなら、それがこの素材を切らないことを必ず併せて見ること。
  */
-function speak(data, from, to, level, random, { flat = false, sustain = false, steady = false } = {}) {
+function speak(
+  data,
+  from,
+  to,
+  level,
+  random,
+  { flat = false, sustain = false, steady = false, vowelsOnly = false } = {},
+) {
   const f0 = 120 + random() * 40;
   if (flat) {
     for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
@@ -153,31 +281,69 @@ function speak(data, from, to, level, random, { flat = false, sustain = false, s
     let vowel = Math.floor(random() * VOWELS.length);
     if (vowel === previous) vowel = (vowel + 1) % VOWELS.length;
     previous = vowel;
-    syllables.push({ at, length: Math.min(length, span - at), vowel });
+    // 子音は母音を選んだ**あと**に引く。vowelsOnly ではここを引かないので、
+    // 音節の長さも母音の並びも、子音を足す前と 1 ビット違わない。
+    const consonant = vowelsOnly ? CONSONANTS[CONSONANTS.length - 1] : CONSONANTS[Math.floor(random() * CONSONANTS.length)];
+    const syllableLength = Math.min(length, span - at);
+    // 子音が音節の半分を超えると母音が聞き取れる長さにならない。
+    // 伸ばした母音（0.45〜0.95 秒）では効かないが、短い音節では効く。
+    const consonantLength = Math.min(consonant.length, syllableLength * 0.5);
+    syllables.push({ at, length: syllableLength, vowel, consonant, consonantLength });
     at += length;
   }
 
   let phase = 0;
   let index = 0;
+  // 子音の雑音のフィルタ。音節ごとに作り直す（前の子音の尾が次へ漏れないように）。
+  let consonantFilter = null;
+  let consonantFilterFor = -1;
+  // 息は発話のあいだ続いているので、こちらは作り直さない。
+  const breathFilter = highpassState(BREATH_CUTOFF);
+  const breathGain = highpassGain(BREATH_CUTOFF);
   for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
     const t = i / SR;
     const local = t - from;
     while (index + 1 < syllables.length && local >= syllables[index + 1].at) index += 1;
     const syllable = syllables[index];
     const inside = local - syllable.at;
+    const fade = Math.max(0, Math.min(1, local / 0.05, (span - local) / 0.08));
+
+    // 子音は音節の頭。ここでは母音を鳴らさない（無声子音のあいだ声帯は止まっている）。
+    // `continue` で位相を進めないのも同じ理由で、止まっていた声帯が子音のあとに
+    // また同じ所から鳴り出すことになる。
+    const consonantLength = syllable.consonantLength;
+    if (consonantLength > 0 && inside < consonantLength) {
+      if (index !== consonantFilterFor) {
+        consonantFilter = highpassState(syllable.consonant.cutoff);
+        consonantFilterFor = index;
+      }
+      const shaped = highpass(consonantFilter, (random() - 0.5) * 2) / highpassGain(syllable.consonant.cutoff);
+      // 母音と同じ 0.217 を掛けるので、level は母音の実効値に対する比として効く。
+      data[i] +=
+        syllable.consonant.level *
+        level *
+        fade *
+        consonantEnvelope(syllable.consonant, inside, consonantLength) *
+        shaped *
+        0.217;
+      continue;
+    }
+
+    // 母音は子音のうしろから始まる。音節の長さは子音に食われたぶんだけ短くなる。
+    const voiced = inside - consonantLength;
+    const voicedLength = syllable.length - consonantLength;
 
     // 音節の中の音量。立ち上がりと収まりだけを丸め、間は平らにする。
     // 正弦波で揺らすと、伸ばした母音まで揺れてしまい「伸ばしている」ことにならない。
-    const shape = Math.max(0, Math.min(1, inside / 0.03, (syllable.length - inside) / 0.05));
+    const shape = Math.max(0, Math.min(1, voiced / 0.03, (voicedLength - voiced) / 0.05));
     // 音節の切れ目でも 0 までは落ちない（語の途中で息が切れるわけではない）。
     const syllableEnv = 0.15 + 0.85 * shape;
-    const fade = Math.max(0, Math.min(1, local / 0.05, (span - local) / 0.08));
     const env = level * syllableEnv * fade;
 
     // 母音は瞬間には切り替わらない。前の母音から 60ms かけて移る（渡り）。
     const previous = syllables[Math.max(0, index - 1)];
-    const glide = Math.min(0.06, syllable.length * 0.4);
-    const blend = glide > 0 ? Math.min(1, inside / glide) : 1;
+    const glide = Math.min(0.06, voicedLength * 0.4);
+    const blend = glide > 0 ? Math.min(1, voiced / glide) : 1;
     // 周波数は対数で補間する（400→800 の途中は 600 ではなく 566）。
     // 耳にも、そのあとで測るメル帯域にも、そちらのほうが素直。
     const formants = [0, 1, 2].map((k) =>
@@ -207,6 +373,16 @@ function speak(data, from, to, level, random, { flat = false, sustain = false, s
     // どちらも 2026-09-07 に記録した値とぴったり同じ。音量が変わると自動しきい値も動いて、
     // 「声の作りを変えたから変わったのか、音量が変わったから変わったのか」が切り分けられなくなる。
     data[i] += (env * v * 0.217) / norm;
+
+    // 息の雑音。母音を鳴らしている間ずっと薄く重なる。
+    // 子音と違って**声と同時に鳴る**のが要点で、これがあると
+    // 「鳴っているコマの平坦さ」が母音のあいだも少しだけ上がる。
+    // 楽器の素材（正弦波の足し合わせ）にはこの成分がまったく無い。
+    // ただし `tone`（= 1 - flatness）は声らしさの片方なので、濃くすると
+    // **声らしさを自分で下げる**ことになる。薄さの根拠は JOURNAL に測った表を置いた。
+    if (!vowelsOnly) {
+      data[i] += BREATH_LEVEL * env * (highpass(breathFilter, (random() - 0.5) * 2) / breathGain) * 0.217;
+    }
   }
 }
 
@@ -349,6 +525,8 @@ function makeShort(
     sustain = false,
     /** 音節の長さを揃えてしゃべる。「規則正しさ」で音楽を弾く手を潰しにいく素材。 */
     steady = false,
+    /** 子音も息も足さない声（2026-09-12 の 1 回目までの声）。子音に頼る判定を潰しにいく素材。 */
+    vowelsOnly = false,
     seed = 1,
   },
 ) {
@@ -361,7 +539,7 @@ function makeShort(
   if (beat) drums(data, 0, SHORT_LENGTH, beatLevel, beat, random);
   if (speech) {
     for (const [from, to] of sparse ? SPARSE_UTTERANCES : UTTERANCES)
-      speak(data, from, to, speechLevel, random, { flat, sustain, steady });
+      speak(data, from, to, speechLevel, random, { flat, sustain, steady, vowelsOnly });
   }
   return writeWav(name, data);
 }

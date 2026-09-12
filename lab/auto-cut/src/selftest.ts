@@ -272,6 +272,32 @@ export function runSelfTest(): TestResult[] {
     check('4Hz で揺れる音は揺れが検出される', modOn > 0.5, modOn.toFixed(3));
     check('揺れない音では検出されない', modOff < 0.2, modOff.toFixed(3));
 
+    // --- 揺れの帯域は 1.5625Hz 刻みでしか置けない（2026-09-12・2 回目に測って分かった）---
+    //
+    // 窓は `MOD_WINDOW`（1.0 秒）を 2 の冪に丸めるので、実際には 32 コマ = **0.64 秒**。
+    // コマが 50/秒なので、FFT の刻みは 50/32 = 1.5625Hz。つまり
+    // 「3〜6Hz」と書いてある帯域は本当は bin 2〜4 = **3.125〜6.25Hz** で、
+    // 下端に 2.5〜3.9 のどれを渡しても同じ帯域になる。2 を渡すと bin 1 へ落ちて
+    // **1.5625Hz を巻き込む**（そこは音楽の抑揚が乗る帯で、渡すと音楽が声に見える）。
+    // 「3 では狭いから 2 にしてみる」という連続な調整ができない、というのがここの要点。
+    // 知らずに回すと「少しだけ広げたつもり」が「音楽を丸ごと巻き込む」になる。
+    const at2 = mid(modulationRatio(modulated, 2, 6));
+    const at3 = mid(modulationRatio(modulated, 3, 6));
+    const at39 = mid(modulationRatio(modulated, 3.9, 6));
+    check('下端 3 と 3.9 は同じ帯域になる（bin 2）', at3 === at39, at3.toFixed(4));
+    check('下端 2 は bin 1 へ落ちて別物になる', at2 !== at3, `2→${at2.toFixed(4)} / 3→${at3.toFixed(4)}`);
+
+    // --- 音節が遅い声は、そもそも帯域の下にいる ---
+    //
+    // 窓が 0.64 秒しかないので、音節が 1.4Hz（0.7 秒ごと）の声では
+    // **窓の中に音節の切れ目が 1 つしか入らない**。つまりこの量は、遅い声に対しては
+    // 「音節の速さ」を測っていない。切れ目 1 つの形を見ているだけ。
+    // 伸ばした母音でしゃべる声（`speech-sustained.wav` は 0.45〜0.95 秒ごと）が
+    // 苦しいのは、判定の調整のせいではなく**定義上ここに入っていない**から。
+    const fast = mid(modulationRatio(analyzeLoudness(makeModulated(3, sr, 4.2), 0.02)));
+    const slow = mid(modulationRatio(analyzeLoudness(makeModulated(3, sr, 1.4), 0.02)));
+    check('音節が遅い声は揺れが大きく下がる', slow < fast * 0.7, `1.4Hz ${slow.toFixed(3)} / 4.2Hz ${fast.toFixed(3)}`);
+
     // 音色: 音程のある音は尖っていて、雑音は平坦。
     const toneBuffer = makeModulated(2, sr, 4);
     const noiseBuffer = makeNoise(2, sr);
