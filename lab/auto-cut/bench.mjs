@@ -24,7 +24,8 @@ import { SHORT_FIXTURES, utterancesOf } from '../fixtures/spec.mjs';
 
 const { analyzeLoudness } = await import('./src/loudness.ts');
 const { analyzeFeatures } = await import('./src/features.ts');
-const { planJetCut, cutSoundingSeconds, keepEdgeSeconds, keepScoreSeconds, DEFAULT_JET_CUT } = await import('./src/silence.ts');
+const { planJetCut, cutSoundingSeconds, keepEdgeSeconds, keepScoreSeconds, minimalKeepRanges, DEFAULT_JET_CUT } =
+  await import('./src/silence.ts');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const fixtures = path.join(root, 'lab/fixtures/out');
@@ -65,13 +66,11 @@ const overlap = (a, b) => Math.max(0, Math.min(a.end, b[1]) - Math.max(a.start, 
  * 声ごと消しているだけ。「声をどれだけ残せたか」と「余計にどれだけ残したか」を
  * 並べて初めて、良くなったかどうかが言える。
  */
-function accuracy(plan, fixture) {
-  if (!fixture) return null;
-  const truth = utterancesOf(fixture);
+function scoreKeep(keep, truth) {
   const truthTotal = truth.reduce((sum, [a, b]) => sum + (b - a), 0);
   let hit = 0;
-  for (const range of plan.keep) for (const u of truth) hit += overlap(range, u);
-  const keptTotal = plan.resultDuration;
+  for (const range of keep) for (const u of truth) hit += overlap(range, u);
+  const keptTotal = keep.reduce((sum, r) => sum + (r.end - r.start), 0);
   return {
     // 声のうち、残せた割合。低いと「声を切ってしまっている」。
     recall: truthTotal > 0 ? hit / truthTotal : null,
@@ -80,13 +79,28 @@ function accuracy(plan, fixture) {
   };
 }
 
+function accuracy(plan, fixture) {
+  if (!fixture) return null;
+  return scoreKeep(plan.keep, utterancesOf(fixture));
+}
+
 const percent = (v) => (v === null ? '—' : `${Math.round(v * 100)}%`);
+/** 平均は記録へそのまま写す数なので、丸めすぎると前後の比較ができなくなる。 */
+const percent1 = (v) => (v === null ? '—' : `${(v * 100).toFixed(1)}%`);
 
 /**
  * 余計に残した秒の合計。素材ごとの数は小さいので、ここで足して最後に並べる。
  * **精度が低いのは分かっても、どこで落としているかは 1 つの数からは読めない**（2026-09-15・2 回目）。
  */
 const extra = { head: 0, tail: 0, bridge: 0, stray: 0, above: 0, between: 0, below: 0 };
+/**
+ * 同じ内訳を、**声を落とさずに残せるいちばん狭い残し方**でも出す（`minimalKeepRanges`）。
+ * **精度は 100% を目指す数ではない**（余白と繋ぎは設計どおり付く）ので、
+ * 引き算できる相手が並んでいないと、取り返せない秒まで追いかけることになる。
+ */
+const unavoidable = { head: 0, tail: 0, bridge: 0, stray: 0 };
+/** 記録に並べる 3 つの数。毎回手で平均を取り直さずに済むように、ここで集める。 */
+const totals = { recall: 0, precision: 0, voiced: 0, harm: 0 };
 
 for (const file of files) {
   const buffer = readWav(file);
@@ -148,16 +162,28 @@ for (const file of files) {
       speech.removed > 0 && harmSpeech < speech.removed * 0.05
         ? `（削減 ${speech.removed.toFixed(2)}s はほぼ素材の無音）`
         : '';
+    totals.harm += harmSpeech;
     console.log(
       `${' '.repeat(22)} └ 鳴っているところを切った ${harmLevel.toFixed(2)}s → ${harmSpeech.toFixed(2)}s${note}`,
     );
   } else {
     const a = accuracy(level, fixture);
     const b = accuracy(speech, fixture);
+    // 声を 1 コマも落とさずに残せる、いちばん狭い残し方。**判定の出来とは無関係**に、
+    // 余白・繋ぎ・コマの粒でこれだけ余る。この線に届いているなら、
+    // その素材で精度を追いかけても得るものは無い。**上回っていたら声を削っている。**
+    const minimal = fixture
+      ? minimalKeepRanges(utterancesOf(fixture).map(([s2, e2]) => ({ start: s2, end: e2 })), track.duration, track.hop)
+      : [];
+    const lowest = fixture ? scoreKeep(minimal, utterancesOf(fixture)) : null;
     if (a && b) {
+      totals.recall += b.recall ?? 0;
+      totals.precision += b.precision ?? 0;
+      totals.voiced += 1;
       console.log(
         `${' '.repeat(22)} └ 声を残せた率 ${percent(a.recall)} → ${percent(b.recall)}` +
-          ` / 残したうち声だった率 ${percent(a.precision)} → ${percent(b.precision)}`,
+          ` / 残したうち声だった率 ${percent(a.precision)} → ${percent(b.precision)}` +
+          `（下限 ${percent(lowest?.precision ?? null)}${b.precision > (lowest?.precision ?? 1) + 1e-9 ? '・声を削っている' : ''}）`,
       );
     }
     // 精度が低いとき、どこで・何が落としているか。直す手が別なので分けて出す。
@@ -179,6 +205,11 @@ for (const file of files) {
       extra.above += what.above;
       extra.between += what.between;
       extra.below += what.below;
+      const cannot = keepEdgeSeconds(minimal, truth);
+      unavoidable.head += cannot.head;
+      unavoidable.tail += cannot.tail;
+      unavoidable.bridge += cannot.bridge;
+      unavoidable.stray += cannot.stray;
       const total = where.head + where.tail + where.bridge + where.stray;
       console.log(
         `${' '.repeat(22)} └ 余計に残した ${total.toFixed(2)}s` +
@@ -207,10 +238,32 @@ for (const file of files) {
       ` / ヒステリシス ${extra.between.toFixed(2)}（${share(extra.between, what)}）` +
       ` / 余白と繋ぎ ${extra.below.toFixed(2)}（${share(extra.below, what)}）`,
   );
+  const cannot = unavoidable.head + unavoidable.tail + unavoidable.bridge + unavoidable.stray;
+  console.log(
+    `${' '.repeat(4)}どう判定しても残る ${cannot.toFixed(2)}s —` +
+      ` 頭 ${unavoidable.head.toFixed(2)}` +
+      ` / 尻 ${unavoidable.tail.toFixed(2)}` +
+      ` / 発話の間を渡った ${unavoidable.bridge.toFixed(2)}` +
+      ` / 無関係 ${unavoidable.stray.toFixed(2)}` +
+      `　→ 判定の落ち度は ${(where - cannot).toFixed(2)}s（${share(where - cannot, where)}）`,
+  );
+  console.log(
+    '**「発話の間を渡った」は、そのまま落ち度として読まないこと。** ' +
+      `minSilence（${DEFAULT_JET_CUT.minSilence}s）より短い切れ目を繋ぐのは設計どおりで、` +
+      'そのぶんは上の行に出ている。',
+  );
   console.log(
     '**「判定そのもの」が大半を占めているうちは、端の扱い（余白・遡り・ヒステリシス）を' +
       'いじっても精度は動かない。** そこは声らしさの中身の問題。',
   );
+  if (totals.voiced > 0) {
+    // 記録に並べる 3 つの数。手で平均を取り直すと、そこで間違える。
+    console.log(
+      `\n声のある ${totals.voiced} 本の平均: 声を残せた率 ${percent1(totals.recall / totals.voiced)}` +
+        ` / 残したうち声だった率 ${percent1(totals.precision / totals.voiced)}` +
+        ` ／ 声の無い素材で鳴っているところを切った合計 ${totals.harm.toFixed(2)}s`,
+    );
+  }
 }
 
 console.log(

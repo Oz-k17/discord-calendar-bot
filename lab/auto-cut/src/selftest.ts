@@ -11,6 +11,7 @@ import {
   envelopeGateFrames,
   keepEdgeSeconds,
   keepScoreSeconds,
+  minimalKeepRanges,
   planJetCut,
 } from './silence.ts';
 import { gainAt, planDucking } from './ducking.ts';
@@ -509,6 +510,104 @@ export function runSelfTest(): TestResult[] {
         mismatched.above + mismatched.between + mismatched.below === 0,
         '0.00 秒',
       );
+    }
+
+    // --- どう判定しても残る秒（`minimalKeepRanges`） ---
+    //
+    // 「余計に残した秒」を落ち度として読む前に、**取り返せない秒**を引くための下限
+    // （2026-09-15・3 回目）。余白・繋ぎ・コマの粒は判定の出来と関係なく付く。
+    {
+      const hop = 0.02;
+      const opts = { padding: 0.08, minSilence: 0.35, minKeep: 0.15 };
+      const truth = [
+        { start: 1, end: 2 },
+        { start: 2.2, end: 3 },
+        { start: 5, end: 6 },
+      ];
+      const minimal = minimalKeepRanges(truth, 8, hop, opts);
+
+      // いちばん大事な性質。**下限が声を落としていたら、比べる相手にならない。**
+      const covers = truth.every((u) => minimal.some((r) => r.start <= u.start + 1e-9 && r.end >= u.end - 1e-9));
+      check('下限でも、声は 1 コマも落とさない', covers, minimal.map((r) => `${r.start.toFixed(2)}-${r.end.toFixed(2)}`).join(' / '));
+
+      // 切れ目 0.2 秒は minSilence より短いので、下限でも繋がる。
+      // **ここが「発話の間を渡った秒」のうち、落ち度でないぶん。**
+      check(
+        '切れ目が minSilence より短ければ、下限でも繋がる',
+        minimal.length === 2 && near(minimal[0].start, 1, 1e-9) && near(minimal[0].end, 3, 1e-9),
+        `${minimal.length} 本`,
+      );
+
+      // 発話の端がコマ境界に乗っているなら、**余白は 1 秒も余らない**。
+      // 余白は「判定が遅れてよい幅」であって「必ず余る幅」ではない
+      // （判定が 0.08 秒遅れて反応すれば、頭に付く 0.08 秒は消える）。
+      const edges = keepEdgeSeconds(minimal, truth);
+      check(
+        'コマ境界に乗った発話なら、余白のぶんは余らない',
+        near(edges.head, 0, 1e-9) && near(edges.tail, 0, 1e-9) && near(edges.bridge, 0.2, 1e-9),
+        `頭 ${edges.head.toFixed(2)} / 尻 ${edges.tail.toFixed(2)} / 渡った ${edges.bridge.toFixed(2)}`,
+      );
+
+      // 端がコマ境界からずれていても覆う。余るのはコマ 1 つぶんまで。
+      const offGrid = [{ start: 1.005, end: 1.995 }];
+      const off = minimalKeepRanges(offGrid, 4, hop, opts);
+      const slack = off[0].end - off[0].start - (offGrid[0].end - offGrid[0].start);
+      check(
+        '端がコマ境界からずれていても覆い、余りはコマ 1 つぶんまで',
+        off[0].start <= 1.005 + 1e-9 && off[0].end >= 1.995 - 1e-9 && slack < 2 * hop,
+        `${off[0].start.toFixed(3)}-${off[0].end.toFixed(3)}（余り ${slack.toFixed(3)}）`,
+      );
+
+      // 切れ目が minSilence より長ければ繋がない（繋いだら下限が甘くなる）。
+      check('切れ目が長ければ、下限では繋がない', minimal.length === 2 && minimal[1].start > 4.9, `${minimal.length} 本`);
+
+      // コマより短い発話。余白を足せば 1 コマで覆えるので、そこで止まる
+      // （first > last になる枝。ここを素通りさせると区間が裏返る）。
+      const blip = minimalKeepRanges([{ start: 1.001, end: 1.003 }], 4, hop, opts);
+      check(
+        'コマより短い発話でも、区間が裏返らない',
+        blip.length === 1 && blip[0].end > blip[0].start && blip[0].start <= 1.001 && blip[0].end >= 1.003,
+        `${blip[0].start.toFixed(3)}-${blip[0].end.toFixed(3)}`,
+      );
+
+      // 素材の端に寄った発話。余白は素材の外へはみ出さない。
+      const atEdge = minimalKeepRanges([{ start: 0, end: 0.5 }], 0.5, hop, opts);
+      check(
+        '素材の端では、余白が外へはみ出さない',
+        atEdge.length === 1 && near(atEdge[0].start, 0, 1e-9) && near(atEdge[0].end, 0.5, 1e-9),
+        `${atEdge[0].start.toFixed(2)}-${atEdge[0].end.toFixed(2)}`,
+      );
+
+      // **道具の限界を 1 つ固定しておく。** `minKeep` が余白＋コマ 1 つ（0.18 秒）より
+      // 大きいと、短い発話は下限からも落ちる。既定（0.15）では起きないが、
+      // つまみを回したときに**下限が声を落とす**ことがあると知らずに読むと、
+      // 精度の下限を甘く見積もる。
+      const strict = minimalKeepRanges([{ start: 1, end: 1.02 }], 4, hop, { ...opts, minKeep: 0.5 });
+      check('minKeep が大きいと、下限でも短い発話は落ちる（道具の限界）', strict.length === 0, `${strict.length} 本`);
+
+      // 素材の外にはみ出した正解。数えると区間が裏返り、下限が負の幅になる。
+      const outside = minimalKeepRanges([{ start: 9, end: 10 }], 8, hop, opts);
+      check('素材の外の正解は、下限に数えない', outside.length === 0, `${outside.length} 本`);
+
+      // 声の無い素材（正解が空）。下限も空でなければ、精度の下限が出せなくなる。
+      check('正解が空なら、下限も空', minimalKeepRanges([], 8, hop, opts).length === 0, '0 本');
+      check('尺が 0 なら、下限も空', minimalKeepRanges(truth, 0, hop, opts).length === 0, '0 本');
+
+      // **下限は、実際の計画より狭いか同じでなければならない**（声を全部残している限り）。
+      // 上回っていたら、比べる相手として使えない。合成の声で 1 本だけ確かめる。
+      {
+        const voiced = analyzeLoudness(makeTone(4, 8000, [{ from: 1, to: 2 }]), 0.02);
+        const plan = planJetCut(voiced, { mode: 'level' });
+        const truthOne = [{ start: 1, end: 2 }];
+        const low = minimalKeepRanges(truthOne, voiced.duration, voiced.hop);
+        const sum = (rs: { start: number; end: number }[]) => rs.reduce((t, r) => t + (r.end - r.start), 0);
+        const kept = sum(plan.keep);
+        check(
+          '下限は、実際に残した秒を上回らない',
+          sum(low) <= kept + 1e-9,
+          `下限 ${sum(low).toFixed(2)}s / 実際 ${kept.toFixed(2)}s`,
+        );
+      }
     }
 
     // --- 計画 → クリップ ---

@@ -830,3 +830,63 @@ export function keepScoreSeconds(
   }
   return scores;
 }
+
+/**
+ * **声を 1 コマも落とさずに残せる、いちばん狭い区間**（＝残す秒数の下限）。
+ *
+ * 「余計に残した秒」を読むための土台（2026-09-15・3 回目に足した）。
+ * 精度（残したうち声だった率）は 100% を目指す数だと思われがちだが、
+ * **この道具では 100% にならない。** 余白（`padding`）は発話の前後に必ず付くし、
+ * `minSilence` より短い切れ目は繋ぐのが正しい振る舞いだし、コマより細かくは切れない。
+ * どれも判定の落ち度ではなく、設計どおりの振る舞い。
+ * だから「余計に残した 54.74 秒」をそのまま落ち度として読むと、
+ * **もともと取り返せない秒まで追いかけることになる。**
+ *
+ * **最初は「正解をそのまま判定の答えとして流し込む」形で書いたが、それは下限ではなかった。**
+ * 発話の端から余白を足すと、判定が**発話の端より内側で反応した場合より広くなる**。
+ * 実際 `speech-bgm`・`speech-noisy`・`speech-quiet` の 3 本は、声を 1 コマも落とさないまま
+ * その「理想」を 2〜3 ポイント上回った。**余白があるぶん、判定は発話の端より
+ * 最大 `padding` だけ内側で反応してよい。** だからここでは、
+ * 「余白を足したあとで発話を覆う」コマのうち**いちばん内側のもの**から組む。
+ *
+ * こうして初めて、**上回ったら声を削っている**と言い切れる数になる
+ * （`speech-sustained` の 89% がそれ。残せた率は 88%）。
+ *
+ * @param truth 発話の正解区間。昇順で重ならないこと。
+ * @param duration 素材の尺。区間はここで頭打ちにする。
+ * @param hop コマの刻み。0 以下なら発話そのものを最小の区間として扱う。
+ * @param options `planJetCut` に渡すのと同じつまみ。`padding`・`minSilence`・`minKeep` だけを見る。
+ */
+export function minimalKeepRanges(
+  truth: Range[],
+  duration: number,
+  hop: number,
+  options: Partial<JetCutOptions> = {},
+): Range[] {
+  const opts = { ...DEFAULT_JET_CUT, ...options };
+  if (duration <= 0) return [];
+  const minimal: Range[] = [];
+  for (const u of truth) {
+    if (u.end <= u.start) continue;
+    // 素材の外にはみ出した正解は数えない（区間が裏返って、下限が負の幅になる）。
+    if (u.start >= duration || u.end <= 0) continue;
+    if (hop <= 0) {
+      minimal.push({ start: Math.max(0, u.start), end: Math.min(duration, u.end) });
+      continue;
+    }
+    // 余白を足したあとで発話の頭を覆える、いちばん後ろのコマ。
+    // （`first * hop - padding <= u.start` を満たす最大の `first`）
+    const first = Math.max(0, Math.floor((u.start + opts.padding) / hop));
+    // 同じく、発話の尻を覆える、いちばん前のコマ。
+    let last = Math.ceil((u.end - opts.padding) / hop) - 1;
+    // 短い発話では 1 コマで足りる（このとき last < first になる）。
+    if (last < first) last = first;
+    minimal.push({
+      start: Math.max(0, first * hop - opts.padding),
+      end: Math.min(duration, (last + 1) * hop + opts.padding),
+    });
+  }
+  // 以降は planJetCut の 3. と同じ手順。**同じ手順を踏ませることが目的**なので、
+  // ここだけ別の繋ぎ方をしてはいけない（比べる意味が無くなる）。
+  return mergeRanges(minimal, opts.minSilence).filter((r) => r.end - r.start >= opts.minKeep);
+}
