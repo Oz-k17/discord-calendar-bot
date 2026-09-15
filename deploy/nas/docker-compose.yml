@@ -1,0 +1,30 @@
+# ViViD Edit を UGREEN NAS（UGOS Pro）で動かす。
+#
+#   Docker → プロジェクト → 作成 を開き、この中身をそのまま貼る。
+#   コマンドラインは要らない。
+#
+# 書き換えるのは volumes の「左側」3 つだけ。**すべて絶対パスで書くこと。**
+# UGOS はプロジェクト用のフォルダを自分で決めるので、`./nginx.conf` のような
+# 相対パスだと、こちらが置いた場所ではなく、そのフォルダを見に行ってしまう。
+#
+# 立ち上がったら http://<NAS の IP>:8080/ を全員に配る。
+
+services:
+  vivid-edit:
+    image: nginx:alpine
+    container_name: vivid-edit
+    restart: unless-stopped
+    ports:
+      # 左が NAS 側の口。他と当たるなら変えてよい。
+      - "8080:80"
+    volumes:
+      # ① アプリ本体。このリポジトリの docs/ の中身を置いた場所。
+      #    更新するときは、ここの中身を差し替えるだけでよい。
+      - /volume1/docker/vivid-edit/app:/srv/app:ro
+
+      # ② nginx の設定。deploy/nas/nginx.conf をこの名前で置く。
+      - /volume1/docker/vivid-edit/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+      # ③ 共有したい素材フォルダ。共有フォルダ名が video なら /volume1/video。
+      #    :ro（読み取り専用）は外さないこと。編集アプリから素材を消せる必要はない。
+      - /volume1/video/shared:/srv/media:ro
