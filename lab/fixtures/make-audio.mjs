@@ -276,13 +276,25 @@ function consonantEnvelope(c, inside, length) {
  * （ハミング・伸ばした母音・歌のように、子音がほとんど無い発声は現実にある）。
  * 子音に頼る判定を入れるなら、それがこの素材を切らないことを必ず併せて見ること。
  */
+/**
+ * `clipped` のとき、音節の枠のうち実際に鳴らす割合。
+ *
+ * 0.45 は**打点と同じデューティ比に揃えて**選んだ。`thumps` は 4.2Hz（枠 0.238 秒）に
+ * 減衰 0.035 秒の打点なので、鳴っている時間は枠の 2 割ほど。
+ * 音節の枠（0.16〜0.32 秒）で同じ 2 割にすると母音が 0.03〜0.06 秒しか残らず、
+ * **人が聞いても声に聞こえない**（潰す素材としては行きすぎで、
+ * 「声を切った」ではなく「声でないものを切った」になってしまう）。
+ * 0.45 は、母音がひととおり鳴りきる（渡りの 0.06 秒 + 収まりの 0.05 秒）いちばん短い所。
+ */
+const CLIPPED_DUTY = 0.45;
+
 function speak(
   data,
   from,
   to,
   level,
   random,
-  { flat = false, sustain = false, steady = false, vowelsOnly = false } = {},
+  { flat = false, sustain = false, steady = false, vowelsOnly = false, clipped = false } = {},
 ) {
   const f0 = 120 + random() * 40;
   if (flat) {
@@ -371,9 +383,15 @@ function speak(
 
     // 音節の中の音量。立ち上がりと収まりだけを丸め、間は平らにする。
     // 正弦波で揺らすと、伸ばした母音まで揺れてしまい「伸ばしている」ことにならない。
-    const shape = Math.max(0, Math.min(1, voiced / 0.03, (voicedLength - voiced) / 0.05));
+    //
+    // `clipped` では、音節の枠のうち前半だけを鳴らして残りを黙る（きっぱり区切る話し方）。
+    // 乱数はここまでで引き終わっているので、**音節の並びも母音も子音も揃ったまま**、
+    // 音量の形だけが「下に張り付いてたまに跳ねる」＝打点と同じ向きになる。
+    const sounded = clipped ? voicedLength * CLIPPED_DUTY : voicedLength;
+    const shape = Math.max(0, Math.min(1, voiced / 0.03, (sounded - voiced) / 0.05));
     // 音節の切れ目でも 0 までは落ちない（語の途中で息が切れるわけではない）。
-    const syllableEnv = 0.15 + 0.85 * shape;
+    // 区切って話すときだけは、そこで本当に息を止めるので 0 まで落とす。
+    const syllableEnv = clipped ? shape : 0.15 + 0.85 * shape;
     const env = level * syllableEnv * fade;
 
     // 母音は瞬間には切り替わらない。前の母音から 60ms かけて移る（渡り）。
@@ -888,6 +906,11 @@ function makeShort(
     sustain = false,
     /** 音節の長さを揃えてしゃべる。「規則正しさ」で音楽を弾く手を潰しにいく素材。 */
     steady = false,
+    /**
+     * 音節を短く区切り、間で黙ってしゃべる。
+     * 「低い側の音量が下に張り付いてたまに跳ねるのは打点」という手を潰しにいく素材。
+     */
+    clipped = false,
     /** 子音も息も足さない声（2026-09-12 の 1 回目までの声）。子音に頼る判定を潰しにいく素材。 */
     vowelsOnly = false,
     /** 発話の頭にぴたりと接する和音。「発話の頭を遡って拾う」手を潰しにいく素材。 */
@@ -909,7 +932,7 @@ function makeShort(
   if (vibrato) vibratoTone(data, 0, SHORT_LENGTH, vibratoLevel, random);
   if (speech) {
     for (const [from, to] of sparse ? SPARSE_UTTERANCES : UTTERANCES)
-      speak(data, from, to, speechLevel, random, { flat, sustain, steady, vowelsOnly });
+      speak(data, from, to, speechLevel, random, { flat, sustain, steady, vowelsOnly, clipped });
   }
   // 和音は `speak` のあと・ハイハットの前。乱数を引かないので、
   // 足しても声もハイハットも 1 ビットも変わらない（`speech.wav` の声とそのまま比べられる）。

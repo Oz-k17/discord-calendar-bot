@@ -464,6 +464,26 @@ export const SHORT_FIXTURES = [
     options: { bgm: true, bgmLevel: 0.25, sparse: true, thump: 4.2, thumpLevel: 0.1, seed: 9 },
   },
   {
+    // **「低い側の音量が下に張り付いてたまに跳ねるのは打点」という手を潰すため**の素材
+    // （2026-09-16・3 回目）。あの手（`maxLowSkew`）は、声の帯域に居座る打点を
+    // 音量の**向き**（歪度）で弾く。打点は鳴っていない時間のほうが長く、
+    // 音節は鳴っている時間のほうが長い、という前提に乗っている。
+    //
+    // だとすれば、**鳴っていない時間のほうが長い声**を置けばそのまま外れるはず。
+    // きっぱり区切ってしゃべる（カウント・呼びかけ・区切ったナレーション）は珍しくないので、
+    // 意地悪というより、前提が現実のどこで崩れるかを測るための素材。
+    //
+    // `speech-sparse-bgm.wav` と**しゃべり方だけ**が違う（BGM も種も同じ 9。
+    // 乱数は音節を組み終わったあとの包絡にしか効かないので、
+    // 音節の並びも母音も子音も 1 ビット同じ）。
+    name: 'speech-clipped-bgm.wav',
+    note: 'BGM の上で、短く区切ってたまにしゃべる（20%）',
+    speech: true,
+    sparse: true,
+    hard: true,
+    options: { bgm: true, bgmLevel: 0.25, sparse: true, clipped: true, seed: 9 },
+  },
+  {
     name: 'speech-chord-into.wav',
     // `speech.wav` に和音を足しただけ。声は 1 ビットも同じ（`chordInto` は乱数を引かない）。
     // 2026-09-15 に入れた「発話の頭を遡って拾う」手が、いちばん損をする形を測るための素材。

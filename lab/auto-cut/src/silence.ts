@@ -357,6 +357,100 @@ export interface JetCutOptions {
    * 0 にすれば入れる前の振る舞いに戻る（`LAB_NO_LEAD=1 npm run lab:bench`）。
    */
   speechLeadIn: number;
+  /**
+   * 低い帯域の音量の**向き**（歪度）がここを超えたコマは、声だと言わない。0 で無効。
+   *
+   * **既定では使っていない**（`DEFAULT_JET_CUT.maxLowSkew` は 0）。
+   * 2026-09-16 の 3 回目に測って、**狙いは完全に果たしたが、果たした先で 2 本壊れた**ので
+   * 入れずに残してある。入れた側は `LAB_SKEW=1 npm run lab:bench` で出せる。
+   *
+   * ## 何のために考えたか
+   *
+   * 9/13 から 8 通り試して届かなかった穴（**声の帯域に居座る打点**）。
+   * 揺れの速さ（`modulation`）でも大きさ（`modulationDepthDb`）でも、
+   * 打点と音節は同じ顔になる（`music-thump` 1.88dB 対 声の最小 1.59dB）。
+   * 残っていたのは**動き方の向き**で、そこは逆を向いている
+   * （理由と実測は features.ts の `levelSkewness`）。
+   *
+   * ## 素材単位ではなくコマ単位に置いた理由
+   *
+   * 潰したい `speech-sparse-thump.wav` には**声がある**。素材ごと止めると声も落ちる。
+   * 要るのは「打点しか鳴っていない 5.60 秒を渡らせない」ことなので、コマ単位でしか置けない。
+   *
+   * ## 線を振った表（33 本・保持 0。2026-09-16・3 回目）
+   *
+   * | 線 | 声を残せた率 | 残したうち声だった率 | 声ゼロを切った秒 |
+   * | --- | --- | --- | --- |
+   * | **0（入れる前）** | **99.7%** | **71.9%** | **0.00s** |
+   * | 0.1 | 94.4% | 76.5% | 12.18s |
+   * | 0.2 | 96.6% | 75.3% | 10.96s |
+   * | 0.3 | 99.2% | 74.8% | 10.78s |
+   * | **0.4** | **99.6%** | **73.5%** | **8.96s** |
+   * | 0.5 | 99.7% | 72.6% | 7.70s |
+   * | 0.6 | 99.7% | 72.2% | 4.06s |
+   *
+   * 0.4 はコマ単位の釣り合いで選んだ値（声のコマを落とす率 0.9% / 打点を捕まえる率 82.4%）。
+   * **どの線でも「声ゼロを切った秒」が 0 に戻らない。** 線を上げると被害は減るが、
+   * それは効かせるのをやめているだけで、0.6 まで上げても 4.06s 残る。
+   *
+   * ## 狙いはそのとおり当たった（線 0.4）
+   *
+   * | 素材 | 削減 | 残せた率 | 精度 | 渡った秒 |
+   * | --- | --- | --- | --- | --- |
+   * | ※ `speech-sparse-thump` | 0% → **35%** | 100% → 100% | 20% → **31%** | 5.60 → **0.00** |
+   * | ※ `speech-sparse-bgm` | 64% → 74% | 100% → 99% | 56% → **75%** | 0.00 → 0.00 |
+   * | ※ `speech-sparse-hats` | 64% → 72% | 100% → 99% | 56% → **72%** | 0.00 → 0.00 |
+   *
+   * **9/13 から 8 通り試して 1 コマも動かなかった `speech-sparse-thump` が、初めて動いた。**
+   *
+   * ## それでも入れない理由（2 本、両側に 1 本ずつ壊れる）
+   *
+   * - **声ゼロの `music-thump` を切り刻む**（実害 0.00s → **5.94s**、`music-thump-break` は 3.02s）。
+   *   声らしいコマの割合が 99% → **25%** と**半端に**落ちる。5% の線は割らないので
+   *   素材単位では止まらず、残った 2 割が散らばったまま残し区間になる。
+   *   **9/16 の 1 回目とまったく同じ壊れ方**で、記録にある
+   *   「判定が全面的に外れる素材は、外れているぶんだけ安全／半端に当たった瞬間に切り刻む」がそのまま出た。
+   *   **割合では止められない**: `music-thump` 25% 対 `speech-sparse-thump` 32% で、線を引く隙間が無い。
+   * - **声のある `speech-clipped-bgm` が丸ごと止まる**（削減 64% → **0%**、割合 25% → **2%**）。
+   *   短く区切ってしゃべると、声の低い側が打点と同じ向きになる（歪度の中央値 **1.34**
+   *   ＝打点の 0.74 より高い）。**この手が見ているのは「打点か」ではなく
+   *   「鳴っている時間と黙っている時間のどちらが長いか」**でしかない。
+   *   幸い 5% の線で止まるので**声を切りはしない**（何もしない側へ落ちる）が、
+   *   その話し方では道具が働かなくなる。
+   *
+   * **次にやるなら、線を振るのではなく `music-thump` を素材単位で止める手を探すこと。**
+   * 9/16 の 2 回目に `music-hats` で同じことをして（深さの判定）、そこで既定にできた。
+   *
+   * **0 以下は「全部を打点とみなす」ではなく「門を置かない」。** 歪度は負の値を取るので、
+   * 線を 0 や -0.2 にすると「もっと厳しくした」つもりで**門ごと消える**。
+   * 実際この注を書いた回に、線を振った表の 0 行を「被害 0 に戻った」と読みかけた
+   * （戻ったのではなく、測っていなかった）。0 は無効の意味で固定してある。
+   */
+  maxLowSkew: number;
+  /**
+   * 打点だと判断したコマから、門を閉めたままにする長さ（秒）。0 で「そのコマだけ」。
+   *
+   * **効くはずだと思って入れて、測ったら逆だった。** 門をコマ単位で当てただけだと
+   * `music-thump` の残し区間が散らばるので、「打点は等間隔に来るのだから間を埋めれば
+   * 散らばりが消え、割合が 5% の線を割って素材ごと止まる」と考えた。
+   * 実際には割合は落ちるのに線までは届かず（保持 0.5 秒で 25% → 9.7%、
+   * 素材の端に**読めないコマが 1.26 秒**あってそこが残る）、
+   * **残し区間が細くなったぶんだけ切る秒が増えた**（33 本・線 0.4）:
+   *
+   * | 保持 | 声を残せた率 | 残したうち声だった率 | 声ゼロを切った秒 |
+   * | --- | --- | --- | --- |
+   * | **0（いま）** | **99.6%** | **73.5%** | **8.96s** |
+   * | 0.25s | 98.6% | 78.8% | 12.36s |
+   * | 0.5s | 94.9% | 81.7% | 18.88s |
+   * | 1.0s | 93.5% | 69.1% | 19.88s |
+   *
+   * **「止まらないところまで割合を落とす」は、止まらなければ悪化にしかならない。**
+   * 声の側も同じだけ食う（0.5 秒で残せた率 99.6% → 94.9%）。
+   * 0 のままにしてあるが、素材単位の停止が見つかったら測り直す価値はある。
+   *
+   * 無音を挟んだら切る（包絡の保持と同じ理由。曲の切れ目をまたいで閉め続けない）。
+   */
+  skewHold: number;
 }
 
 /**
@@ -396,6 +490,9 @@ export const DEFAULT_JET_CUT: JetCutOptions = {
   envelopeHold: 0.5,
   minEnvelopeRun: 0.08,
   speechLeadIn: 0.32,
+  // **既定は 0＝入れていない**（2026-09-16・3 回目に測って見送った。理由は上の注）。
+  maxLowSkew: 0,
+  skewHold: 0,
 };
 
 export interface JetCutPlan {
@@ -458,6 +555,13 @@ export interface JetCutPlan {
   depthSeconds: number;
   /** 読めたコマでの深さの最大値（dB）。線をどこに引くべきかを毎回数字で言えるように。 */
   depthMax: number;
+  /**
+   * 向きの門（`maxLowSkew`）が「打点だ」として落としたコマの秒数。
+   *
+   * **声らしさは超えていたのに落としたコマ**だけを数える。ここが 0 のまま数字が動いたら、
+   * 効いているのはこの門ではない。**声のある素材でここが伸びていたら、声を削っている。**
+   */
+  skewSeconds: number;
 }
 
 /**
@@ -572,10 +676,35 @@ export function lowBandDepthSeconds(
   minDepth: number,
 ): { judged: number; above: number; max: number } {
   const frames = Math.min(lowLevel.length, depth.length);
-  const half = windowFrames >> 1;
+  const readable = lowBandReadable(lowLevel, thresholdDb, windowFrames);
   let judged = 0;
   let above = 0;
   let max = 0;
+  for (let i = 0; i < frames; i += 1) {
+    if (!readable[i]) continue;
+    judged += 1;
+    if (depth[i] > max) max = depth[i];
+    if (depth[i] >= minDepth) above += 1;
+  }
+  return { judged: judged * hop, above: above * hop, max };
+}
+
+/**
+ * 低い帯域の窓を**読んでよいコマ**に印を付ける。
+ *
+ * 読んでよいのは「窓が丸ごと、低い側が鳴っている」コマだけ。窓の縁に無音が入ると、
+ * そこの段差が 3〜6Hz に漏れて、深さも向きも打点と同じ顔になる
+ * （`music-hats-break` は縁を数えると 2.77dB、外すと 0.32dB）。
+ * **縁は曲の切れ目であって音節ではない。**
+ *
+ * **深さ（`lowBandDepthSeconds`）と向き（`maxLowSkew`）で同じものを使う**ために切り出してある。
+ * 2 か所に同じ規則を書くと、片方だけ直したときに
+ * 「縁を外したつもりで外せていない」という静かな壊れ方をする。
+ */
+export function lowBandReadable(lowLevel: Float32Array, thresholdDb: number, windowFrames: number): Uint8Array {
+  const frames = lowLevel.length;
+  const out = new Uint8Array(frames);
+  const half = windowFrames >> 1;
   // 窓が丸ごと鳴っているかは、鳴っていないコマからの距離で決める。
   // 1 コマずつ窓を舐め直すと尺の 2 乗になる（`envelopeGateFrames` と同じ理由）。
   const since = new Int32Array(frames);
@@ -591,11 +720,9 @@ export function lowBandDepthSeconds(
     const to = from + windowFrames - 1;
     if (from < 0 || to >= frames) continue;
     if (since[to] < windowFrames) continue;
-    judged += 1;
-    if (depth[i] > max) max = depth[i];
-    if (depth[i] >= minDepth) above += 1;
+    out[i] = 1;
   }
-  return { judged: judged * hop, above: above * hop, max };
+  return out;
 }
 
 /**
@@ -613,6 +740,9 @@ export function lowBandDepthSeconds(
  * @param lowDepth 同じ帯域の 3〜6Hz の深さ（dB）。渡さなければ深さでは判断しない。
  *   ここも**渡されないものを「動かなかった」と読まない**。読むと、列を渡し忘れただけで
  *   どの素材も「声が無い」になる。
+ * @param lowSkew 同じ帯域の音量の向き（歪度）。渡さなければ向きでは判断しない。
+ *   こちらは逆向きで、**渡されないものを「打点だった」と読まない**（読むと全部が声でなくなる）。
+ *   `lowLevel` と**両方**渡したときだけ立つ（どのコマを読んでよいかが `lowLevel` で決まるため）。
  */
 export function planJetCut(
   track: LoudnessTrack,
@@ -623,6 +753,7 @@ export function planJetCut(
   envelopeFlux?: Float32Array,
   lowLevel?: Float32Array,
   lowDepth?: Float32Array,
+  lowSkew?: Float32Array,
 ): JetCutPlan {
   const opts = { ...DEFAULT_JET_CUT, ...options };
   const thresholdDb = opts.thresholdDb ?? autoThresholdDb(track, opts.sensitivity);
@@ -657,6 +788,16 @@ export function planJetCut(
     : null;
   let envelopeOpenUntil = -1;
   let envelopeFrames = 0;
+  // 低い帯域の音量の向きで、声の帯域に居座る打点を落とす門。
+  // 読んでよいコマは深さの判定とまったく同じ条件で決める（`lowBandReadable`）。
+  const useSkew =
+    !!lowSkew && !!lowLevel && lowSkew.length === track.db.length && lowLevel.length === track.db.length && opts.maxLowSkew > 0;
+  const skewReadable = useSkew
+    ? lowBandReadable(lowLevel as Float32Array, thresholdDb, modulationWindowFrames(track.hop))
+    : null;
+  const skewHoldFrames = Math.max(0, Math.round(opts.skewHold / track.hop));
+  let skewCloseUntil = -1;
+  let skewFrames = 0;
   // 発話の頭を遡って拾うぶん。level モードでは鳴っているコマをすべて拾うので出番が無い。
   const leadFrames = usedMode === 'speech' ? Math.max(0, Math.round(opts.speechLeadIn / track.hop)) : 0;
   // どこまで拾ったか。同じコマを二度拾わないため（重なっても mergeRanges が畳むが、
@@ -677,6 +818,8 @@ export function planJetCut(
       // 無音を挟んだら保持も切る。前の発話の余韻で、そのあとに来た音楽まで通してしまわないため。
       // 保持が守りたいのは「ひと続きの声の中で伸ばした母音」だけで、無音をまたぐ必要は無い。
       envelopeOpenUntil = -1;
+      // 打点の門を閉め続けるほうも、同じ理由で無音で切る（曲の切れ目をまたがない）。
+      skewCloseUntil = -1;
       continue;
     }
     soundingFrames += 1;
@@ -690,6 +833,14 @@ export function planJetCut(
       const score = (speechScore as Float32Array)[i];
       inSpeech = inSpeech ? score >= exit : score >= enter;
       if (!inSpeech) continue;
+      // 低い側の音量が「下に張り付いてたまに跳ねる」形なら、鳴っているのは音節ではなく打点。
+      // 包絡の門と同じ理由で `inSpeech` は触らない（門で閉めたことを「声でなくなった」と
+      // 読むと、ヒステリシスが毎回入り直しになる）。
+      if (useSkew && (skewReadable as Uint8Array)[i] && (lowSkew as Float32Array)[i] >= opts.maxLowSkew) skewCloseUntil = i + skewHoldFrames;
+      if (useSkew && i <= skewCloseUntil) {
+        skewFrames += 1;
+        continue;
+      }
       // 包絡の門。声らしさ（揺れ × 音程）は「音色が動いているか」を見ていないので、
       // ここで口の動きを要求して、鳴りっぱなしの音を落とす。
       // inSpeech（声らしさ側の状態）はここでは触らない。門で閉めたことを
@@ -770,6 +921,7 @@ export function planJetCut(
       envelopeSeconds,
       depthSeconds: depth.judged,
       depthMax: depth.max,
+      skewSeconds: skewFrames * track.hop,
     };
   }
 
@@ -793,6 +945,7 @@ export function planJetCut(
     envelopeSeconds,
     depthSeconds: depth.judged,
     depthMax: depth.max,
+    skewSeconds: skewFrames * track.hop,
   };
 }
 

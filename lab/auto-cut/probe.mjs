@@ -5,6 +5,8 @@
  *   npm run lab:probe
  *   LAB_FULLBAND=1 npm run lab:probe  # 揺れを全域で見る（2026-09-16・2 回目より前の振る舞い）
  *
+ * `lowLevelSkew` は**向きが逆**の量（大きいほど打点＝声でない）。表の下の注を参照。
+ *
  * 思いつきで 1 つ選んで実装すると、たまたま手元の素材で効いただけのものを掴む。
  * 先にここで並べて比べてから決める。
  *
@@ -115,6 +117,15 @@ const average = FEATURE_NAMES.map((name) => {
   return pad(num(mean, 6), 14);
 }).join('');
 console.log(`${pad('  平均', 22)}${average}`);
+// **`lowLevelSkew` だけは向きが逆。** 大きいほど「打点」＝声でない側なので、
+// 0 に近いほどよく分けている（0.5 が分けられない）。平均 0.135 は 1 - 0.135 = 0.865 と読む。
+// `speech-sparse-thump` は 0.000（声と打点が完全に割れる）、
+// **`speech-clipped-bgm` は 0.985 と逆向きに振り切れている**（短く区切った声が打点の側へ落ちる）。
+// この 1 行を読み飛ばすと、平均 0.135 を「まったく分けられない量」と読むことになる。
+console.log(
+  '\n※ lowLevelSkew は向きが逆（大きいほど打点＝声でない）。0 に近いほど分けている。' +
+    '\n  speech-clipped-bgm の 0.985 は、短く区切った声が打点の側へ落ちるということ（この手の破れ方）。',
+);
 
 // --- しきい値も勘で決めない ---
 // 声のコマを取りこぼす率と、それ以外を拾ってしまう率の釣り合いが
@@ -597,6 +608,7 @@ console.log(`${pad('  平均', 22)}${average}`);
       features.envelopeFlux,
       features.lowLevel,
       features.lowModulationDepth,
+      features.lowLevelSkew,
     );
     let silent = 0;
     for (let i = 0; i < track.db.length; i += 1) {
@@ -641,6 +653,7 @@ console.log(`${pad('  平均', 22)}${average}`);
       features.envelopeFlux,
       features.lowLevel,
       features.lowModulationDepth,
+      features.lowLevelSkew,
     );
     const vals = [];
     for (let i = 0; i < track.db.length; i += 1) {

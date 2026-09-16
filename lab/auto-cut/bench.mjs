@@ -6,6 +6,7 @@
  *   npm run lab:bench -- lab/fixtures/out/speech-long.wav   # ファイルを指定してもよい
  *   LAB_NO_RUN=1 npm run lab:bench   # 「動きが続いたか」を見ない（2026-09-14 以前の振る舞い）
  *   LAB_NO_LEAD=1 npm run lab:bench  # 発話の頭を遡らない（2026-09-15 以前の振る舞い）
+ *   LAB_SKEW=1 npm run lab:bench      # 向きの門を入れた側（2026-09-16・3 回目。既定では入れていない）
  *   LAB_FULLBAND=1 npm run lab:bench   # 揺れを全域で見る（2026-09-16・2 回目より前の振る舞い）
  *   LAB_LOWBAND=4000 npm run lab:bench # 低い側の境目を変えて振る（Hz。1 なら既定の 2000Hz）
  *
@@ -127,6 +128,10 @@ for (const file of files) {
       mode: 'speech',
       ...(process.env.LAB_NO_RUN ? { minEnvelopeRun: 0 } : {}),
       ...(process.env.LAB_NO_LEAD ? { speechLeadIn: 0 } : {}),
+      // 向きの門は既定では入っていない（silence.ts の `maxLowSkew` の注を参照）。
+      // `LAB_SKEW=1` で線 0.4、`LAB_SKEW=0.6` のように線そのものも渡せる。
+      ...(process.env.LAB_SKEW ? { maxLowSkew: Number(process.env.LAB_SKEW) === 1 ? 0.4 : Number(process.env.LAB_SKEW) } : {}),
+      ...(process.env.LAB_SKEW_HOLD ? { skewHold: Number(process.env.LAB_SKEW_HOLD) } : {}),
     },
     features.speechScore,
     features.shapeChange,
@@ -134,6 +139,9 @@ for (const file of files) {
     features.envelopeFlux,
     features.lowLevel,
     features.lowModulationDepth,
+    // 低い帯域の音量の向き。これだけはコマ単位の門（声の帯域に居座る打点を落とす）。
+    // 列はいつでも渡す。効かせるかどうかは上の `maxLowSkew` が決める。
+    features.lowLevelSkew,
   );
   const speechMs = performance.now() - t1;
 
@@ -164,6 +172,8 @@ for (const file of files) {
   // 深さの判定は「読めた秒数」が足りて初めて立つ。0s なら**見ていない**ので、
   // 「通った」と読まないために両方出す。
   notes.push(`低い側の揺れの深さ 最大 ${speech.depthMax.toFixed(2)}dB（${speech.depthSeconds.toFixed(2)}s ぶん読めた）`);
+  // 向きの門が働いた秒数。0 のままで数字が動いたら、効いているのはこの門ではない。
+  if (speech.skewSeconds > 0) notes.push(`向きの門が打点として落とした ${speech.skewSeconds.toFixed(2)}s`);
   if (speech.usedMode !== 'speech') notes.push('speech モードに落ちられなかった');
   if (notes.length) console.log(`${' '.repeat(22)} └ ${notes.join(' / ')}`);
 

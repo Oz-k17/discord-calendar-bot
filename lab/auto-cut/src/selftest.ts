@@ -12,6 +12,7 @@ import {
   keepEdgeSeconds,
   keepScoreSeconds,
   lowBandDepthSeconds,
+  lowBandReadable,
   minimalKeepRanges,
   planJetCut,
 } from './silence.ts';
@@ -22,6 +23,7 @@ import {
   analyzeFeatures,
   centroidDescentRatio,
   highBandAloneRatio,
+  levelSkewness,
   MOD_SPLIT_HZ,
   modulationDepthDb,
   modulationRatio,
@@ -1870,6 +1872,111 @@ export function runSelfTest(): TestResult[] {
         '低い側で深く刻む音楽は、声ゼロでも素通りする（この手の破れ方）',
         !percussive.noSpeechFound,
         `1.88dB は線（${DEFAULT_JET_CUT.minModulationDepth}dB）の上`,
+      );
+    }
+
+    // --- 揺れの「向き」で打点と音節を分ける（levelSkewness・2026-09-16・3 回目） ---
+    //
+    // 深さでも割合でも、低い側で音節の速さに刻む打点は声と同じ顔になる（上の ⑤）。
+    // 残っていたのは向きで、そこは逆を向いている。打点は鳴っていない時間のほうが長く、
+    // 音節は鳴っている時間のほうが長い。**同じ 4.2Hz でもデューティ比が逆。**
+    //
+    // ここも音量の列を直に組んで当てる。素材から作ると、歪度が幾つになるべきかを
+    // こちらが言えない（「出た値を正しいことにする」形になる）。
+    {
+      const hop = 0.02;
+      const frames = 256;
+      const middle = (a: Float32Array) => a[Math.floor(a.length / 2)];
+      /** 周期 `period` コマのうち `on` コマだけ `peakDb` まで上がる列。デューティ比を直に振れる。 */
+      const dutyTrack = (period: number, on: number, peakDb: number): LoudnessTrack => {
+        const db = new Float32Array(frames);
+        for (let i = 0; i < frames; i += 1) db[i] = i % period < on ? -20 + peakDb : -20;
+        return { hop, db, duration: frames * hop };
+      };
+
+      // ① 鳴っている時間のほうが短い（＝打点）と、歪度は正になる。
+      //    4.2Hz の刻みは 0.02 秒コマで周期 12 コマ。減衰 0.035 秒 ≒ 2 コマぶん鳴る。
+      const hit = middle(levelSkewness(dutyTrack(12, 2, 10)));
+      check('鳴っている時間のほうが短い列（打点）は歪度が正', hit > 0.5, `${hit.toFixed(3)}`);
+
+      // ② 同じ周期・同じ深さでも、鳴っている時間のほうが長ければ歪度は負になる。
+      //    **周期も深さも変えずに向きだけが入れ替わる**ので、この量が見ているものに疑いが無い。
+      const syllable = middle(levelSkewness(dutyTrack(12, 9, 10)));
+      check('鳴っている時間のほうが長い列（音節）は歪度が負', syllable < -0.5, `${syllable.toFixed(3)}`);
+
+      // ③ 音量倍率に不変。標準偏差で割ってあるので、深さを変えても向きは動かない。
+      //    ここが崩れると、線が「素材の録音レベル」や「打点の大きさ」で動く。
+      const louder = middle(levelSkewness(dutyTrack(12, 2, 20)));
+      check('打点の大きさを変えても向きは動かない', near(louder, hit, 0.02), `${louder.toFixed(3)} / ${hit.toFixed(3)}`);
+
+      // ④ まったく動かない列は 0（＝どちらでもない）。ここで無理に値を作ると、
+      //    鳴りっぱなしの和音が打点の側にも音節の側にも転ぶ。
+      const flat = middle(levelSkewness(dutyTrack(12, 0, 0)));
+      check('動かない列の向きは 0（どちらでもない）', flat === 0, `${flat.toFixed(4)}`);
+
+      // ⑤ **この手が見ているのは「打点か」ではなく「どちらの時間が長いか」。**
+      //    きっぱり区切ってしゃべる声（`speech-clipped-bgm.wav`）は、鳴っている時間のほうが
+      //    短くなるので打点と同じ側へ落ちる（実測の中央値 1.34 は打点の 0.74 より高い）。
+      //    **ここを固定しておかないと、次の回が「打点を見分けられた」と読む。**
+      const clipped = middle(levelSkewness(dutyTrack(12, 4, 10)));
+      check('短く区切った声も打点と同じ側へ落ちる（この手の破れ方）', clipped > 0.5, `${clipped.toFixed(3)}`);
+    }
+
+    // --- 向きを「読んでよいコマだけ」で読む（lowBandReadable・maxLowSkew） ---
+    {
+      const hop = 0.02;
+      const windowFrames = modulationWindowFrames(hop);
+      const frames = 200;
+      const constant = (v: number) => new Float32Array(frames).fill(v);
+
+      // ① 深さと**同じ規則**で読む。1 コマ黙れば窓 1 つぶん読めなくなる。
+      //    2 か所に同じ規則を書くと、片方だけ直したときに静かに壊れる。
+      const withGap = constant(-20);
+      withGap[100] = -100;
+      const readable = lowBandReadable(withGap, -40, windowFrames);
+      let readableFrames = 0;
+      for (let i = 0; i < frames; i += 1) readableFrames += readable[i];
+      const depth = lowBandDepthSeconds(withGap, constant(2), hop, -40, windowFrames, 0.8);
+      check(
+        '向きと深さは、同じコマを読む',
+        near(readableFrames * hop, depth.judged, 1e-6),
+        `読めた ${(readableFrames * hop).toFixed(2)}s`,
+      );
+
+      const sr = 16000;
+      const sounding = analyzeLoudness(makeTone(4, sr, [{ from: 0, to: 4 }]), 0.02);
+      const n = sounding.db.length;
+      const fill = (v: number) => new Float32Array(n).fill(v);
+      const lowLevel = new Float32Array(n);
+      for (let i = 0; i < n; i += 1) lowLevel[i] = sounding.db[i];
+      const bare = { mode: 'speech' as const, minSilence: 0.05, padding: 0, minKeep: 0, speechLeadIn: 0 };
+      const gate = { ...bare, maxLowSkew: 0.4, minModulationDepth: 0 };
+
+      // ② 向きが線を超えたコマは、声らしさが満点でも落ちる。
+      const hits = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, lowLevel, undefined, fill(1.0));
+      check('向きが線を超えたコマは声だと言わない', hits.skewSeconds > 0 && hits.speechRatio < 0.5, `落とした ${hits.skewSeconds.toFixed(2)}s`);
+
+      // ③ 線の下なら素通り。門があること自体で声が減ってはいけない。
+      const kept = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, lowLevel, undefined, fill(-1.0));
+      check('向きが線の下なら落とさない', kept.skewSeconds === 0 && !kept.noSpeechFound, `落とした ${kept.skewSeconds.toFixed(2)}s`);
+
+      // ④ **渡されないものを「打点だった」と読まない。** 列を渡し忘れただけで
+      //    声が 1 コマも残らない、という壊れ方をしないこと（深さとは逆向きの穴）。
+      const noColumn = planJetCut(sounding, gate, fill(0.5), fill(0.2));
+      check('列を渡さなければ、向きでは判断しない', noColumn.skewSeconds === 0 && !noColumn.noSpeechFound, '');
+
+      // ④' 低い側の列だけ渡し忘れても同じ。どのコマを読んでよいかがそこで決まるので、
+      //     無いまま読むと**窓の縁の段差を音節と読む**コマまで落とすことになる。
+      const noLow = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, undefined, undefined, fill(1.0));
+      check('低い側の音量が無ければ、向きでは判断しない', noLow.skewSeconds === 0 && !noLow.noSpeechFound, '');
+
+      // ⑤ 既定では入っていない（2026-09-16・3 回目に測って見送った）。
+      //     ここが動いたら、既定を変えたということ。記録に残っているか確かめること。
+      const off = planJetCut(sounding, bare, fill(0.5), fill(0.2), undefined, undefined, lowLevel, undefined, fill(1.0));
+      check(
+        '既定では向きの門は入っていない',
+        DEFAULT_JET_CUT.maxLowSkew === 0 && off.skewSeconds === 0,
+        `maxLowSkew = ${DEFAULT_JET_CUT.maxLowSkew}`,
       );
     }
   }

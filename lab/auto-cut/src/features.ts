@@ -47,6 +47,15 @@ export interface FeatureTrack {
    * それを決めるのにこの列が要る（silence.ts の `lowBandDepthSeconds`）。
    */
   lowLevel: Float32Array;
+  /**
+   * 低い帯域の音量の**形**（歪度）。窓の中で音量が「下に張り付いてたまに跳ねる」なら正、
+   * 「上に居てときどきへこむ」なら負（`levelSkewness` を参照）。
+   *
+   * 揺れの**速さ**（`lowModulation`）でも**大きさ**（`lowModulationDepth`）でもなく、
+   * **揺れの向き**を見る列。打点は音が出ていない時間のほうが長く、音節は鳴っている時間のほうが長い。
+   * 声の帯域に居座る打点を弾くために足した（2026-09-16・3 回目）。
+   */
+  lowLevelSkew: Float32Array;
   /** スペクトルの重心（Hz）。高いほど「明るい」音。 */
   centroid: Float32Array;
   /** スペクトルの平坦さ（0〜1）。1 に近いほど雑音的、0 に近いほど音程がある。 */
@@ -864,6 +873,107 @@ export function modulationDepthDb(
   return out;
 }
 
+/**
+ * 音量の列の**歪度**（3 次の標準化モーメント）を、揺れと同じ窓で出す。
+ *
+ * ## なぜ「向き」を見るのか
+ *
+ * 2026-09-16 の 2 回目までに、低い帯域の揺れを**速さ**（`modulationRatio`）でも
+ * **大きさ**（`modulationDepthDb`）でも測った。どちらも
+ * `music-thump`（音節と同じ速さで低い側を刻む打点）に破れる。
+ * 深さで見ても 1.88dB あり、声のいちばん低い 1.59dB を追い越す。
+ * **「どれくらい動いたか」では、打点と音節が同じ顔になる。**
+ *
+ * 残っていたのは**動き方の向き**だった。打点は鳴っていない時間のほうが長く、
+ * 音量は下に張り付いてたまに跳ね上がる（右へ裾を引く＝歪度が正）。
+ * 音節は鳴っている時間のほうが長く、音量は上に居てときどきへこむ（歪度が負）。
+ * **同じ 4.2Hz でも、デューティ比が逆を向いている。**
+ *
+ * 目盛りは dB の列の標準偏差で割ってあるので無次元で、
+ * `modulationDepthDb` と同じく**素材の音量を何倍しても値は変わらない**。
+ *
+ * ## 実測（低い側・窓が丸ごと鳴っているコマ。0.16 秒で均したあとの中央値）
+ *
+ * | 素材 | 声のコマ | それ以外のコマ |
+ * | --- | --- | --- |
+ * | `speech-sparse-thump`（声あり） | **-0.11**（最大 0.13） | **+0.77** |
+ * | `music-thump`（声なし） | — | +0.74 |
+ * | `music-thump-break`（声なし） | — | +0.74 |
+ * | `speech-sparse-hats`（声あり） | +0.23（最大 0.60） | +0.06 |
+ * | 乾いた声・伸ばした母音 | -1.1 〜 -3.5 | — |
+ * | `bgm`・`music-chords*`（声なし） | — | -0.14 〜 +0.09 |
+ *
+ * **同じ素材の中で、声の区間と打点だけの区間が割れる。** これは 9/13 以降に試した
+ * 8 通りの手がどれも出来なかったことで、`speech-sparse-thump` は
+ * 声の最大 0.13 対 打点の中央値 0.77 と、重なりが無い。
+ *
+ * ## 均してから使う
+ *
+ * 窓（0.64 秒）に打点が 2〜3 発しか入らないので、窓が滑ると値が打点の周期で上下する。
+ * 均さないと門 0.4 で打点を捕まえられるのが 78%、均すと 82% になり、
+ * 同時に**声のコマを落とす率が 2.3% → 0.9% へ下がる**（両方が良くなる）。
+ * 均す幅は `SKEW_SMOOTH`。
+ *
+ * ## 読んでよい窓の条件は深さと同じ
+ *
+ * 窓の縁に無音が入ると、そこの段差だけで裾が伸びる。
+ * どのコマを読んでよいかは silence.ts 側（`lowBandReadable`）で決める。
+ * ここは列を出すだけで、**読めるかどうかの判断はしない**。
+ *
+ * @param track 音量の列。低い帯域だけのものを渡す（全域で見ると打点の帯域が混ざる）。
+ */
+export function levelSkewness(track: LoudnessTrack, windowSeconds = MOD_WINDOW): Float32Array {
+  const n = modulationWindowFrames(track.hop, windowSeconds);
+  const out = new Float32Array(track.db.length);
+  const buffer = new Float64Array(n);
+
+  for (let i = 0; i < track.db.length; i += 1) {
+    // 窓の取り方・端の埋め方・無音の底は `modulationRatio` と 1 つも変えない。
+    // 「同じ揺れを速さ・大きさ・向きのどれで見たか」の比較にするため。
+    let mean = 0;
+    for (let k = 0; k < n; k += 1) {
+      const at = Math.max(0, Math.min(track.db.length - 1, i - (n >> 1) + k));
+      buffer[k] = Math.max(SILENCE_DB + 40, track.db[at]);
+      mean += buffer[k];
+    }
+    mean /= n;
+    let variance = 0;
+    let third = 0;
+    for (let k = 0; k < n; k += 1) {
+      const d = buffer[k] - mean;
+      variance += d * d;
+      third += d * d * d;
+    }
+    variance /= n;
+    third /= n;
+    // まったく動いていない窓は向きを持たない。0（＝どちらでもない）で返す。
+    // ここで無理に値を作ると、鳴りっぱなしの和音が打点の側にも音節の側にも転ぶ。
+    const sd = Math.sqrt(variance);
+    out[i] = sd > SKEW_FLOOR_DB ? third / (sd * sd * sd) : 0;
+  }
+  return out;
+}
+
+/**
+ * 歪度を出す前に「動いていない」とみなす標準偏差の下限（dB）。
+ *
+ * 分母が 0 に近いと歪度は際限なく暴れる。実測では、鳴りっぱなしの和音の窓でも
+ * 標準偏差は 0.5dB 前後あるので、その 10 分の 1 を下限にしておけば
+ * 本当に平らな窓（合成した定常音・検算で組む列）だけが落ちる。
+ */
+const SKEW_FLOOR_DB = 0.05;
+/**
+ * 歪度を均す窓の長さ（秒）。**均す向きは平均**（最大値で埋めると打点の側へ寄る）。
+ *
+ * 0（均さない）・0.16・0.32 秒で振って測った（門 0.4 のとき）:
+ *   均さない 声を落とす率 2.3% / 打点を捕まえる率 77.9%
+ *   0.16 秒  **0.9% / 82.4%**
+ *   0.32 秒  2.3% / 89.5%
+ * 0.32 秒まで広げると捕まえる率は上がるが、`speech-sparse-*` の声で
+ * 落とす率が均さないときまで戻る（窓が発話の外まで届く）。両方が良くなる 0.16 秒を採った。
+ */
+const SKEW_SMOOTH = 0.16;
+
 /** 基本周波数の整数倍にどれだけ乗っているか。声は倍音が並ぶ、打楽器は並ばない。 */
 function harmonicityOf(mag: Float64Array, binHz: number): number {
   const from = Math.max(1, Math.round(F0_LOW / binHz));
@@ -1142,6 +1252,8 @@ export function analyzeFeatures(
   // 深さは境目を置いていなくても出す。既定（全域）でも probe で並べて読めるようにしておかないと、
   // 「低い側に限った話なのか、揺れの大きさの話なのか」が次の回に切り分けられない。
   const lowModulationDepth = modulationDepthDb(lowTrack);
+  // 向きも深さと同じ理由で、境目を置いていなくても出す（probe で並べて読めるように）。
+  const lowLevelSkew = smoothMean(levelSkewness(lowTrack), Math.round(SKEW_SMOOTH / track.hop));
   const tone = new Float32Array(frames);
   const raw = new Float32Array(frames);
   for (let i = 0; i < frames; i += 1) {
@@ -1174,6 +1286,7 @@ export function analyzeFeatures(
     lowModulation,
     lowModulationDepth,
     lowLevel,
+    lowLevelSkew,
     centroid,
     flatness,
     flux,
@@ -1200,6 +1313,7 @@ export const FEATURE_NAMES = [
   'modulation',
   'lowModulation',
   'lowModulationDepth',
+  'lowLevelSkew',
   'flatness',
   'tone',
   'shapeFlux',

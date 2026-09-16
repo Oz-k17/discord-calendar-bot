@@ -235,6 +235,8 @@ function refreshCut() {
     // 低い帯域の揺れの深さ。これも素材単位の判定だけで使う。
     voice.features.lowLevel,
     voice.features.lowModulationDepth,
+    // 低い帯域の音量の向き。こちらはコマ単位の門で、声の帯域に居座る打点を落とす。
+    voice.features.lowLevelSkew,
   );
 
   $<HTMLOutputElement>('out-sensitivity').textContent = Number($<HTMLInputElement>('sensitivity').value).toFixed(2);
