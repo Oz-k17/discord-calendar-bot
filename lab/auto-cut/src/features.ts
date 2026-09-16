@@ -31,8 +31,20 @@ export interface FeatureTrack {
    */
   lowModulation: Float32Array;
   /**
+   * `lowModulation` と同じ揺れを、**割合ではなく深さ（dB）**で見たもの
+   * （`modulationDepthDb` を参照）。
+   *
+   * 割合は「揺れの取り分」なので、揺れの総量が 0.3dB しか無くても 1 に近づける。
+   * こちらには大きさが入っているので、**鳴りっぱなしの和音を「動いていない」と言える**。
+   * 素材単位の判定（silence.ts の `minModulationDepth`）はこの列を使う。
+   */
+  lowModulationDepth: Float32Array;
+  /**
    * 低い帯域だけの音量（dBFS）。`lowModulation` の材料で、
    * 「そこで何が起きているか」を外から確かめるために出している。
+   *
+   * 素材単位の判定でも使う。**深さを読んでよいのは低い側が鳴っている窓だけ**で、
+   * それを決めるのにこの列が要る（silence.ts の `lowBandDepthSeconds`）。
    */
   lowLevel: Float32Array;
   /** スペクトルの重心（Hz）。高いほど「明るい」音。 */
@@ -367,18 +379,23 @@ const MOD_WINDOW = 1.0;
  * 取りこぼしは 100% のまま。`speech-sparse-sustained-hats` も 0% → 65%。
  * **「判定そのものが働かない素材」が 2 本、働くようになった。**
  *
- * ## それでも入れていない理由
+ * ## 1 日だけ入れられなかった理由と、その片付き方
  *
- * 声の無い `music-hats` が**削減 0% → 43%**（鳴っているところを 5.60 秒切る）、
- * `music-hats-break` が 0% → 41%（同 4.22 秒）になる。声がゼロの曲が切り刻まれる。
+ * 入れた日（2026-09-16・1 回目）は、声の無い `music-hats` が**削減 0% → 43%**
+ * （鳴っているところを 5.60 秒切る）、`music-hats-break` が 0% → 41%（同 4.22 秒）になり、
+ * **声がゼロの曲が切り刻まれる**ので既定にできなかった。
  *
  * **これは新しく開けた穴ではなく、前から開いていた穴が初めて撃たれたもの。**
  * 2026-09-14（3 回目）に「`music-hats` の削減 0% は守れているのではなく、
  * 13 秒ずっと同じ大きさで鳴っているから撃たれていないだけ」と測ってある。
  * コマごとの声らしさが平らでなくなった瞬間に、素材単位の判定が止められずに切り始める。
  *
- * **止められない**ことも測った。`minSpeechRatio`（5%）で線を引き直す手は、
- * 声らしいコマの割合がこう並ぶので成り立たない:
+ * **2026-09-16（2 回目）に、その 2 本が素材単位で止まった**ので既定にした。
+ * 止めたのは `minModulationDepth`（silence.ts）＝**揺れを割合ではなく深さ（dB）で見る**手で、
+ * `music-hats` の低い側が 13 秒のあいだ最大 0.32dB しか動いていないことを使う。
+ * いまは 2 本とも「声が見つからない」で止まり、**声ゼロの素材を切った秒は 0.00s**。
+ *
+ * 下の「止められない」は、**割合（`minSpeechRatio`）では**という話。そこは今も変わらない:
  *   声なし: `bgm`・`drums`・`music-chords*`・`music-swell`・`music-tremolo` 0% /
  *           `music-vibrato` 4% / **`music-hats-break` 35% / `music-hats` 37%** /
  *           `music-flute` 68% / `music-wah` 98%
@@ -394,19 +411,26 @@ const MOD_WINDOW = 1.0;
  *
  * ## 境目を振った表（声のある 18 本の平均 / 声の無い 12 本の合計。`lab:bench`）
  *
+ * 深さの判定を入れたあと（2026-09-16・2 回目。素材 32 本）:
+ *
  * | 境目 | 声を残せた率 | 残したうち声だった率 | 声ゼロを切った秒 |
  * | --- | --- | --- | --- |
- * | なし（全域・いま） | 99.3% | 67.4% | **0.64s** |
- * | 6000Hz | 99.3% | 69.4% | 6.22s |
- * | 4000Hz | 99.2% | 71.5% | 13.02s |
- * | **2000Hz** | **99.6%** | **72.9%** | **10.28s** |
- * | 1500Hz | 99.6% | 74.7% | 12.36s |
- * | 1000Hz | 99.6% | 75.2% | 12.20s |
+ * | なし（全域・入れる前） | 99.3% | 67.4% | 0.18s |
+ * | 6000Hz | 99.3% | 69.4% | **0.00s** |
+ * | 4000Hz | 99.2% | 71.5% | **0.00s** |
+ * | **2000Hz（いま）** | **99.6%** | **72.9%** | **0.00s** |
+ * | 1500Hz | 99.6% | 74.7% | **0.00s** |
+ * | 1000Hz | 99.6% | 75.2% | **0.00s** |
  *
- * **どの境目でも、良くなるのは前 2 列、悪くなるのは 3 列目。** 交換の向きは境目で変わらない。
- * 6000Hz がいちばん被害が小さいが、それは**この素材のハイハットが 6kHz 高域通過だから**で、
- * 現実のシンバルはもっと下まで居る。数字が良く見えるほうを採ると、
- * 「塞がっていない穴が塞がったように見える」だけになるので採らない。
+ * **深さで止めたあとは、どの境目でも被害が 0 になる**（1 回目は 6.22〜13.02s あった）。
+ * つまり境目の選び方は、もう被害との交換ではない。
+ *
+ * それでも 1000Hz を採らない。**そこが良く見えるのは、この素材の声の手がかりが
+ * 低いほうに寄っているから**でしかない。第 2 フォルマントは前舌の母音で 2.5kHz 近くまで上がる
+ * ので、1000Hz で切ると口の形の手がかりを丸ごと落とす。数字だけで採ると、
+ * 「塞がっていない穴が塞がったように見える」ほうへ戻る。
+ * 参考までに 1 回目（深さの判定が無いとき）は、6000Hz が被害 6.22s といちばん軽かったが、
+ * それも**この素材のハイハットが 6kHz 高域通過だから**でしかなかった。
  *
  * ## そして、これは「声を見分けられた」ではない
  *
@@ -696,6 +720,24 @@ function smooth(values: Float32Array, halfWidth: number): Float32Array {
 }
 
 /**
+ * 揺れを見る窓が実際に何コマになるか。
+ *
+ * **丸め方を 2 か所に書かない**ために切り出してある。深さ（`modulationDepthDb`）を
+ * 素材単位の判定で読むとき、silence.ts 側は「窓の縁が無音にかかっていないか」を
+ * 知る必要があり、そこで窓の長さがずれると**縁を外したつもりで外せていない**という
+ * 静かな壊れ方をする。
+ */
+export function modulationWindowFrames(hop: number, windowSeconds = MOD_WINDOW): number {
+  // hop が 0 や負だと `windowSeconds / hop` が Infinity になり、下の while が止まらない。
+  // 手で組んだ列を渡せる場所（検算・silence.ts）から呼ぶので、ここで止める。
+  if (!(hop > 0) || !Number.isFinite(windowSeconds)) return 16;
+  // 窓は 2 の冪に丸める。FFT の格子と欲しい周波数をきちんと合わせるため。
+  let n = 1;
+  while (n * 2 <= Math.round(windowSeconds / hop)) n *= 2;
+  return Math.max(16, n);
+}
+
+/**
  * 音量の列から、3〜6Hz の揺れが占める割合を出す。
  *
  * 人がしゃべると、音量が 1 秒に 3〜6 回くらい上下する（音節の速さ）。
@@ -704,10 +746,7 @@ function smooth(values: Float32Array, halfWidth: number): Float32Array {
  */
 export function modulationRatio(track: LoudnessTrack, low = MOD_LOW, high = MOD_HIGH, windowSeconds = MOD_WINDOW): Float32Array {
   const fs = 1 / track.hop;
-  // 窓は 2 の冪に丸める。FFT の格子と欲しい周波数をきちんと合わせるため。
-  let n = 1;
-  while (n * 2 <= Math.round(windowSeconds * fs)) n *= 2;
-  n = Math.max(16, n);
+  const n = modulationWindowFrames(track.hop, windowSeconds);
 
   const out = new Float32Array(track.db.length);
   const scratch = fftScratch(n);
@@ -754,6 +793,73 @@ export function modulationRatio(track: LoudnessTrack, low = MOD_LOW, high = MOD_
     let all = 0;
     for (let b = 1; b <= n / 2; b += 1) all += scratch.mag[b] * scratch.mag[b];
     out[i] = all > 0 ? Math.min(1, band / all) : 0;
+  }
+  return out;
+}
+
+/**
+ * 同じ 3〜6Hz の揺れを、**割合ではなく深さ（dB）**で出す。
+ *
+ * `modulationRatio` は「その窓にあった揺れのうち音節帯が何割か」なので、
+ * **揺れの総量がどれだけ小さくても 1 に張り付く**。分母も分子も同じだけ小さくなるため。
+ * 実際 `music-hats`（持続する和音＋ハイハット）の低い側は
+ * **13 秒のあいだ最大 0.32dB しか動いていない**のに、割合は 37% 出ていた
+ * （声のある `speech-sparse-hats` の 28% より高い）。
+ * 「割合では線を引けない」の正体はここで、**見ていた量に大きさが入っていなかった**。
+ *
+ * こちらは窓の中の音量の列を 3〜6Hz だけ通したときの実効値をそのまま返す。
+ * 目盛りは dB（音量の列の単位）なので、**素材の音量を何倍しても値は変わらない**
+ * （dB の列は掛け算が足し算になり、平均を引く工程で消えるため）。
+ *
+ * 実測（低い側・窓が丸ごと鳴っているコマの最大値。2026-09-16・2 回目）:
+ *
+ * | 素材 | 深さ |
+ * | --- | --- |
+ * | `music-hats`（声なし・持続する和音） | **0.32dB** |
+ * | `music-chords-faster`（声なし） | 0.36dB |
+ * | `speech-bgm-loud`（声あり・いちばん低い） | **1.59dB** |
+ * | `speech-sparse-hats`（声あり） | 2.48dB |
+ * | 乾いた声 | 12〜16dB |
+ *
+ * **声は音節で音量が動く。動かないものに声は入っていない。** 5 倍開く。
+ *
+ * ただし**これで「声を見分けた」ことにはならない**。低い側で音節の速さに刻む音楽
+ * （`music-thump.wav` = 同じ刻みを 700Hz より下へ置いたもの）は 1.88dB で、
+ * 声のいちばん低い 1.59dB を追い越す。**分けられるのは「動くか動かないか」だけ。**
+ */
+export function modulationDepthDb(
+  track: LoudnessTrack,
+  low = MOD_LOW,
+  high = MOD_HIGH,
+  windowSeconds = MOD_WINDOW,
+): Float32Array {
+  const fs = 1 / track.hop;
+  const n = modulationWindowFrames(track.hop, windowSeconds);
+
+  const out = new Float32Array(track.db.length);
+  const scratch = fftScratch(n);
+  const buffer = new Float64Array(n);
+  const lowBin = Math.max(1, Math.round((low * n) / fs));
+  const highBin = Math.min(n / 2, Math.round((high * n) / fs));
+  // ハン窓を掛けたぶん実効値が落ちる。戻さないと「深さ」が窓の都合で 6 割になる。
+  const hannRms = Math.sqrt(3 / 8);
+
+  for (let i = 0; i < track.db.length; i += 1) {
+    // 窓の取り方・端の埋め方・無音の底は `modulationRatio` と 1 つも変えない。
+    // 変えると「同じ揺れを割合で見たか深さで見たか」の比較にならなくなる。
+    let mean = 0;
+    for (let k = 0; k < n; k += 1) {
+      const at = Math.max(0, Math.min(track.db.length - 1, i - (n >> 1) + k));
+      buffer[k] = Math.max(SILENCE_DB + 40, track.db[at]);
+      mean += buffer[k];
+    }
+    mean /= n;
+    for (let k = 0; k < n; k += 1) buffer[k] -= mean;
+    magnitudes(buffer, scratch.re, scratch.im, scratch.mag);
+    let band = 0;
+    for (let b = lowBin; b <= highBin; b += 1) band += scratch.mag[b] * scratch.mag[b];
+    // パーセバル。片側だけを足しているので 2 倍して、窓長で割ると時間側の実効値になる。
+    out[i] = Math.sqrt(2 * band) / n / hannRms;
   }
   return out;
 }
@@ -861,9 +967,9 @@ export interface FeatureOptions {
 export const DEFAULT_FEATURES: FeatureOptions = {
   smoothSeconds: SCORE_SMOOTH,
   shapeSmoothSeconds: SHAPE_SMOOTH,
-  // **既定は全域**（＝この手を使わない）。理由は `MOD_SPLIT_HZ` の注に測って書いた。
-  // 入れた側は `LAB_LOWBAND=2000 npm run lab:bench` で出せる。
-  modSplitHz: 0,
+  // **既定は低い側だけ**（2026-09-16・2 回目に切り替えた）。経緯は `MOD_SPLIT_HZ` の注に測って書いた。
+  // 入れる前（全域）の数字は `LAB_FULLBAND=1 npm run lab:bench` で出せる。
+  modSplitHz: MOD_SPLIT_HZ,
 };
 
 export function analyzeFeatures(
@@ -1031,8 +1137,11 @@ export function analyzeFeatures(
   const modulation = modulationRatio(track);
   // 声らしさは低い側の揺れで組む。全域のほうも残してあるのは、
   // probe で並べて比べ続けるため（どちらが効いているかを毎回言えるように）。
-  const lowModulation =
-    splitBin > 0 ? modulationRatio({ hop: track.hop, db: lowLevel, duration: track.duration }) : modulation;
+  const lowTrack = { hop: track.hop, db: splitBin > 0 ? lowLevel : track.db, duration: track.duration };
+  const lowModulation = splitBin > 0 ? modulationRatio(lowTrack) : modulation;
+  // 深さは境目を置いていなくても出す。既定（全域）でも probe で並べて読めるようにしておかないと、
+  // 「低い側に限った話なのか、揺れの大きさの話なのか」が次の回に切り分けられない。
+  const lowModulationDepth = modulationDepthDb(lowTrack);
   const tone = new Float32Array(frames);
   const raw = new Float32Array(frames);
   for (let i = 0; i < frames; i += 1) {
@@ -1063,6 +1172,7 @@ export function analyzeFeatures(
     level: track.db,
     modulation,
     lowModulation,
+    lowModulationDepth,
     lowLevel,
     centroid,
     flatness,
@@ -1089,6 +1199,7 @@ export const FEATURE_NAMES = [
   'level',
   'modulation',
   'lowModulation',
+  'lowModulationDepth',
   'flatness',
   'tone',
   'shapeFlux',

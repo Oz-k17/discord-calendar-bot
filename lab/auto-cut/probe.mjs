@@ -3,7 +3,7 @@
  *
  *   npm run lab:fixtures
  *   npm run lab:probe
- *   LAB_LOWBAND=1 npm run lab:probe   # 揺れを低い帯域だけで見る側で測る（既定では入れていない手）
+ *   LAB_FULLBAND=1 npm run lab:probe  # 揺れを全域で見る（2026-09-16・2 回目より前の振る舞い）
  *
  * 思いつきで 1 つ選んで実装すると、たまたま手元の素材で効いただけのものを掴む。
  * 先にここで並べて比べてから決める。
@@ -25,13 +25,16 @@ const { autoThresholdDb, cutSoundingSeconds, DEFAULT_JET_CUT, envelopeGateFrames
 /**
  * 特徴量の出し方。既定は**出荷されている側**（全域）に揃える。
  *
- * `LAB_LOWBAND=1 npm run lab:probe` で「揺れを低い帯域だけで見る」側に切り替わる
- * （`LAB_LOWBAND=4000` のように境目そのものも渡せる）。
+ * `LAB_FULLBAND=1 npm run lab:probe` で「揺れを全域で見る」（2026-09-16・2 回目より前の）側に戻る。
+ * `LAB_LOWBAND=4000` のように境目そのものも渡せる。
  * 既定を研究側に寄せると、この表が**いま動いていないもの**を測り始めるので分けてある。
  * 既定のままだと `lowModulation` は `modulation` と同じ列になる。それが正しい見え方。
  */
 const lowband = Number(process.env.LAB_LOWBAND ?? 0);
-const featureOptions = lowband ? { modSplitHz: lowband === 1 ? MOD_SPLIT_HZ : lowband } : {};
+const featureOptions = {
+  ...(process.env.LAB_FULLBAND ? { modSplitHz: 0 } : {}),
+  ...(lowband ? { modSplitHz: lowband === 1 ? MOD_SPLIT_HZ : lowband } : {}),
+};
 
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -592,6 +595,8 @@ console.log(`${pad('  平均', 22)}${average}`);
       features.shapeChange,
       features.envelopeChange,
       features.envelopeFlux,
+      features.lowLevel,
+      features.lowModulationDepth,
     );
     let silent = 0;
     for (let i = 0; i < track.db.length; i += 1) {
@@ -634,6 +639,8 @@ console.log(`${pad('  平均', 22)}${average}`);
       features.shapeChange,
       features.envelopeChange,
       features.envelopeFlux,
+      features.lowLevel,
+      features.lowModulationDepth,
     );
     const vals = [];
     for (let i = 0; i < track.db.length; i += 1) {

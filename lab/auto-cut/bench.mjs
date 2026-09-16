@@ -6,8 +6,8 @@
  *   npm run lab:bench -- lab/fixtures/out/speech-long.wav   # ファイルを指定してもよい
  *   LAB_NO_RUN=1 npm run lab:bench   # 「動きが続いたか」を見ない（2026-09-14 以前の振る舞い）
  *   LAB_NO_LEAD=1 npm run lab:bench  # 発話の頭を遡らない（2026-09-15 以前の振る舞い）
- *   LAB_LOWBAND=1 npm run lab:bench    # 揺れを低い帯域だけで見る（2026-09-16。既定では入れていない）
- *   LAB_LOWBAND=4000 npm run lab:bench # その境目を変えて振る（Hz。1 なら既定の 2000Hz）
+ *   LAB_FULLBAND=1 npm run lab:bench   # 揺れを全域で見る（2026-09-16・2 回目より前の振る舞い）
+ *   LAB_LOWBAND=4000 npm run lab:bench # 低い側の境目を変えて振る（Hz。1 なら既定の 2000Hz）
  *
  * `LAB_NO_RUN` は A/B を並べるためのもの。判定に手を入れたら、
  * **入れる前と入れたあとを同じコマンドで出せる**ようにしておかないと、
@@ -113,10 +113,14 @@ for (const file of files) {
   const levelMs = performance.now() - t0;
 
   const t1 = performance.now();
-  // 「揺れを低い帯域だけで見る」手は既定では入れていない（features.ts の `MOD_SPLIT_HZ`）。
-  // 入れた側の数字をいつでも出せるようにしておかないと、次の回が記録から拾い直すことになる。
+  // 「揺れを低い帯域だけで見る」手は 2026-09-16（2 回目）から既定（features.ts の `MOD_SPLIT_HZ`）。
+  // **入れる前の数字をいつでも出せるようにしておく**。出せないと、次に何かを変えたとき
+  // 「この手のおかげなのか、今回の変更のおかげなのか」が記録から拾い直しになる。
   const lowband = Number(process.env.LAB_LOWBAND ?? 0);
-  const features = analyzeFeatures(buffer, track, lowband ? { modSplitHz: lowband === 1 ? MOD_SPLIT_HZ : lowband } : {});
+  const features = analyzeFeatures(buffer, track, {
+    ...(process.env.LAB_FULLBAND ? { modSplitHz: 0 } : {}),
+    ...(lowband ? { modSplitHz: lowband === 1 ? MOD_SPLIT_HZ : lowband } : {}),
+  });
   const speech = planJetCut(
     track,
     {
@@ -128,6 +132,8 @@ for (const file of files) {
     features.shapeChange,
     features.envelopeChange,
     features.envelopeFlux,
+    features.lowLevel,
+    features.lowModulationDepth,
   );
   const speechMs = performance.now() - t1;
 
@@ -142,7 +148,12 @@ for (const file of files) {
   const notes = [];
   if (verdict(level)) notes.push(`level: ${verdict(level)}`);
   if (speech.noSpeechFound) {
-    const why = speech.noSpeechReason === 'shape' ? '形がどこでも動かない' : '声だと判断できたコマがほぼ無い';
+    const why =
+      speech.noSpeechReason === 'shape'
+        ? '形がどこでも動かない'
+        : speech.noSpeechReason === 'depth'
+          ? `低い側が音節の速さで深く揺れない（最大 ${speech.depthMax.toFixed(2)}dB・${speech.depthSeconds.toFixed(2)}s ぶん読めた）`
+          : '声だと判断できたコマがほぼ無い';
     notes.push(`speech: 声が見つからないので何もしなかった（${why}）`);
   }
   else if (verdict(speech)) notes.push(`speech: ${verdict(speech)}`);
@@ -150,6 +161,9 @@ for (const file of files) {
   notes.push(`形が動いた ${speech.shapeSeconds.toFixed(1)}s`);
   // 保持が音楽の一瞬の動きを引き伸ばしていないかは、ここを見る。
   notes.push(`音色が動いた ${speech.envelopeSeconds.toFixed(1)}s`);
+  // 深さの判定は「読めた秒数」が足りて初めて立つ。0s なら**見ていない**ので、
+  // 「通った」と読まないために両方出す。
+  notes.push(`低い側の揺れの深さ 最大 ${speech.depthMax.toFixed(2)}dB（${speech.depthSeconds.toFixed(2)}s ぶん読めた）`);
   if (speech.usedMode !== 'speech') notes.push('speech モードに落ちられなかった');
   if (notes.length) console.log(`${' '.repeat(22)} └ ${notes.join(' / ')}`);
 

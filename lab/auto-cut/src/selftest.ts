@@ -11,6 +11,7 @@ import {
   envelopeGateFrames,
   keepEdgeSeconds,
   keepScoreSeconds,
+  lowBandDepthSeconds,
   minimalKeepRanges,
   planJetCut,
 } from './silence.ts';
@@ -22,7 +23,9 @@ import {
   centroidDescentRatio,
   highBandAloneRatio,
   MOD_SPLIT_HZ,
+  modulationDepthDb,
   modulationRatio,
+  modulationWindowFrames,
 } from './features.ts';
 import { fftScratch, magnitudes } from './fft.ts';
 
@@ -1692,6 +1695,181 @@ export function runSelfTest(): TestResult[] {
         '無音でも低い側の音量は底で止まる（NaN にしない）',
         Number.isFinite(middle(quiet.lowLevel)) && middle(quiet.lowLevel) <= -100 + 1e-6,
         `${middle(quiet.lowLevel).toFixed(1)}dB`,
+      );
+    }
+
+    // --- 揺れを「割合」ではなく「深さ（dB）」で見る（2026-09-16・2 回目） ---
+    //
+    // `modulationRatio` は取り分なので、揺れの総量がいくら小さくても 1 に近づく。
+    // `music-hats` の低い側が 13 秒で 0.32dB しか動いていないのに割合 37% を出し、
+    // 声のある素材（28%）を追い越していたのはこれ。**見ていた量に大きさが入っていなかった。**
+    //
+    // 検算は音量の列を直に組んで当てる。素材から作ると、深さが何 dB になるべきかを
+    // こちらが言えないので「出た値を正しいことにする」形になってしまう。
+    {
+      const hop = 0.02;
+      const frames = 256;
+      // 音量の列を式から作る。-20dB を中心に、指定の速さ・指定の深さ（片振幅 dB）で揺らす。
+      const levelTrack = (amplitudeDb: number, hz: number): LoudnessTrack => {
+        const db = new Float32Array(frames);
+        for (let i = 0; i < frames; i += 1) db[i] = -20 + amplitudeDb * Math.sin(2 * Math.PI * hz * i * hop);
+        return { hop, db, duration: frames * hop };
+      };
+      const middle = (a: Float32Array) => a[Math.floor(a.length / 2)];
+
+      // ① 目盛りが合っていること。片振幅 6dB の正弦なら実効値は 6/√2 ≒ 4.24dB。
+      //    ここがずれていると、下で決めた線（0.8dB）が別の量の線になる。
+      const six = middle(modulationDepthDb(levelTrack(6, 4.5)));
+      check('深さは実効値（片振幅 6dB なら 4.24dB）', near(six, 6 / Math.SQRT2, 0.3), `${six.toFixed(2)}dB`);
+
+      // ② **割合と深さが別のものを見ていることを、同じ列で示す。** これが今回の全部。
+      //    浅い揺れでも割合はほぼ満点、深さは浅いまま。
+      const shallow = levelTrack(0.3, 4.5);
+      const shallowRatio = middle(modulationRatio(shallow));
+      const shallowDepth = middle(modulationDepthDb(shallow));
+      check(
+        '浅い揺れでも割合は満点に近い（これが music-hats を通していたもの）',
+        shallowRatio > 0.9,
+        `割合 ${shallowRatio.toFixed(3)}`,
+      );
+      check(
+        '同じ列でも、深さは浅いままになる',
+        shallowDepth < 0.35,
+        `深さ ${shallowDepth.toFixed(2)}dB / 割合 ${shallowRatio.toFixed(3)}`,
+      );
+
+      // ③ 音量倍率に不変。dB の列では掛け算が足し算になり、平均を引く工程で消える。
+      //    ここが崩れると、線が「素材の録音レベル」で動く。
+      const louder = levelTrack(6, 4.5);
+      for (let i = 0; i < frames; i += 1) louder.db[i] += 12;
+      check(
+        '素材の音量を変えても深さは動かない',
+        near(middle(modulationDepthDb(louder)), six, 0.02),
+        `${middle(modulationDepthDb(louder)).toFixed(2)}dB / ${six.toFixed(2)}dB`,
+      );
+
+      // ④ 音節帯（3〜6Hz）の外の揺れは拾わない。拾うと「速い刻み」を音節と読む。
+      const fast = middle(modulationDepthDb(levelTrack(6, 12)));
+      check('音節帯の外で揺れても深さは上がらない', fast < 0.6, `12Hz で ${fast.toFixed(2)}dB`);
+
+      // ⑤ まったく動かない列は 0。`music-hats` の低い側がこれ。
+      const flat = middle(modulationDepthDb(levelTrack(0, 4.5)));
+      check('動かない列の深さは 0', flat < 0.01, `${flat.toFixed(4)}dB`);
+    }
+
+    // --- 深さを「読んでよいコマだけ」で集計する（lowBandDepthSeconds）---
+    //
+    // 窓に無音の縁が入ると、そこの段差が 3〜6Hz に漏れて深さを持ち上げる。
+    // 実際 `music-hats-break`（和音が 2 回休む音楽・声ゼロ）は、
+    // 縁を数えると 2.77dB で声のある素材と同じ顔になり、縁を外すと 0.32dB まで落ちる。
+    // **縁は曲の切れ目であって、音節ではない。**
+    {
+      const hop = 0.02;
+      const frames = 200;
+      const windowFrames = modulationWindowFrames(hop);
+      const constant = (v: number) => new Float32Array(frames).fill(v);
+
+      // ① 低い側が丸ごと鳴っていれば、端（窓が素材の外へはみ出すぶん）を除いて全部読める。
+      const all = lowBandDepthSeconds(constant(-20), constant(2), hop, -40, windowFrames, 0.8);
+      check(
+        '低い側が鳴り続けていれば、端を除いて読める',
+        near(all.judged, (frames - windowFrames + 1) * hop, 1e-6) && all.above === all.judged,
+        `読めた ${all.judged.toFixed(2)}s / 超えた ${all.above.toFixed(2)}s`,
+      );
+
+      // ② 低い側が黙っているコマがあれば、その**窓ごと**読まない。1 コマ落ちれば窓 1 つぶん消える。
+      const withGap = constant(-20);
+      withGap[100] = -100;
+      const gapped = lowBandDepthSeconds(withGap, constant(2), hop, -40, windowFrames, 0.8);
+      check(
+        '低い側が切れた窓は読まない（曲の切れ目を音節と読まないため）',
+        near(all.judged - gapped.judged, windowFrames * hop, 1e-6),
+        `${all.judged.toFixed(2)}s → ${gapped.judged.toFixed(2)}s（窓 ${(windowFrames * hop).toFixed(2)}s）`,
+      );
+
+      // ③ 低い側がどこも鳴っていなければ、読めた秒は 0。
+      //    **ここを「動かなかった」と読むと、低い側に音の無い素材を全部弾く。**
+      const silent = lowBandDepthSeconds(constant(-100), constant(2), hop, -40, windowFrames, 0.8);
+      check('低い側が鳴っていなければ、何も読まない', silent.judged === 0 && silent.max === 0, `${silent.judged.toFixed(2)}s`);
+
+      // ④ 1 コマでも線を超えたら、超えたことにする（疑わしきは通す側へ倒す）。
+      const oneSpike = constant(0.1);
+      oneSpike[100] = 5;
+      const spiked = lowBandDepthSeconds(constant(-20), oneSpike, hop, -40, windowFrames, 0.8);
+      check(
+        '1 コマでも線を超えたら、超えたと数える',
+        near(spiked.above, hop, 1e-6) && near(spiked.max, 5, 1e-6),
+        `${spiked.above.toFixed(2)}s / 最大 ${spiked.max.toFixed(2)}dB`,
+      );
+    }
+
+    // --- 深さを素材単位の判定に置く（planJetCut）---
+    {
+      const sr = 16000;
+      const sounding = analyzeLoudness(makeTone(4, sr, [{ from: 0, to: 4 }]), 0.02);
+      const frames = sounding.db.length;
+      const constant = (v: number) => new Float32Array(frames).fill(v);
+      // 割合と形は通る側に置く。ここで見たいのは深さだけ。
+      const score = constant(0.5);
+      const shape = constant(0.2);
+      const lowLevel = new Float32Array(frames);
+      for (let i = 0; i < frames; i += 1) lowLevel[i] = sounding.db[i];
+      const bare = { mode: 'speech' as const, minSilence: 0.05, padding: 0, minKeep: 0, speechLeadIn: 0 };
+
+      // ① 低い側がどこでも深く揺れなければ、「声が無い」で止まる。これが music-hats。
+      const flat = planJetCut(sounding, bare, score, shape, undefined, undefined, lowLevel, constant(0.3));
+      check(
+        '低い側がどこでも深く揺れない素材は「声が見つからない」で止まる',
+        flat.noSpeechFound && flat.noSpeechReason === 'depth',
+        `理由 ${flat.noSpeechReason} / 最大 ${flat.depthMax.toFixed(2)}dB / 読めた ${flat.depthSeconds.toFixed(2)}s`,
+      );
+
+      // ② 深く揺れていれば通る。声のある素材は 1.59dB 以上ある。
+      const deep = planJetCut(sounding, bare, score, shape, undefined, undefined, lowLevel, constant(1.6));
+      check('深く揺れていれば通る', !deep.noSpeechFound, `最大 ${deep.depthMax.toFixed(2)}dB`);
+
+      // ③ **渡されないものを「動かなかった」と読まない。** 列を渡し忘れただけで
+      //    どの素材も止まる、という壊れ方をしないこと。
+      const noColumns = planJetCut(sounding, bare, score, shape);
+      check(
+        '列を渡さなければ、深さでは判断しない',
+        !noColumns.noSpeechFound && noColumns.depthSeconds === 0,
+        `読めた ${noColumns.depthSeconds.toFixed(2)}s`,
+      );
+
+      // ④ 読めたコマが足りなければ判断しない。乾いた声は発話ごとに無音が挟まるので、
+      //    読めるコマがほとんど残らない（`speech-bgm` は 0.00 秒・`speech` は 0.14 秒）。
+      //    **そこを「動かなかった」と読むと、いちばん素直な声を丸ごと弾く。**
+      const shortLow = new Float32Array(frames).fill(-100);
+      for (let i = 40; i < 80; i += 1) shortLow[i] = sounding.db[i];
+      const tooShort = planJetCut(sounding, bare, score, shape, undefined, undefined, shortLow, constant(0.3));
+      check(
+        '読めたコマが足りなければ、深さでは判断しない',
+        !tooShort.noSpeechFound && tooShort.depthSeconds < DEFAULT_JET_CUT.minDepthSeconds,
+        `読めた ${tooShort.depthSeconds.toFixed(2)}s（線は ${DEFAULT_JET_CUT.minDepthSeconds}s）`,
+      );
+
+      // ④'' hop が 0 の列を渡されても止まらないこと（窓の長さの計算が発散しない）。
+      check('コマ幅が 0 でも窓の長さは決まる', modulationWindowFrames(0) === 16, `${modulationWindowFrames(0)} コマ`);
+
+      // ④' つまみを 0 にしても、列を渡していない素材は止めない。
+      //     `judged >= minDepthSeconds` は 0 同士で立ってしまうので、そこを塞いである。
+      const zeroLine = planJetCut(sounding, { ...bare, minDepthSeconds: 0 }, score, shape);
+      check(
+        '読める秒数の線を 0 にしても、列が無ければ止めない',
+        !zeroLine.noSpeechFound,
+        `読めた ${zeroLine.depthSeconds.toFixed(2)}s`,
+      );
+
+      // ⑤ **この手が見ているのは「声があるか」ではない。** 低い側で音節の速さに深く刻む音楽
+      //    （`music-thump.wav` = ハイハットと同じ刻みを 700Hz より下へ置いたもの・声ゼロ）は
+      //    1.88dB で、声のいちばん低い 1.59dB を追い越して素通りする。
+      //    **ここを固定しておかないと、次の回が「声を見分けられた」と読む。**
+      const percussive = planJetCut(sounding, bare, score, shape, undefined, undefined, lowLevel, constant(1.88));
+      check(
+        '低い側で深く刻む音楽は、声ゼロでも素通りする（この手の破れ方）',
+        !percussive.noSpeechFound,
+        `1.88dB は線（${DEFAULT_JET_CUT.minModulationDepth}dB）の上`,
       );
     }
   }

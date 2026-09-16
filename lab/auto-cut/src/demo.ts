@@ -232,6 +232,9 @@ function refreshCut() {
     voice.features.envelopeChange,
     // 均す前の列。「この素材に声があるか」を決めるときだけ使う（silence.ts の注を参照）。
     voice.features.envelopeFlux,
+    // 低い帯域の揺れの深さ。これも素材単位の判定だけで使う。
+    voice.features.lowLevel,
+    voice.features.lowModulationDepth,
   );
 
   $<HTMLOutputElement>('out-sensitivity').textContent = Number($<HTMLInputElement>('sensitivity').value).toFixed(2);
@@ -259,13 +262,17 @@ function refreshCut() {
   const warning = $<HTMLParagraphElement>('cut-warning');
   if (plan.noSpeechFound) {
     // 同じ「何もしない」でも、理由によって次にすべきことが違う。
-    warning.textContent =
+    const why =
       plan.noSpeechReason === 'shape'
-        ? '音の中身が最初から最後まで変わりません。鳴りっぱなしの音楽ではありませんか？ ' +
-          '声だと思うなら「音量だけ」で試してください。'
-        : '声だと判断できるところが見つからなかったので、何もしていません。' +
-          '音楽だけの素材か、音色の動かない音（鳴りっぱなしの楽器）ではありませんか？' +
-          '（切りたいなら「音量だけ」で試してください）';
+        ? '音の中身が最初から最後まで変わりません。鳴りっぱなしの音楽ではありませんか？'
+        : plan.noSpeechReason === 'depth'
+          ? // 深さで止めたときは、何を見て止めたのかが人にも分かる形で言える
+            // （割合や形と違って、この理由は 1 つの数で説明できる）。
+            `低い音の大きさが、最初から最後まで変わりません（${plan.depthMax.toFixed(2)}dB）。` +
+            '持続する和音やパッドではありませんか？'
+          : '声だと判断できるところが見つかりませんでした。' +
+            '音楽だけの素材か、音色の動かない音（鳴りっぱなしの楽器）ではありませんか？';
+    warning.textContent = `${why} 何もしていません。（切りたいなら「音量だけ」で試してください）`;
     warning.hidden = false;
   } else if (plan.usedMode === 'speech' && plan.speechRatio < 0.5) {
     warning.textContent =

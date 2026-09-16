@@ -11,6 +11,7 @@
  * タイムラインの実装が変わっても使い回せる。
  */
 
+import { modulationWindowFrames } from './features.ts';
 import { percentileDb, SILENCE_DB, type LoudnessTrack } from './loudness.ts';
 
 export interface Range {
@@ -80,6 +81,62 @@ export interface JetCutOptions {
    * **数える条件を厳しくするときは、声の薄い素材で余裕がいくつ残るかを先に見ること。**
    */
   minSpeechRatio: number;
+  /**
+   * 低い帯域の音量が音節の速さでどれだけ**深く**揺れたか、の下限（dB）。
+   * 素材のどこでもこれを超えなければ「声は入っていない」とみなす。
+   *
+   * ## なぜ割合ではなく深さなのか
+   *
+   * `minSpeechRatio` は 5 回ぶん「線を引けない」と測られてきた。
+   * 2026-09-16（2 回目）にその**理由**が出た。`modulation` は
+   * 「その窓にあった揺れのうち音節帯が何割か」なので、
+   * **揺れの総量がどれだけ小さくても値は 1 に近づける**（分母も一緒に小さくなるため）。
+   * `music-hats`（持続する和音＋ハイハット）の低い側は
+   * **13 秒のあいだ最大 0.32dB しか動いていない**のに、割合は 37% 出ていた。
+   * 声のある `speech-sparse-hats` の 28% を追い越すのはそのせいで、
+   * **並んでいたのは「声らしさ」ではなく「大きさを捨てた比」だった。**
+   *
+   * 深さ（`FeatureTrack.lowModulationDepth`）には大きさが入っている。
+   * 実測（低い側・窓が丸ごと鳴っているコマの最大値）:
+   *
+   * | 素材 | 深さ | いまの扱い |
+   * | --- | --- | --- |
+   * | `music-hats`（声なし） | **0.32dB** | ここで止まる |
+   * | `music-hats-break`（声なし） | **0.32dB** | ここで止まる |
+   * | `music-chords-faster`（声なし） | 0.36dB | ここで止まる |
+   * | `music-swell`（声なし） | 0.88dB | 形の判定で止まる |
+   * | `speech-bgm-loud`（**声あり・最小**） | **1.59dB** | 通る |
+   * | `speech-sparse-hats`（声あり） | 2.48dB | 通る |
+   * | 乾いた声 | 12〜16dB | 通る |
+   *
+   * 既定の 0.8 は、止めたい上（0.36）と守りたい下（1.59）のちょうど間（比で 2.2 倍 / 2.0 倍）。
+   *
+   * ## 分けられるのは「動くか動かないか」だけ
+   *
+   * **これは声を見分けてはいない。** 同じ刻みを 700Hz より下へ置いた
+   * `music-thump.wav`（声ゼロ）は 1.88dB で、声のいちばん低い 1.59dB を追い越す。
+   * 低い側で音節の速さに刻む音楽が相手だと、この手は丸ごと外れる。
+   * 言えるのは「低い側がまったく動かない素材に声は入っていない」までで、そこは正しい。
+   */
+  minModulationDepth: number;
+  /**
+   * 深さで判断してよいと言えるだけの秒数。これに満たなければ**判断しない**（通す）。
+   *
+   * 深さは「窓が丸ごと、低い側が鳴っている」コマでしか読めない。
+   * 窓に無音の縁が入ると、そこの段差が 3〜6Hz に漏れて深さを持ち上げるためで、
+   * 実際 `music-hats-break` は縁を数えると 2.77dB（声のある素材と同じ顔）、
+   * 縁を外すと 0.32dB（`music-hats` と同じ顔）になる。**縁は曲の切れ目であって音節ではない。**
+   *
+   * その結果、乾いた声のように発話ごとに無音が挟まる素材では、
+   * 読めるコマがほとんど残らない（`speech-bgm` 0.00 秒 / `speech` 0.14 秒）。
+   * **そこを「動かなかった」と読むと、いちばん素直な声を丸ごと弾く。**
+   * だから読めた秒数が足りなければ黙って通す。
+   *
+   * 既定の 1.28 秒は窓 2 つぶん。判断される側でいちばん短い声のある素材が 1.80 秒
+   * （`speech-sustained-hats`）、判断されてほしくない側でいちばん長いのが 0.88 秒
+   * （`speech-drums`）で、その間を比で等しく取った（1.4 倍 / 1.45 倍）。
+   */
+  minDepthSeconds: number;
   /**
    * 「スペクトルの形が動いた」とみなす下限（`FeatureTrack.shapeChange` の値）。
    *
@@ -331,6 +388,8 @@ export const DEFAULT_JET_CUT: JetCutOptions = {
   speechThreshold: 0.2,
   speechExit: 0.1,
   minSpeechRatio: 0.05,
+  minModulationDepth: 0.8,
+  minDepthSeconds: 1.28,
   minShapeChange: 0.09,
   minShapeSeconds: 0.5,
   minEnvelopeChange: 0.09,
@@ -370,10 +429,12 @@ export interface JetCutPlan {
    *   門を入れてから、鳴りっぱなしの音楽と震える楽器はこちらで落ちるようになった
    *   （以前は下の `shape` で落ちていた）。
    * - `shape`: 声だと判断できたコマはあるが、素材のどこでもスペクトルの形が続けて動かなかった
+   * - `depth`: 低い帯域の音量が、素材のどこでも音節の速さで**深くは**揺れなかった
+   *   （`minModulationDepth`）。持続する和音はここで止まる。
    *
    * 分けて返すのは、同じ「何もしない」でも次にすべきことが違うため。
    */
-  noSpeechReason: 'ratio' | 'shape' | null;
+  noSpeechReason: 'ratio' | 'shape' | 'depth' | null;
   /** スペクトルの形が動いていた秒数。`shape` の判断の根拠を見せるため。 */
   shapeSeconds: number;
   /**
@@ -389,6 +450,14 @@ export interface JetCutPlan {
    * `level` のときは 1。低いときは「声の少ない素材に掛けていないか」を疑う手がかりになる。
    */
   speechRatio: number;
+  /**
+   * 深さを読めたコマの秒数（`minDepthSeconds` の分母）。
+   * **ここが 0 なら、深さでは何も判断していない。** 「通った」と「見ていない」を
+   * 外から分けるために出す。
+   */
+  depthSeconds: number;
+  /** 読めたコマでの深さの最大値（dB）。線をどこに引くべきかを毎回数字で言えるように。 */
+  depthMax: number;
 }
 
 /**
@@ -480,6 +549,56 @@ export function envelopeGateFrames(
 }
 
 /**
+ * 低い帯域の揺れの深さを、**読んでよいコマだけ**で集計する。
+ *
+ * 読んでよいのは「窓が丸ごと、低い側が鳴っている」コマ（`minDepthSeconds` の注を参照）。
+ * 縁を混ぜると曲の切れ目の段差が音節の揺れに化ける。
+ *
+ * **1 コマでも線を超えたら声の可能性を認める**（`above` を返して呼ぶ側が見る）。
+ * 素材単位の判定は「無いこと」を言う側なので、疑わしきは通す。
+ *
+ * @param lowLevel 低い帯域だけの音量（dBFS）。
+ * @param depth 同じ帯域の 3〜6Hz の深さ（dB）。
+ * @param thresholdDb 鳴っているとみなす下限。**全域と同じ線を低い側にも当てる。**
+ *   低い側にほとんど音の無い素材ではここが一度も立たず、`judged` が 0 のまま返る（＝通す）。
+ * @param windowFrames 深さを出したときの窓の長さ（コマ）。縁を外すのに要る。
+ */
+export function lowBandDepthSeconds(
+  lowLevel: Float32Array,
+  depth: Float32Array,
+  hop: number,
+  thresholdDb: number,
+  windowFrames: number,
+  minDepth: number,
+): { judged: number; above: number; max: number } {
+  const frames = Math.min(lowLevel.length, depth.length);
+  const half = windowFrames >> 1;
+  let judged = 0;
+  let above = 0;
+  let max = 0;
+  // 窓が丸ごと鳴っているかは、鳴っていないコマからの距離で決める。
+  // 1 コマずつ窓を舐め直すと尺の 2 乗になる（`envelopeGateFrames` と同じ理由）。
+  const since = new Int32Array(frames);
+  let run = 0;
+  for (let i = 0; i < frames; i += 1) {
+    run = lowLevel[i] > thresholdDb && lowLevel[i] > SILENCE_DB ? run + 1 : 0;
+    since[i] = run;
+  }
+  for (let i = 0; i < frames; i += 1) {
+    // 窓は [i - half, i - half + windowFrames) を覆う。端は値を引き伸ばして埋めてあるので、
+    // 素材の外へはみ出すぶんは「鳴っていた」とはみなさない（0 コマ目の扱いが曖昧になる）。
+    const from = i - half;
+    const to = from + windowFrames - 1;
+    if (from < 0 || to >= frames) continue;
+    if (since[to] < windowFrames) continue;
+    judged += 1;
+    if (depth[i] > max) max = depth[i];
+    if (depth[i] >= minDepth) above += 1;
+  }
+  return { judged: judged * hop, above: above * hop, max };
+}
+
+/**
  * @param speechScore コマごとの声らしさ（0〜1）。`mode: 'speech'` のときだけ使う。
  *   音そのものを見ないと出せない値なので、features.ts で作って渡してもらう。
  * @param shapeChange コマごとのスペクトルの形の変化。渡さなければ形での判断はしない
@@ -490,6 +609,10 @@ export function envelopeGateFrames(
  * @param envelopeFlux 均す前の包絡の動き。渡さなければ「動きが続いたか」は見ない
  *   （＝ `minEnvelopeRun` を 0 として扱う）。ここも**渡されないものを
  *   「続かなかった」と読まない**。読むと、列を渡し忘れただけで門が開かなくなる。
+ * @param lowLevel 低い帯域だけの音量。`lowDepth` と**両方**渡したときだけ深さの判定が立つ。
+ * @param lowDepth 同じ帯域の 3〜6Hz の深さ（dB）。渡さなければ深さでは判断しない。
+ *   ここも**渡されないものを「動かなかった」と読まない**。読むと、列を渡し忘れただけで
+ *   どの素材も「声が無い」になる。
  */
 export function planJetCut(
   track: LoudnessTrack,
@@ -498,6 +621,8 @@ export function planJetCut(
   shapeChange?: Float32Array,
   envelopeChange?: Float32Array,
   envelopeFlux?: Float32Array,
+  lowLevel?: Float32Array,
+  lowDepth?: Float32Array,
 ): JetCutPlan {
   const opts = { ...DEFAULT_JET_CUT, ...options };
   const thresholdDb = opts.thresholdDb ?? autoThresholdDb(track, opts.sensitivity);
@@ -609,7 +734,24 @@ export function planJetCut(
   const lowRatio = soundingFrames > 0 && speechRatio < opts.minSpeechRatio;
   const needShapeSeconds = Math.min(opts.minShapeSeconds, duration * SHAPE_SECONDS_OF_DURATION);
   const noShape = useShape && soundingFrames > 0 && shapeSeconds < needShapeSeconds;
-  if (usedMode === 'speech' && (lowRatio || noShape)) {
+  // 低い帯域の揺れが「深さ」でどこまで届いたか。読めるコマが足りなければ判断しない。
+  const useDepth =
+    !!lowLevel && !!lowDepth && lowLevel.length === track.db.length && lowDepth.length === track.db.length && opts.minModulationDepth > 0;
+  const depth = useDepth
+    ? lowBandDepthSeconds(
+        lowLevel as Float32Array,
+        lowDepth as Float32Array,
+        track.hop,
+        thresholdDb,
+        modulationWindowFrames(track.hop),
+        opts.minModulationDepth,
+      )
+    : { judged: 0, above: 0, max: 0 };
+  // `useDepth` を条件に入れておくのは、`minDepthSeconds` を 0 にしたときに
+  // **列を渡していない素材まで「動かなかった」で止まる**のを防ぐため（0 >= 0 が立つ）。
+  // 「渡されないものを読まない」は、つまみの値で崩れてはいけない。
+  const flatLowBand = useDepth && depth.judged >= opts.minDepthSeconds && depth.above === 0;
+  if (usedMode === 'speech' && (lowRatio || noShape || flatLowBand)) {
     const whole = duration > 0 ? [{ start: 0, end: duration }] : [];
     return {
       thresholdDb,
@@ -620,10 +762,14 @@ export function planJetCut(
       removed: 0,
       usedMode,
       noSpeechFound: true,
-      noSpeechReason: lowRatio ? 'ratio' : 'shape',
+      // 並べる順は「どれが最初に立ったか」ではなく「どれがいちばん強く言えるか」。
+      // 深さは「まったく動かなかった」と言い切っている（割合や形より根拠が狭くて強い）ので先に出す。
+      noSpeechReason: flatLowBand ? 'depth' : lowRatio ? 'ratio' : 'shape',
       speechRatio,
       shapeSeconds,
       envelopeSeconds,
+      depthSeconds: depth.judged,
+      depthMax: depth.max,
     };
   }
 
@@ -645,6 +791,8 @@ export function planJetCut(
     speechRatio,
     shapeSeconds,
     envelopeSeconds,
+    depthSeconds: depth.judged,
+    depthMax: depth.max,
   };
 }
 
