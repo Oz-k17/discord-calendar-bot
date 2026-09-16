@@ -3,6 +3,7 @@
  *
  *   npm run lab:fixtures
  *   npm run lab:probe
+ *   LAB_LOWBAND=1 npm run lab:probe   # 揺れを低い帯域だけで見る側で測る（既定では入れていない手）
  *
  * 思いつきで 1 つ選んで実装すると、たまたま手元の素材で効いただけのものを掴む。
  * 先にここで並べて比べてから決める。
@@ -18,8 +19,20 @@ import { readWav } from '../fixtures/wav.mjs';
 import { isSpeechAt, SHORT_FIXTURES } from '../fixtures/spec.mjs';
 
 const { analyzeLoudness, SILENCE_DB } = await import('./src/loudness.ts');
-const { analyzeFeatures, FEATURE_NAMES } = await import('./src/features.ts');
+const { analyzeFeatures, FEATURE_NAMES, MOD_SPLIT_HZ } = await import('./src/features.ts');
+
 const { autoThresholdDb, cutSoundingSeconds, DEFAULT_JET_CUT, envelopeGateFrames, planJetCut } = await import('./src/silence.ts');
+/**
+ * 特徴量の出し方。既定は**出荷されている側**（全域）に揃える。
+ *
+ * `LAB_LOWBAND=1 npm run lab:probe` で「揺れを低い帯域だけで見る」側に切り替わる
+ * （`LAB_LOWBAND=4000` のように境目そのものも渡せる）。
+ * 既定を研究側に寄せると、この表が**いま動いていないもの**を測り始めるので分けてある。
+ * 既定のままだと `lowModulation` は `modulation` と同じ列になる。それが正しい見え方。
+ */
+const lowband = Number(process.env.LAB_LOWBAND ?? 0);
+const featureOptions = lowband ? { modSplitHz: lowband === 1 ? MOD_SPLIT_HZ : lowband } : {};
+
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const out = path.join(root, 'lab/fixtures/out');
@@ -59,8 +72,8 @@ const pad = (s, n) => String(s).padEnd(n, ' ');
 const num = (v, n) => (v === null ? pad('—', n) : String(v.toFixed(3)).padStart(n, ' '));
 
 console.log('声のコマとそれ以外のコマを、どれくらい分けられるか（AUC / 0.5 = 分けられない）\n');
-console.log(`${pad('素材', 22)}${FEATURE_NAMES.map((f) => num(null, 0) && pad(f, 12)).join('')}`);
-console.log('-'.repeat(22 + FEATURE_NAMES.length * 12));
+console.log(`${pad('素材', 22)}${FEATURE_NAMES.map((f) => num(null, 0) && pad(f, 14)).join('')}`);
+console.log('-'.repeat(22 + FEATURE_NAMES.length * 14));
 
 const totals = new Map(FEATURE_NAMES.map((f) => [f, []]));
 
@@ -69,7 +82,7 @@ for (const fixture of SHORT_FIXTURES) {
   if (!fs.existsSync(file)) continue;
   const buffer = readWav(file);
   const track = analyzeLoudness(buffer, 0.02);
-  const features = analyzeFeatures(buffer, track);
+  const features = analyzeFeatures(buffer, track, featureOptions);
 
   // 正解のラベルを付ける。境目のコマは、どちらとも言えないので外す。
   const positive = new Map(FEATURE_NAMES.map((f) => [f, []]));
@@ -87,16 +100,16 @@ for (const fixture of SHORT_FIXTURES) {
   const row = FEATURE_NAMES.map((name) => {
     const value = auc(positive.get(name), negative.get(name));
     if (value !== null) totals.get(name).push(value);
-    return pad(num(value, 6), 12);
+    return pad(num(value, 6), 14);
   }).join('');
   console.log(`${pad((fixture.hard ? '※ ' : '  ') + fixture.name, 22)}${row}`);
 }
 
-console.log('-'.repeat(22 + FEATURE_NAMES.length * 12));
+console.log('-'.repeat(22 + FEATURE_NAMES.length * 14));
 const average = FEATURE_NAMES.map((name) => {
   const values = totals.get(name);
   const mean = values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
-  return pad(num(mean, 6), 12);
+  return pad(num(mean, 6), 14);
 }).join('');
 console.log(`${pad('  平均', 22)}${average}`);
 
@@ -110,7 +123,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     for (let i = 0; i < track.db.length; i += 1) {
       const t = i * track.hop;
       if (isSpeechAt(fixture, t - 0.15) !== isSpeechAt(fixture, t + 0.15)) continue;
@@ -149,7 +162,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     const threshold = autoThresholdDb(track, 0.25);
     let sounding = 0;
     let speechLike = 0;
@@ -195,7 +208,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     const threshold = autoThresholdDb(track, 0.25);
     const groups = { 声: { shape: [], env: [] }, 他: { shape: [], env: [] } };
     for (let i = 0; i < track.db.length; i += 1) {
@@ -251,7 +264,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     const threshold = autoThresholdDb(track, 0.25);
     const groups = { 声: { zcr: [], flux: [], flat: [] }, 他: { zcr: [], flux: [], flat: [] } };
     for (let i = 0; i < track.db.length; i += 1) {
@@ -296,7 +309,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     const threshold = autoThresholdDb(track, 0.25);
     const noisy = [];
     const tonal = [];
@@ -354,7 +367,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     const threshold = autoThresholdDb(track, 0.25);
     const groups = { 声: [], 他: [] };
     for (let i = 0; i < track.db.length; i += 1) {
@@ -409,7 +422,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     const threshold = autoThresholdDb(track, 0.25);
     const groups = { 声: [], 他: [] };
     // 「どちらの帯域も動かなかった」歩みは分母に入れていないので、
@@ -486,7 +499,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     const thresholdDb = autoThresholdDb(track, opts.sensitivity);
     const holdFrames = Math.max(0, Math.round(opts.envelopeHold / track.hop));
     // 判定と同じ道筋をそのままなぞる。ここがずれると、測った数字が判定の出来と噛み合わない。
@@ -570,7 +583,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     const level = planJetCut(track, { mode: 'level' });
     const plan = planJetCut(
       track,
@@ -613,7 +626,7 @@ console.log(`${pad('  平均', 22)}${average}`);
     if (!fs.existsSync(file)) continue;
     const buffer = readWav(file);
     const track = analyzeLoudness(buffer, 0.02);
-    const features = analyzeFeatures(buffer, track);
+    const features = analyzeFeatures(buffer, track, featureOptions);
     const plan = planJetCut(
       track,
       { mode: 'speech' },

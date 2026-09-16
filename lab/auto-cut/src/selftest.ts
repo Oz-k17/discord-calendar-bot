@@ -17,7 +17,13 @@ import {
 import { gainAt, planDucking } from './ducking.ts';
 import { toClipEdits } from './edits.ts';
 import { buildPeaks } from './peaks.ts';
-import { analyzeFeatures, centroidDescentRatio, highBandAloneRatio, modulationRatio } from './features.ts';
+import {
+  analyzeFeatures,
+  centroidDescentRatio,
+  highBandAloneRatio,
+  MOD_SPLIT_HZ,
+  modulationRatio,
+} from './features.ts';
 import { fftScratch, magnitudes } from './fft.ts';
 
 export interface TestResult {
@@ -251,6 +257,27 @@ function addHighNoise(base: AudioLike, rms: number, seed0: number, cutoffHz = 60
   const shaped = highpassed(raw, sr, cutoffHz);
   const data = new Float32Array(source.length);
   for (let i = 0; i < source.length; i += 1) data[i] = source[i] + shaped[i];
+  return { sampleRate: sr, numberOfChannels: 1, length: source.length, getChannelData: () => data };
+}
+
+/**
+ * 既にある音へ、**ぴたりと 1 つの高さにある**音を、音節の速さで揺らして重ねる。
+ *
+ * 「揺れを低い帯域だけで見る」手の検算に使う（2026-09-16）。
+ * フィルタで帯域を寄せた雑音では確かめられない——一次のフィルタは肩が緩いので、
+ * 6kHz へ寄せたつもりの打点が 2kHz より下へも大きく漏れる
+ * （実際、最初はそれで検算が落ちた。**判定ではなく素材のほうが間違っていた**）。
+ * サイン波なら漏れは窓のぶんだけなので、「境目のどちら側に居るか」に曖昧さが無い。
+ */
+function addWobbling(base: AudioLike, toneHz: number, wobbleHz: number, amp: number): AudioLike {
+  const source = base.getChannelData(0);
+  const sr = base.sampleRate;
+  const data = new Float32Array(source.length);
+  for (let i = 0; i < source.length; i += 1) {
+    const t = i / sr;
+    const env = 0.55 + 0.45 * Math.sin(2 * Math.PI * wobbleHz * t);
+    data[i] = source[i] + amp * env * Math.sin(2 * Math.PI * toneHz * t);
+  }
   return { sampleRate: sr, numberOfChannels: 1, length: source.length, getChannelData: () => data };
 }
 
@@ -1580,6 +1607,91 @@ export function runSelfTest(): TestResult[] {
         '生の列を渡さなければ、続きは見ない',
         !noFlux.noSpeechFound,
         `割合 ${(noFlux.speechRatio * 100).toFixed(0)}%`,
+      );
+    }
+
+    // --- 揺れを低い帯域だけで見る（2026-09-16） ---
+    // 声の基本周波数も第 1・第 2 フォルマントも 2kHz より下に居るので、
+    // 音節の揺れを見るのに高い側は要らない。逆に、上で刻む打楽器はそこにしか居ない。
+    //
+    // **ここで固定したいのは「効くこと」と「どこで破れるか」の両方。**
+    // 効くほうだけを固定すると、次の回が「声を見分けられるようになった」と読む。
+    // 見分けているのではなく、**邪魔なものが声の帯域の外に居るときだけ**外せている。
+    {
+      // 境目（2000Hz）の上にも下にも余裕を置きたいので、ここだけ標本化周波数を上げる。
+      const sr = 32000;
+      const hop = 0.02;
+      // 440Hz の鳴りっぱなしの音（＝揺れの無い伴奏のつもり）。境目より下に居る。
+      const chord = makeTone(2, sr, [{ from: 0, to: 2 }]);
+      const middle = (a: Float32Array) => a[Math.floor(a.length / 2)];
+      // **既定は全域**なので、ここでは境目を明示して渡す。
+      // 既定値を書き換えただけでこの検算が黙って別のものを測り始める、という形にしない。
+      const featuresOf = (buffer: AudioLike, split: number = MOD_SPLIT_HZ) =>
+        analyzeFeatures(buffer, analyzeLoudness(buffer, hop), { modSplitHz: split });
+
+      const plain = featuresOf(chord);
+      // ① 境目の**上**で音節の速さに揺れるものは、全域の揺れを持ち上げる。
+      //    これが `speech-sparse-hats` の切れ目 5.60 秒を渡らせていたものそのもの。
+      const above = featuresOf(addWobbling(chord, 6000, 4.2, 0.35));
+      check(
+        '境目の上で揺れるものは、全域の揺れを持ち上げる',
+        middle(above.modulation) > middle(plain.modulation) + 0.2,
+        `上で揺れる ${middle(above.modulation).toFixed(3)} / 和音だけ ${middle(plain.modulation).toFixed(3)}`,
+      );
+      check(
+        '同じものでも、低い側だけの揺れは動かない',
+        near(middle(above.lowModulation), middle(plain.lowModulation), 0.05),
+        `上で揺れる ${middle(above.lowModulation).toFixed(3)} / 和音だけ ${middle(plain.lowModulation).toFixed(3)}`,
+      );
+
+      // ② **同じ揺れを境目の下へ置けば、この手は丸ごと外れる。**
+      //    `speech-sparse-thump.wav` が素材の側で示していることを、合成波形で固定する。
+      const below = featuresOf(addWobbling(chord, 900, 4.2, 0.35));
+      check(
+        '同じ揺れを境目の下へ置くと、低い側の揺れも上がる（この手の破れ方）',
+        middle(below.lowModulation) > middle(plain.lowModulation) + 0.2,
+        `下で揺れる ${middle(below.lowModulation).toFixed(3)} / 和音だけ ${middle(plain.lowModulation).toFixed(3)}`,
+      );
+
+      // ③ 声らしさは低い側の揺れから組む。だから境目の上の揺れでは上がらない。
+      check(
+        '声らしさは、境目の上の揺れでは上がらない',
+        near(middle(above.speechScore), middle(plain.speechScore), 0.08),
+        `上で揺れる ${middle(above.speechScore).toFixed(3)} / 和音だけ ${middle(plain.speechScore).toFixed(3)}`,
+      );
+
+      // ④ 境目を 0 にすれば、入れる前の振る舞いに戻せる（A/B を並べるための約束）。
+      //    ここが崩れると `LAB_LOWBAND` を外したときに「いまの数字」が出なくなる。
+      const whole = featuresOf(addWobbling(chord, 6000, 4.2, 0.35), 0);
+      let same = whole.lowModulation.length === whole.modulation.length;
+      for (let i = 0; i < whole.modulation.length && same; i += 1) {
+        if (whole.lowModulation[i] !== whole.modulation[i]) same = false;
+      }
+      check('境目 0 なら、低い側の揺れは全域の揺れと同じ列になる', same, `${whole.modulation.length} コマ`);
+
+      // ⑤ 低い側の音量は**取り分として**出している（FFT の目盛りをそのまま使わない）。
+      //    全部が境目より下に居るなら、低い側の音量は元の音量とほぼ同じになるはず。
+      check(
+        '全部が境目より下なら、低い側の音量は元の音量に揃う',
+        near(middle(plain.lowLevel), middle(plain.level), 1),
+        `低い側 ${middle(plain.lowLevel).toFixed(1)}dB / 全域 ${middle(plain.level).toFixed(1)}dB`,
+      );
+
+      // ⑥ 逆に、境目の上にしか音が無ければ低い側は沈む。
+      //    ここが沈まないと、`modulationRatio` の無音の底を一度も踏まなくなる。
+      const highOnly = featuresOf(addWobbling(makeTone(2, sr, []), 6000, 4.2, 0.35));
+      check(
+        '境目の上にしか音が無ければ、低い側の音量は沈む',
+        middle(highOnly.lowLevel) < middle(highOnly.level) - 20,
+        `低い側 ${middle(highOnly.lowLevel).toFixed(1)}dB / 全域 ${middle(highOnly.level).toFixed(1)}dB`,
+      );
+
+      // ⑦ 無音のコマで NaN や -Infinity に化けないこと。
+      const quiet = featuresOf(makeTone(2, sr, []));
+      check(
+        '無音でも低い側の音量は底で止まる（NaN にしない）',
+        Number.isFinite(middle(quiet.lowLevel)) && middle(quiet.lowLevel) <= -100 + 1e-6,
+        `${middle(quiet.lowLevel).toFixed(1)}dB`,
       );
     }
   }

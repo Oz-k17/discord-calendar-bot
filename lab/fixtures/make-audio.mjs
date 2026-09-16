@@ -137,6 +137,42 @@ function highpassGain(cutoffHz) {
 }
 
 /**
+ * 一次の低域通過を 2 段。`highpass` と対にして、**同じ作りのまま向きだけを裏返す**ために置いた。
+ *
+ * 肩の緩さも段数も高域通過と揃えてある。揃えておかないと、
+ * 低い側へ移した打点で数字が動いたときに「帯域が効いたのか、
+ * フィルタの切れが違うのか」が言えなくなる。
+ */
+function lowpassState(cutoffHz) {
+  const rc = 1 / (2 * Math.PI * cutoffHz);
+  return { a: (1 / SR) / (rc + 1 / SR), y1: 0, y2: 0 };
+}
+
+function lowpass(state, x) {
+  state.y1 += state.a * (x - state.y1);
+  state.y2 += state.a * (state.y1 - state.y2);
+  return state.y2;
+}
+
+/** `highpassGain` と同じ測り方。`level` を実効値の比として読めるようにするため。 */
+const lowpassGains = new Map();
+function lowpassGain(cutoffHz) {
+  const found = lowpassGains.get(cutoffHz);
+  if (found !== undefined) return found;
+  const state = lowpassState(cutoffHz);
+  const random = rng(777);
+  const n = 40000;
+  let sum = 0;
+  for (let i = 0; i < n; i += 1) {
+    const v = lowpass(state, (random() - 0.5) * 2);
+    if (i >= n / 2) sum += v * v;
+  }
+  const gain = Math.sqrt(sum / (n / 2));
+  lowpassGains.set(cutoffHz, gain);
+  return gain;
+}
+
+/**
  * 子音の種類。**2026-09-12（2 回目）に足した。**
  *
  * それまでの合成の声は母音だけで、**息の雑音も子音も入っていなかった**。
@@ -537,10 +573,16 @@ function drums(data, from, to, level, hitsPerSecond, random) {
  * 減衰の形まで等間隔になって、「規則正しすぎるものは楽器」の側へ勝手に落ちてしまう。
  */
 const HAT_CUTOFF = 6000;
-function hats(data, from, to, level, hitsPerSecond, random) {
+/**
+ * 等間隔に刻む打点。帯域の寄せ方（`shape`）だけを差し替えられるようにしてある。
+ *
+ * **分けた理由は、打点の「帯域」だけを動かした 2 本を並べるため**（2026-09-16）。
+ * 刻みも、減衰も、引く乱数も 1 ビット違わないまま、寄せる高さだけを入れ替えられる。
+ * そうしておかないと、低い側へ移した素材で数字が動いたときに
+ * 「帯域が効いたのか、刻み方が変わったのか」が切り分けられない。
+ */
+function pulses(data, from, to, level, hitsPerSecond, random, shape) {
   const period = 1 / hitsPerSecond;
-  const filter = highpassState(HAT_CUTOFF);
-  const gain = highpassGain(HAT_CUTOFF);
   for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
     const t = i / SR;
     const index = Math.floor(t / period);
@@ -549,9 +591,35 @@ function hats(data, from, to, level, hitsPerSecond, random) {
     // フィルタは鳴っていない間も回し続ける（掛けるのは包絡だけ）。
     // 打点ごとに作り直すと、立ち上がりが毎回フィルタの過渡になって、
     // そこが広帯域のクリックになる。いま測ろうとしている量そのものを持ち上げてしまう。
-    const shaped = highpass(filter, (random() - 0.5) * 2) / gain;
+    const shaped = shape((random() - 0.5) * 2);
     data[i] += level * Math.exp(-inside / decay) * shaped;
   }
+}
+
+function hats(data, from, to, level, hitsPerSecond, random) {
+  const filter = highpassState(HAT_CUTOFF);
+  const gain = highpassGain(HAT_CUTOFF);
+  pulses(data, from, to, level, hitsPerSecond, random, (x) => highpass(filter, x) / gain);
+}
+
+/** 低い側へ寄せた打点（タム／キックのつもり）の上限（Hz）。 */
+const THUMP_CUTOFF = 700;
+
+/**
+ * `hats` と**寄せる高さだけ**が違う打点。2026-09-16 に足した。
+ *
+ * 狙いは同じ日に入れた「揺れを低い帯域だけで見る」手（`MOD_SPLIT_HZ`）。
+ * あの手は、ハイハットが 6kHz より上にしか居ないことに乗っている。
+ * **同じ刻みを低い側へ置けば、乗っているものがそのまま外れる**はずで、
+ * そこを確かめずに入れると「声を見分けられた」と「高い側を見なくした」の区別が付かない。
+ *
+ * 刻みの速さも減衰も引く乱数も `hats` と同じにしてあるので、
+ * 2 本の差は**打点がどの帯域に居るか**だけになる。
+ */
+function thumps(data, from, to, level, hitsPerSecond, random) {
+  const filter = lowpassState(THUMP_CUTOFF);
+  const gain = lowpassGain(THUMP_CUTOFF);
+  pulses(data, from, to, level, hitsPerSecond, random, (x) => lowpass(filter, x) / gain);
 }
 
 /** 管楽器の息の雑音（音の実効値に対する比）と、寄せる高さ（Hz）。 */
@@ -791,6 +859,12 @@ function makeShort(
     /** シンバル／ハイハットを刻む速さ（Hz）。0 で鳴らさない。 */
     hat = 0,
     hatLevel = 0.1,
+    /**
+     * ハイハットと**同じ刻みを低い側へ寄せた**打点の速さ（Hz）。0 で鳴らさない。
+     * `hat` と入れ替えて使う（両方は鳴らさない）。詳しくは `thumps` を参照。
+     */
+    thump = 0,
+    thumpLevel = 0.1,
     /** 息の雑音を持つ管楽器を鳴らすか。 */
     flute = false,
     /** 音程が声と同じように動く楽器を鳴らすか。「音程の動き」に賭ける手を潰しにいく素材。 */
@@ -854,6 +928,9 @@ function makeShort(
   // 声の無い素材は `speak` を呼ばないので、移しても音は 1 ビットも変わらない
   // （`music-hats.wav` の md5 が一致することを確認した）。
   if (hat) hats(data, 0, SHORT_LENGTH, hatLevel, hat, random);
+  // 低い側へ寄せた打点も、ハイハットとまったく同じ場所で引く。こうしておくと
+  // `hat: 4.2` と `thump: 4.2` の 2 本は**打点の帯域だけ**が違う（乱数の消費も同じ）。
+  if (thump) thumps(data, 0, SHORT_LENGTH, thumpLevel, thump, random);
   return writeWav(name, data);
 }
 

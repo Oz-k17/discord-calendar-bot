@@ -21,6 +21,20 @@ export interface FeatureTrack {
   level: Float32Array;
   /** 音量の揺れのうち、3〜6Hz（人が音節を刻む速さ）が占める割合。 */
   modulation: Float32Array;
+  /**
+   * `modulation` を**低い帯域の音量だけ**から出したもの（`modSplitHz` より下）。
+   * 声らしさ（`speechScore`）はこの列から組む。
+   *
+   * **既定の `modSplitHz` は 0 なので、ふだんは `modulation` と同じ列**。
+   * 0 でないときに何が起きるかは `MOD_SPLIT_HZ` の注に測って書いた
+   * （狙いは果たすが、声の無い曲を切り刻むので入れていない）。
+   */
+  lowModulation: Float32Array;
+  /**
+   * 低い帯域だけの音量（dBFS）。`lowModulation` の材料で、
+   * 「そこで何が起きているか」を外から確かめるために出している。
+   */
+  lowLevel: Float32Array;
   /** スペクトルの重心（Hz）。高いほど「明るい」音。 */
   centroid: Float32Array;
   /** スペクトルの平坦さ（0〜1）。1 に近いほど雑音的、0 に近いほど音程がある。 */
@@ -320,6 +334,89 @@ const MOD_HIGH = 6;
  * 窓の長さは目盛りそのものを動かす。伸ばすなら、しきい値ごと引き直す話になる。
  */
 const MOD_WINDOW = 1.0;
+/**
+ * 揺れ（`modulation`）を測る音量の列を、**ここより下の帯域だけ**で作る（Hz）。0 なら全域。
+ *
+ * **既定では使っていない**（`DEFAULT_FEATURES.modSplitHz` は 0）。
+ * 2026-09-16 に測って、**狙いは完全に果たしたが、果たした結果として別の穴が開いた**ので、
+ * 入れずに残してある。`LAB_LOWBAND=2000 npm run lab:bench` で入れた側を出せる。
+ *
+ * ## 何のために考えたか
+ *
+ * `speech-sparse-hats` の切れ目（声がまったく無い 5.60 秒）が丸ごと渡り切っていた。
+ * 280 コマ中 249 コマで声らしさ 0.2 を超える。同じ切れ目を `speech-sparse-bgm` は
+ * 38 コマしか超えない。**2 本はハイハットの有無だけが違う。**
+ * 突き合わせると、こうなっていた（切れ目の 280 コマの中央値）:
+ *
+ * | | `speech-sparse-bgm` | `speech-sparse-hats` |
+ * | --- | --- | --- |
+ * | 重心 | 1591Hz | **8370Hz** |
+ * | modulation（全域） | 0.122 | **0.421** |
+ * | **modulation（2kHz 未満だけ）** | **0.115** | **0.115** |
+ * | tone | 0.889 | 0.502 |
+ *
+ * **低い側だけを見れば、2 本は 1 ビットも違わない。** ハイハットは 6kHz より上にしか居ないので、
+ * 渡らせていたのは「高い側で 4.2Hz に刻む打点」が全域の音量を揺らしていたことだけだった。
+ * 声の基本周波数は 70〜320Hz、第 1・第 2 フォルマントも 2kHz より下に居るので、
+ * **音節の揺れを見るのに高い側は要らない。** 境目の 2000Hz はそこから採った
+ * （フォルマントの居場所を丸ごと残せる、いちばん低い所）。
+ *
+ * ## 狙いはそのとおり当たった
+ *
+ * `speech-sparse-hats` は削減 0% →  **64%**・精度 20% → 55%・渡った 5.60s → **0.00s**、
+ * 取りこぼしは 100% のまま。`speech-sparse-sustained-hats` も 0% → 65%。
+ * **「判定そのものが働かない素材」が 2 本、働くようになった。**
+ *
+ * ## それでも入れていない理由
+ *
+ * 声の無い `music-hats` が**削減 0% → 43%**（鳴っているところを 5.60 秒切る）、
+ * `music-hats-break` が 0% → 41%（同 4.22 秒）になる。声がゼロの曲が切り刻まれる。
+ *
+ * **これは新しく開けた穴ではなく、前から開いていた穴が初めて撃たれたもの。**
+ * 2026-09-14（3 回目）に「`music-hats` の削減 0% は守れているのではなく、
+ * 13 秒ずっと同じ大きさで鳴っているから撃たれていないだけ」と測ってある。
+ * コマごとの声らしさが平らでなくなった瞬間に、素材単位の判定が止められずに切り始める。
+ *
+ * **止められない**ことも測った。`minSpeechRatio`（5%）で線を引き直す手は、
+ * 声らしいコマの割合がこう並ぶので成り立たない:
+ *   声なし: `bgm`・`drums`・`music-chords*`・`music-swell`・`music-tremolo` 0% /
+ *           `music-vibrato` 4% / **`music-hats-break` 35% / `music-hats` 37%** /
+ *           `music-flute` 68% / `music-wah` 98%
+ *   声あり: **`speech-sparse-sustained-hats` 25% / `speech-sparse-bgm` 26% /
+ *           `speech-sparse-hats` 28%** / 以下 61〜100%
+ * **声の無い 2 本が、声のある 3 本を追い越している。** 線を引けば声のほうが先に落ちる。
+ * （入れる前は `music-hats` 99% 対 `speech-sparse-hats` 100% だったので、
+ *  開きそのものは大きく縮んでいる。**引けないことだけが変わっていない。**）
+ *
+ * 同じ「低い帯域から」を**包絡の門**（`envelopeChange`）へも当ててみたが、そちらも届かない。
+ * 低い帯域だけでケプストラムを取り直すと `music-hats` は 100% → 79% までしか落ちず、
+ * `speech-sparse-hats`（49%）を追い越したままになる。
+ *
+ * ## 境目を振った表（声のある 18 本の平均 / 声の無い 12 本の合計。`lab:bench`）
+ *
+ * | 境目 | 声を残せた率 | 残したうち声だった率 | 声ゼロを切った秒 |
+ * | --- | --- | --- | --- |
+ * | なし（全域・いま） | 99.3% | 67.4% | **0.64s** |
+ * | 6000Hz | 99.3% | 69.4% | 6.22s |
+ * | 4000Hz | 99.2% | 71.5% | 13.02s |
+ * | **2000Hz** | **99.6%** | **72.9%** | **10.28s** |
+ * | 1500Hz | 99.6% | 74.7% | 12.36s |
+ * | 1000Hz | 99.6% | 75.2% | 12.20s |
+ *
+ * **どの境目でも、良くなるのは前 2 列、悪くなるのは 3 列目。** 交換の向きは境目で変わらない。
+ * 6000Hz がいちばん被害が小さいが、それは**この素材のハイハットが 6kHz 高域通過だから**で、
+ * 現実のシンバルはもっと下まで居る。数字が良く見えるほうを採ると、
+ * 「塞がっていない穴が塞がったように見える」だけになるので採らない。
+ *
+ * ## そして、これは「声を見分けられた」ではない
+ *
+ * `speech-sparse-thump.wav`（ハイハットと**同じ刻みを 700Hz より下へ寄せただけ**の打点）は、
+ * 低い側だけを見ても切れ目を 100% 渡り切る（入れる前と 1 コマも変わらない）。
+ * この手が見ているのは「声があるか」ではなく、
+ * **「邪魔なものが声の帯域の外に居るか」**でしかない。
+ * 打点をフォルマントの帯域へ置かれたら、手は丸ごと外れる。
+ */
+export const MOD_SPLIT_HZ = 2000;
 /** 人の声の基本周波数として探す範囲（Hz）。 */
 const F0_LOW = 70;
 const F0_HIGH = 320;
@@ -754,11 +851,19 @@ export interface FeatureOptions {
   smoothSeconds: number;
   /** 形の変化を均す窓の長さ（秒）。0 で無効。 */
   shapeSmoothSeconds: number;
+  /**
+   * 揺れを見る音量の列を、この周波数より下だけで作る（Hz）。0 なら全域＝入れる前の振る舞い。
+   * A/B を並べられるようにしてある（`LAB_LOWBAND=1 npm run lab:bench`）。
+   */
+  modSplitHz: number;
 }
 
 export const DEFAULT_FEATURES: FeatureOptions = {
   smoothSeconds: SCORE_SMOOTH,
   shapeSmoothSeconds: SHAPE_SMOOTH,
+  // **既定は全域**（＝この手を使わない）。理由は `MOD_SPLIT_HZ` の注に測って書いた。
+  // 入れた側は `LAB_LOWBAND=2000 npm run lab:bench` で出せる。
+  modSplitHz: 0,
 };
 
 export function analyzeFeatures(
@@ -800,6 +905,10 @@ export function analyzeFeatures(
   const ceps = new Float64Array(CEPS_KEEP);
   const previousCeps = new Float64Array(CEPS_KEEP);
   let hasPreviousCeps = false;
+
+  // 低い帯域だけの音量。揺れ（modulation）をここから出す（`MOD_SPLIT_HZ` を参照）。
+  const lowLevel = new Float32Array(frames);
+  const splitBin = opts.modSplitHz > 0 ? Math.max(2, Math.round(opts.modSplitHz / binHz)) : 0;
 
   const previous = new Float64Array(scratch.mag.length);
   // 形の比較用。合計で割ったものを別に持つ（previous は生の大きさなので使い回せない）。
@@ -888,6 +997,29 @@ export function analyzeFeatures(
       envelopeFlux[i] = 0;
     }
 
+    // 低い側だけの音量。**エネルギーの取り分として出し、音量の列に掛け戻す。**
+    //
+    // FFT の大きさをそのまま dB にしないのは、窓も正規化も掛かっていて
+    // `analyzeLoudness`（RMS）とは目盛りが違うため。実測で 48dB ずれていた。
+    // ずれたままだと `modulationRatio` が持っている無音の底（SILENCE_DB + 40）を
+    // 一度も踏まなくなり、**無音のコマだけが別扱いされる仕掛けが黙って効かなくなる**。
+    // 取り分（比）にして掛け戻せば、目盛りは元の列のものがそのまま乗る。
+    if (splitBin > 0) {
+      let lowEnergy = 0;
+      let allEnergy = 0;
+      for (let b = 1; b < mag.length; b += 1) {
+        const e = mag[b] * mag[b];
+        allEnergy += e;
+        if (b < splitBin) lowEnergy += e;
+      }
+      lowLevel[i] =
+        lowEnergy > 0 && allEnergy > 0
+          ? Math.max(SILENCE_DB, track.db[i] + 10 * Math.log10(lowEnergy / allEnergy))
+          : SILENCE_DB;
+    } else {
+      lowLevel[i] = track.db[i];
+    }
+
     centroid[i] = sum > 0 ? weighted / sum : 0;
     // 平坦さ＝幾何平均 ÷ 算術平均。雑音なら 1 に近づき、音程があると 0 に近づく。
     flatness[i] = sum > 0 ? Math.exp(logSum / counted) / (sum / counted) : 0;
@@ -897,11 +1029,15 @@ export function analyzeFeatures(
   }
 
   const modulation = modulationRatio(track);
+  // 声らしさは低い側の揺れで組む。全域のほうも残してあるのは、
+  // probe で並べて比べ続けるため（どちらが効いているかを毎回言えるように）。
+  const lowModulation =
+    splitBin > 0 ? modulationRatio({ hop: track.hop, db: lowLevel, duration: track.duration }) : modulation;
   const tone = new Float32Array(frames);
   const raw = new Float32Array(frames);
   for (let i = 0; i < frames; i += 1) {
     tone[i] = 1 - flatness[i];
-    raw[i] = modulation[i] * tone[i];
+    raw[i] = lowModulation[i] * tone[i];
   }
   // 人がしゃべっている間は続けてしゃべっている。1 コマだけ下がったからといって
   // そこで切ると、語中で切り刻むことになる。少し均してから使う。
@@ -926,6 +1062,8 @@ export function analyzeFeatures(
     frameRate: 1 / track.hop,
     level: track.db,
     modulation,
+    lowModulation,
+    lowLevel,
     centroid,
     flatness,
     flux,
@@ -950,6 +1088,7 @@ export function analyzeFeatures(
 export const FEATURE_NAMES = [
   'level',
   'modulation',
+  'lowModulation',
   'flatness',
   'tone',
   'shapeFlux',

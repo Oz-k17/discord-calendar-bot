@@ -6,6 +6,8 @@
  *   npm run lab:bench -- lab/fixtures/out/speech-long.wav   # ファイルを指定してもよい
  *   LAB_NO_RUN=1 npm run lab:bench   # 「動きが続いたか」を見ない（2026-09-14 以前の振る舞い）
  *   LAB_NO_LEAD=1 npm run lab:bench  # 発話の頭を遡らない（2026-09-15 以前の振る舞い）
+ *   LAB_LOWBAND=1 npm run lab:bench    # 揺れを低い帯域だけで見る（2026-09-16。既定では入れていない）
+ *   LAB_LOWBAND=4000 npm run lab:bench # その境目を変えて振る（Hz。1 なら既定の 2000Hz）
  *
  * `LAB_NO_RUN` は A/B を並べるためのもの。判定に手を入れたら、
  * **入れる前と入れたあとを同じコマンドで出せる**ようにしておかないと、
@@ -23,7 +25,7 @@ import { readWav } from '../fixtures/wav.mjs';
 import { SHORT_FIXTURES, utterancesOf } from '../fixtures/spec.mjs';
 
 const { analyzeLoudness } = await import('./src/loudness.ts');
-const { analyzeFeatures } = await import('./src/features.ts');
+const { analyzeFeatures, MOD_SPLIT_HZ } = await import('./src/features.ts');
 const { planJetCut, cutSoundingSeconds, keepEdgeSeconds, keepScoreSeconds, minimalKeepRanges, DEFAULT_JET_CUT } =
   await import('./src/silence.ts');
 
@@ -111,7 +113,10 @@ for (const file of files) {
   const levelMs = performance.now() - t0;
 
   const t1 = performance.now();
-  const features = analyzeFeatures(buffer, track);
+  // 「揺れを低い帯域だけで見る」手は既定では入れていない（features.ts の `MOD_SPLIT_HZ`）。
+  // 入れた側の数字をいつでも出せるようにしておかないと、次の回が記録から拾い直すことになる。
+  const lowband = Number(process.env.LAB_LOWBAND ?? 0);
+  const features = analyzeFeatures(buffer, track, lowband ? { modSplitHz: lowband === 1 ? MOD_SPLIT_HZ : lowband } : {});
   const speech = planJetCut(
     track,
     {
