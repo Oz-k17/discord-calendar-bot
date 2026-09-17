@@ -878,7 +878,9 @@ console.log('0.5 を下回るのは「逆向きに効いている」という意
   }
   console.log(`\n線は ${line * 100}%。「下限」= 声の候補として数えられたのに、低い側が読めず門が触れないコマ。`);
   console.log('「止まりうる」= 下限が線より下。門を厳しくすれば素材単位に止められてしまう素材。');
-  console.log('\n**止めたい側は線に届かず、守りたい声の側が先に線を割る。向きが逆である。**');
+  console.log('\n**この表は 2026-09-17（2 回目）に「止めたい側は線に届かず、守りたい声の側が先に割る」と読んだもの。**');
+  console.log('同じ日の 3 回目に `music-thump-drop`（声なし・下限 4.6%）が入って、その読みは**一般には誤り**だと分かった。');
+  console.log('下限は「窓 ÷ 尺」でしかなく、声の有無とは関係が無い。下の段を参照。\n');
   console.log('  ※ music-thump        下限 8.9%  … 線 0.01 まで下げても 14.3% 止まり');
   console.log('  ※ music-thump-break  下限 19.1% … 同じく 29.5% 止まり');
   console.log('  ※ speech-sparse-bgm  下限 0.0%  … 線 0.01 で 4.8%（**声のある素材が線を割る**）');
@@ -887,4 +889,115 @@ console.log('0.5 を下回るのは「逆向きに効いている」という意
   console.log('だから `planJetCut` は、割合だけが線を割っていてそれを立てたのが門なら、その素材では門を外す。');
   console.log('\n**次にコマ単位の門を素材単位の数え方へ効かせるときは、まずこの「下限」を出すこと。**');
   console.log('そこが線より上なら、どんな量を持ってきてもその素材は素材単位には止まらない。');
+}
+
+// --- 門を外す手（`skewDropped`）は、門が正しく止めた素材まで救ってしまう（2026-09-17・3 回目）---
+//
+// 前の回（同じ日の 2 回目）に入れた外し方の根拠は、
+// 「門が触れないコマの割合（下限）が線より上なので、この門で素材単位に止まるのは声のある素材だけ」。
+// つまり**門が立てる「声が見つからない」は構造上どれも誤り**、という読みだった。
+//
+// その下限は「窓 ÷ 尺」でしかない（検算 ⑥''''）。**声の有無とは何の関係も無い。**
+// 13 秒の素材では 0.64 / 13 = 4.6% で線（5%）のすぐ下なので、
+// **低い側がへこまない声ゼロの素材**を置けば、そのまま線を割る。
+// `music-thump-drop.wav`（うねらない伴奏＋低い打点＋打点だけの休符）がそれで、
+// 門は**読めるコマを 1 つ残らず捕まえて**正しく止めるのに、外し方がその結論を捨てる。
+{
+  console.log('\n門を外す手は、門が正しく止めた素材まで救っていないか（線 0.4）\n');
+  console.log(`${pad('素材', 26)}${pad('声', 4)}${pad('門なし', 8)}${pad('下限', 8)}${pad('外さない割合', 14)}${pad('門の結論', 12)}${pad('外したあと', 16)}`);
+  console.log('-'.repeat(26 + 4 + 8 + 8 + 14 + 12 + 16));
+  const line = DEFAULT_JET_CUT.minSpeechRatio;
+  const gateLine = 0.4;
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const opts = { ...DEFAULT_JET_CUT, mode: 'speech' };
+    const thresholdDb = autoThresholdDb(track, opts.sensitivity);
+    const sounding = (i) => track.db[i] > thresholdDb && track.db[i] > SILENCE_DB;
+    const holdFrames = Math.max(0, Math.round(opts.envelopeHold / track.hop));
+    const runGate = envelopeGateFrames(
+      features.envelopeFlux,
+      sounding,
+      opts.minEnvelopeChange,
+      Math.max(1, Math.round(opts.minEnvelopeRun / track.hop)),
+      holdFrames,
+    );
+    const readable = lowBandReadable(features.lowLevel, thresholdDb, modulationWindowFrames(track.hop));
+    // `planJetCut` は門だけで止まると自動で外してしまうので、外す前の割合はここで数え直す。
+    // 数え方は planJetCut の本体と 1 つも変えない（門 → 包絡 → 厳しいほうの順）。
+    // 門ありと門なしは**別の状態機械として回す**。planJetCut は門で落としたコマで
+    // 包絡の保持（`envelopeOpenUntil`）を更新しないので、1 本の走りで両方を数えると
+    // 保持の伸び方がずれる。ここが合っていないと「外さない割合」が実物と違う数になる。
+    let soundingFrames = 0;
+    let strict = 0;
+    let floor = 0;
+    let bare = 0;
+    const count = (withGate) => {
+      let hits = 0;
+      let unreadable = 0;
+      let inSpeech = false;
+      let openUntil = -1;
+      let closeUntil = -1;
+      for (let i = 0; i < track.db.length; i += 1) {
+        if (!sounding(i)) {
+          inSpeech = false;
+          openUntil = -1;
+          closeUntil = -1;
+          continue;
+        }
+        if (withGate) soundingFrames += 1;
+        const score = features.speechScore[i];
+        inSpeech = inSpeech ? score >= Math.min(opts.speechExit, opts.speechThreshold) : score >= opts.speechThreshold;
+        if (!inSpeech) continue;
+        if (withGate) {
+          if (readable[i] && features.lowLevelSkew[i] >= gateLine) closeUntil = i;
+          if (i <= closeUntil) continue;
+        }
+        if (features.envelopeChange[i] >= opts.minEnvelopeChange) openUntil = i + holdFrames;
+        if (i > openUntil) continue;
+        if (!runGate[i]) continue;
+        hits += 1;
+        if (!readable[i]) unreadable += 1;
+      }
+      return { hits, unreadable };
+    };
+    strict = count(true).hits;
+    const without = count(false);
+    bare = without.hits;
+    floor = without.unreadable;
+    const ratio = soundingFrames > 0 ? strict / soundingFrames : 0;
+    const stops = soundingFrames > 0 && ratio < line;
+    const plan = planJetCut(
+      track,
+      { ...opts, maxLowSkew: gateLine },
+      features.speechScore,
+      features.shapeChange,
+      features.envelopeChange,
+      features.envelopeFlux,
+      features.lowLevel,
+      features.lowModulationDepth,
+      features.lowLevelSkew,
+    );
+    // 外していない素材はここで何も言うことが無いので、表からは落とす（33 本ぜんぶは長い）。
+    if (!plan.skewDropped) continue;
+    const harm = plan.noSpeechFound ? 0 : cutSoundingSeconds(track, plan);
+    const pc = (a) => (soundingFrames > 0 ? `${((a / soundingFrames) * 100).toFixed(1)}%` : '—');
+    console.log(
+      `${pad((fixture.hard ? '※ ' : '  ') + fixture.name.replace('.wav', ''), 26)}${pad(fixture.speech ? '有' : '無', 4)}` +
+        `${pad(pc(bare), 8)}${pad(pc(floor), 8)}${pad(`${(ratio * 100).toFixed(1)}%`, 14)}` +
+        `${pad(stops ? '止める' : '通す', 12)}${pad(`削${((plan.removed / plan.originalDuration) * 100).toFixed(0)}% 実害${harm.toFixed(2)}s`, 16)}`,
+    );
+  }
+  console.log(`\n線は ${line * 100}%。「外さない割合」= 門を外さなかったときの割合（planJetCut は自動で外すので数え直している）。`);
+  console.log('\n**外れる 2 本は、正しさが逆を向いている。**');
+  console.log('  ※ speech-clipped-bgm  声あり … 門が誤って止める。外すのが正しい（救われるのはこちら）');
+  console.log('  ※ music-thump-drop    声なし … 門が正しく止める。外すと声ゼロの曲を 1.60s 切る');
+  console.log('\n`music-thump-drop` の外さない割合 4.6% は**下限そのもの**＝門は読めるコマを 1 つ残らず捕まえている。');
+  console.log('**外し方が働くのは、門がいちばんよく効いたときである。**');
+  console.log('\n下限は「窓 ÷ 尺」なので、尺を伸ばすほど外れやすくなる（同じ素材をつないで実測）:');
+  console.log('  13s 下限 4.6% → 実害 1.60s ／ 26s 2.3% → 3.20s ／ 39s 1.5% → 4.80s ／ 65s 0.9% → 8.00s');
+  console.log('**13 秒で線のすぐ下だったのは素材の都合で、現実の尺ではもっと外れる。**');
 }

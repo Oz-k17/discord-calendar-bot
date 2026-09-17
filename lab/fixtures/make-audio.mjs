@@ -599,7 +599,7 @@ const HAT_CUTOFF = 6000;
  * そうしておかないと、低い側へ移した素材で数字が動いたときに
  * 「帯域が効いたのか、刻み方が変わったのか」が切り分けられない。
  */
-function pulses(data, from, to, level, hitsPerSecond, random, shape) {
+function pulses(data, from, to, level, hitsPerSecond, random, shape, breaks = []) {
   const period = 1 / hitsPerSecond;
   for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
     const t = i / SR;
@@ -610,6 +610,10 @@ function pulses(data, from, to, level, hitsPerSecond, random, shape) {
     // 打点ごとに作り直すと、立ち上がりが毎回フィルタの過渡になって、
     // そこが広帯域のクリックになる。いま測ろうとしている量そのものを持ち上げてしまう。
     const shaped = shape((random() - 0.5) * 2);
+    // 休符の中でも**乱数もフィルタも同じだけ回す**（書き込まないだけ）。
+    // 引く数を減らすと、そのあとの打点が別の音になって
+    // 「休符を入れただけの 2 本」が並べられなくなる（`chordBreaks` と同じ理由）。
+    if (breaks.some(([a, b]) => t >= a && t < b)) continue;
     data[i] += level * Math.exp(-inside / decay) * shaped;
   }
 }
@@ -634,10 +638,10 @@ const THUMP_CUTOFF = 700;
  * 刻みの速さも減衰も引く乱数も `hats` と同じにしてあるので、
  * 2 本の差は**打点がどの帯域に居るか**だけになる。
  */
-function thumps(data, from, to, level, hitsPerSecond, random) {
+function thumps(data, from, to, level, hitsPerSecond, random, breaks = []) {
   const filter = lowpassState(THUMP_CUTOFF);
   const gain = lowpassGain(THUMP_CUTOFF);
-  pulses(data, from, to, level, hitsPerSecond, random, (x) => lowpass(filter, x) / gain);
+  pulses(data, from, to, level, hitsPerSecond, random, (x) => lowpass(filter, x) / gain, breaks);
 }
 
 /** 管楽器の息の雑音（音の実効値に対する比）と、寄せる高さ（Hz）。 */
@@ -883,6 +887,12 @@ function makeShort(
      */
     thump = 0,
     thumpLevel = 0.1,
+    /**
+     * 打点だけが休む区間（秒の [始まり, 終わり] の並び）。ほかの音は鳴り続ける。
+     * `chordBreaks` の裏返しで、**伴奏は続いたまま刻みだけが抜ける**形
+     * （現実の曲の「ドラムが落ちる」ところ）。
+     */
+    thumpBreaks = [],
     /** 息の雑音を持つ管楽器を鳴らすか。 */
     flute = false,
     /** 音程が声と同じように動く楽器を鳴らすか。「音程の動き」に賭ける手を潰しにいく素材。 */
@@ -953,7 +963,7 @@ function makeShort(
   if (hat) hats(data, 0, SHORT_LENGTH, hatLevel, hat, random);
   // 低い側へ寄せた打点も、ハイハットとまったく同じ場所で引く。こうしておくと
   // `hat: 4.2` と `thump: 4.2` の 2 本は**打点の帯域だけ**が違う（乱数の消費も同じ）。
-  if (thump) thumps(data, 0, SHORT_LENGTH, thumpLevel, thump, random);
+  if (thump) thumps(data, 0, SHORT_LENGTH, thumpLevel, thump, random, thumpBreaks);
   return writeWav(name, data);
 }
 

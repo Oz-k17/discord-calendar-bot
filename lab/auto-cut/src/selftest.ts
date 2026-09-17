@@ -2012,9 +2012,10 @@ export function runSelfTest(): TestResult[] {
       );
 
       // ⑥' **コマ単位の門に、素材単位の「声が見つからない」を立てさせない。**
-      //     下限が線より低くなるのは尺が長いとき（0.64 / 16 = 4%）で、
-      //     そこは**声のある素材の側**に多い（`speech-clipped-bgm` の下限は 0.0%）。
-      //     だから門だけを理由に止まったら、その素材では門を外す。
+      //     門だけを理由に止まったら、その素材では門を外す。
+      //     **入れたときの根拠は「下限が線より低いのは声のある素材だけ」だったが、
+      //     それは 2026-09-17（3 回目）に潰れた**（`music-thump-drop.wav`）。
+      //     下限は「窓 ÷ 尺」なので、声の有無とは何の関係も無い。下の⑥''' を参照。
       const longTrack = analyzeLoudness(makeTone(16, sr, [{ from: 0, to: 16 }]), 0.02);
       const m = longTrack.db.length;
       const longLow = new Float32Array(m);
@@ -2053,6 +2054,34 @@ export function runSelfTest(): TestResult[] {
       // ⑦' 門が無ければ、印は立ちようが無い。既定（`maxLowSkew` 0）で立ったら、
       //     どこかで門と関係のない話が印に混ざっている。
       check('門を入れていなければ、外した印も立たない', !off.skewDropped && !kept.skewDropped, '');
+
+      // ⑥''' **外すかどうかを決めているのは、素材の中身ではなく尺だった。**
+      //      ⑥ と ⑥' に渡している列は 1 つも違わない（全コマ鳴っていて、全コマ打点向き、
+      //      全コマ声らしい）。違うのは長さだけで、4 秒では下限 16% で止まらず、
+      //      16 秒では 4% まで落ちて門を外す。
+      //      **入れたときに書いた「下限が線を割るのは声のある素材だけ」は、
+      //      13 秒という素材の都合だった**（2026-09-17・3 回目に `music-thump-drop.wav` で撃たれた）。
+      check(
+        '外すかどうかを決めているのは、素材の中身ではなく尺',
+        !all.skewDropped && dropped.skewDropped,
+        `4 秒 割合 ${(all.speechRatio * 100).toFixed(0)}% / 16 秒 外した`,
+      );
+
+      // ⑥'''' **その下限は「窓 ÷ 尺」そのもの。** 低い側が全編鳴っているなら、
+      //       読めないのは窓の幅ちょうど（`windowFrames - 1` コマ）で、尺には依らない。
+      //       だから割合の下限は尺に**反比例**する。長い素材ほど下限は 0 に近づき、
+      //       声がゼロでも線を割れるようになる。**この門の安全弁は、短い素材の側にしか無い。**
+      const unreadableFrames = (length: number) => {
+        const marks = lowBandReadable(new Float32Array(length).fill(-20), -40, windowFrames);
+        let count = 0;
+        for (let i = 0; i < length; i += 1) if (!marks[i]) count += 1;
+        return count;
+      };
+      check(
+        '読めないコマは、尺によらず窓の幅ちょうど',
+        [50, 200, 1000].every((length) => unreadableFrames(length) === windowFrames - 1),
+        `${windowFrames - 1} コマ（窓 ${windowFrames} コマ）`,
+      );
     }
   }
 
