@@ -174,6 +174,9 @@ for (const file of files) {
   notes.push(`低い側の揺れの深さ 最大 ${speech.depthMax.toFixed(2)}dB（${speech.depthSeconds.toFixed(2)}s ぶん読めた）`);
   // 向きの門が働いた秒数。0 のままで数字が動いたら、効いているのはこの門ではない。
   if (speech.skewSeconds > 0) notes.push(`向きの門が打点として落とした ${speech.skewSeconds.toFixed(2)}s`);
+  // 門を入れたのに数字が動かない素材と、**門を外した**素材を見分けられるようにする。
+  // 黙って外すと「効かなかった」と読み違える（2026-09-17・2 回目）。
+  if (speech.skewDropped) notes.push('向きの門だけで 5% を割るので、この素材では門を外した');
   if (speech.usedMode !== 'speech') notes.push('speech モードに落ちられなかった');
   if (notes.length) console.log(`${' '.repeat(22)} └ ${notes.join(' / ')}`);
 

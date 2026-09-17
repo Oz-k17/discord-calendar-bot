@@ -1964,8 +1964,16 @@ export function runSelfTest(): TestResult[] {
       const gate = { ...bare, maxLowSkew: 0.4, minModulationDepth: 0 };
 
       // ② 向きが線を超えたコマは、声らしさが満点でも落ちる。
-      const hits = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, lowLevel, undefined, fill(1.0));
-      check('向きが線を超えたコマは声だと言わない', hits.skewSeconds > 0 && hits.speechRatio < 0.5, `落とした ${hits.skewSeconds.toFixed(2)}s`);
+      //    **前半だけを打点にしてある。** 全コマを打点にすると割合が 5% を割り、
+      //    下の⑥（門を外すほう）が先に立って、門が効いたことを測れなくなる。
+      const halfThump = new Float32Array(n);
+      for (let i = 0; i < n; i += 1) halfThump[i] = i < n / 2 ? 1.0 : -1.0;
+      const hits = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, lowLevel, undefined, halfThump);
+      check(
+        '向きが線を超えたコマは声だと言わない',
+        hits.skewSeconds > 0 && hits.speechRatio < 0.9 && !hits.skewDropped,
+        `落とした ${hits.skewSeconds.toFixed(2)}s / 割合 ${(hits.speechRatio * 100).toFixed(0)}%`,
+      );
 
       // ③ 線の下なら素通り。門があること自体で声が減ってはいけない。
       const kept = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, lowLevel, undefined, fill(-1.0));
@@ -1989,6 +1997,62 @@ export function runSelfTest(): TestResult[] {
         DEFAULT_JET_CUT.maxLowSkew === 0 && off.skewSeconds === 0,
         `maxLowSkew = ${DEFAULT_JET_CUT.maxLowSkew}`,
       );
+
+      // ⑥ **門が触れないコマの割合が、割合の下限になる。**
+      //    この門は低い側が読めるコマにしか触れない。窓（0.64 秒）の両端 0.32 秒ずつは
+      //    どうやっても読めないので、**全コマを打点にしても割合はそこまでしか落ちない。**
+      //    4 秒の素材なら 0.64 / 4 = 16%。2026-09-17（2 回目）に、これが
+      //    `music-thump`（下限 8.9%）を素材単位に止められない理由だと分かった
+      //    ——7 通り測って全部駄目だったのは量の選び方ではなく、**線より下へ行けなかった**から。
+      const all = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, lowLevel, undefined, fill(1.0));
+      check(
+        '門が触れないコマが、割合の下限になる',
+        near(all.speechRatio, 0.64 / 4, 0.02) && !all.skewDropped,
+        `割合 ${(all.speechRatio * 100).toFixed(0)}% ≒ 0.64s / 4s`,
+      );
+
+      // ⑥' **コマ単位の門に、素材単位の「声が見つからない」を立てさせない。**
+      //     下限が線より低くなるのは尺が長いとき（0.64 / 16 = 4%）で、
+      //     そこは**声のある素材の側**に多い（`speech-clipped-bgm` の下限は 0.0%）。
+      //     だから門だけを理由に止まったら、その素材では門を外す。
+      const longTrack = analyzeLoudness(makeTone(16, sr, [{ from: 0, to: 16 }]), 0.02);
+      const m = longTrack.db.length;
+      const longLow = new Float32Array(m);
+      for (let i = 0; i < m; i += 1) longLow[i] = longTrack.db[i];
+      const longFill = (v: number) => new Float32Array(m).fill(v);
+      const dropped = planJetCut(
+        longTrack, gate, longFill(0.5), longFill(0.2), undefined, undefined, longLow, undefined, longFill(1.0),
+      );
+      const longOff = planJetCut(
+        longTrack, bare, longFill(0.5), longFill(0.2), undefined, undefined, longLow, undefined, longFill(1.0),
+      );
+      check(
+        '門だけで 5% を割ったら、その素材では門を外す',
+        dropped.skewDropped && !dropped.noSpeechFound && dropped.skewSeconds === 0,
+        `割合 ${(dropped.speechRatio * 100).toFixed(1)}%`,
+      );
+
+      // ⑥'' 外したあとは、門を渡さなかったときと**同じ計画**でなければならない。
+      //      「外した」が「別の何かに落ちた」になっていないことを、秒数で突き合わせる。
+      check(
+        '門を外した先は、門なしとまったく同じ計画',
+        near(dropped.removed, longOff.removed, 1e-9) && near(dropped.speechRatio, longOff.speechRatio, 1e-9),
+        `削った ${dropped.removed.toFixed(2)}s / ${longOff.removed.toFixed(2)}s`,
+      );
+
+      // ⑦ **門と無関係な理由でも止まるなら、外しても結論は変わらない。** 形が動いていない
+      //    素材（鳴りっぱなしの音楽）は、門を外しても `shape` で止まる。ここで印を立てると
+      //    「門のせいで止まった」と読み違えるので、立てないこと。
+      const flat = planJetCut(sounding, gate, fill(0.5), fill(0.0), undefined, undefined, lowLevel, undefined, fill(1.0));
+      check(
+        '形でも止まる素材は、門を外しても止まる（印は立てない）',
+        flat.noSpeechFound && flat.noSpeechReason === 'shape' && !flat.skewDropped,
+        `理由 ${flat.noSpeechReason}`,
+      );
+
+      // ⑦' 門が無ければ、印は立ちようが無い。既定（`maxLowSkew` 0）で立ったら、
+      //     どこかで門と関係のない話が印に混ざっている。
+      check('門を入れていなければ、外した印も立たない', !off.skewDropped && !kept.skewDropped, '');
     }
   }
 

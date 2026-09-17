@@ -793,3 +793,98 @@ console.log(
 console.log('\n※ は意地悪な素材（BGM が大きい / 刻む打楽器 / 震える楽器 / 母音を伸ばす声 など）。');
 console.log('声の無い素材（bgm・drums・music-tremolo）は「声のコマ」が無いので AUC では測れない（—）。');
 console.log('0.5 を下回るのは「逆向きに効いている」という意味で、それはそれで使える。');
+
+// --- 向きの門は、どの素材なら素材単位に止められるのか（2026-09-17・2 回目）---
+//
+// 前の回（同じ日の 1 回目）は「どの量なら `music-thump` を素材単位で止められるか」を
+// 7 通り探して全部駄目だった。**探す前に決まっていた**、というのがここで分かったこと。
+//
+// この門は低い側が読めるコマにしか触れない（`lowBandReadable`）。
+// 読めないコマは門をどれだけ厳しくしても声の証拠として残るので、
+// **その割合が「割合をどこまで落とせるか」の下限**になる。下限が 5% の線より上なら、
+// どんな量を持ってきてもその素材は素材単位に止まらない。
+//
+// 測ると、止めたい側の下限が線の上（`music-thump` 8.9%）で、
+// 守りたい側の下限が線の下（`speech-clipped-bgm` 0.0%）だった。**向きが逆である。**
+{
+  console.log('\n向きの門で素材単位に止められるのは、どの素材か（下限 = 門が触れないコマ）\n');
+  console.log(
+    `${pad('素材', 34)}${pad('声', 4)}${pad('門なし', 8)}${pad('下限', 8)}${pad('止まりうる', 12)}${pad('線 0.01', 9)}${pad('線 0.4', 8)}`,
+  );
+  console.log('-'.repeat(34 + 4 + 8 + 8 + 12 + 9 + 8));
+  const line = DEFAULT_JET_CUT.minSpeechRatio;
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const opts = { ...DEFAULT_JET_CUT, mode: 'speech' };
+    const thresholdDb = autoThresholdDb(track, opts.sensitivity);
+    const sounding = (i) => track.db[i] > thresholdDb && track.db[i] > SILENCE_DB;
+    const holdFrames = Math.max(0, Math.round(opts.envelopeHold / track.hop));
+    const runGate = envelopeGateFrames(
+      features.envelopeFlux,
+      sounding,
+      opts.minEnvelopeChange,
+      Math.max(1, Math.round(opts.minEnvelopeRun / track.hop)),
+      holdFrames,
+    );
+    const readable = lowBandReadable(features.lowLevel, thresholdDb, modulationWindowFrames(track.hop));
+    // 判定と同じ数え方で「声の候補」を作り、そのうち門が触れないコマを下限として数える。
+    let soundingFrames = 0;
+    let strict = 0;
+    let floor = 0;
+    let inSpeech = false;
+    let openUntil = -1;
+    for (let i = 0; i < track.db.length; i += 1) {
+      if (!sounding(i)) {
+        inSpeech = false;
+        openUntil = -1;
+        continue;
+      }
+      soundingFrames += 1;
+      const score = features.speechScore[i];
+      inSpeech = inSpeech ? score >= Math.min(opts.speechExit, opts.speechThreshold) : score >= opts.speechThreshold;
+      if (!inSpeech) continue;
+      if (features.envelopeChange[i] >= opts.minEnvelopeChange) openUntil = i + holdFrames;
+      if (i > openUntil) continue;
+      if (!runGate[i]) continue;
+      strict += 1;
+      if (!readable[i]) floor += 1;
+    }
+    // 実際に線を振って、下限より下へ行かないことを確かめる。
+    // `skewDropped` が立つ素材は門を外した後の割合が出るので、そこは「外した」と書く。
+    const at = (maxLowSkew) => {
+      const p = planJetCut(
+        track,
+        { ...opts, maxLowSkew },
+        features.speechScore,
+        features.shapeChange,
+        features.envelopeChange,
+        features.envelopeFlux,
+        features.lowLevel,
+        features.lowModulationDepth,
+        features.lowLevelSkew,
+      );
+      return p.skewDropped ? '外した' : `${(p.speechRatio * 100).toFixed(1)}%`;
+    };
+    const pc = (a) => (soundingFrames > 0 ? `${((a / soundingFrames) * 100).toFixed(1)}%` : '—');
+    const canStop = soundingFrames > 0 && floor / soundingFrames < line ? '止まりうる' : '止まらない';
+    console.log(
+      `${pad((fixture.hard ? '※ ' : '  ') + fixture.name.replace('.wav', ''), 34)}${pad(fixture.speech ? '有' : '無', 4)}` +
+        `${pad(pc(strict), 8)}${pad(pc(floor), 8)}${pad(canStop, 12)}${pad(at(0.01), 9)}${pad(at(0.4), 8)}`,
+    );
+  }
+  console.log(`\n線は ${line * 100}%。「下限」= 声の候補として数えられたのに、低い側が読めず門が触れないコマ。`);
+  console.log('「止まりうる」= 下限が線より下。門を厳しくすれば素材単位に止められてしまう素材。');
+  console.log('\n**止めたい側は線に届かず、守りたい声の側が先に線を割る。向きが逆である。**');
+  console.log('  ※ music-thump        下限 8.9%  … 線 0.01 まで下げても 14.3% 止まり');
+  console.log('  ※ music-thump-break  下限 19.1% … 同じく 29.5% 止まり');
+  console.log('  ※ speech-sparse-bgm  下限 0.0%  … 線 0.01 で 4.8%（**声のある素材が線を割る**）');
+  console.log('  ※ speech-clipped-bgm 下限 0.0%  … 線 0.4 でも 1.5%（既定では門を外して救う）');
+  console.log('\n7 通り測って全部駄目だったのは、量の選び方ではなく**線より下へ行けなかった**から。');
+  console.log('だから `planJetCut` は、割合だけが線を割っていてそれを立てたのが門なら、その素材では門を外す。');
+  console.log('\n**次にコマ単位の門を素材単位の数え方へ効かせるときは、まずこの「下限」を出すこと。**');
+  console.log('そこが線より上なら、どんな量を持ってきてもその素材は素材単位には止まらない。');
+}
