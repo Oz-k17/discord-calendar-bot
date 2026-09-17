@@ -21,9 +21,10 @@ import { readWav } from '../fixtures/wav.mjs';
 import { isSpeechAt, SHORT_FIXTURES } from '../fixtures/spec.mjs';
 
 const { analyzeLoudness, SILENCE_DB } = await import('./src/loudness.ts');
-const { analyzeFeatures, FEATURE_NAMES, MOD_SPLIT_HZ } = await import('./src/features.ts');
+const { analyzeFeatures, FEATURE_NAMES, MOD_SPLIT_HZ, modulationWindowFrames } = await import('./src/features.ts');
 
-const { autoThresholdDb, cutSoundingSeconds, DEFAULT_JET_CUT, envelopeGateFrames, planJetCut } = await import('./src/silence.ts');
+const { autoThresholdDb, cutSoundingSeconds, DEFAULT_JET_CUT, envelopeGateFrames, lowBandReadable, planJetCut } =
+  await import('./src/silence.ts');
 /**
  * 特徴量の出し方。既定は**出荷されている側**（全域）に揃える。
  *
@@ -72,6 +73,8 @@ function auc(positive, negative) {
 const DESCENT_GATE = 0.65;
 /** 「高い帯域だけが動いた割合」で門を置くとしたらどこか。同じく表を見て決め直せるように。 */
 const HIGH_ALONE_GATE = 0.5;
+/** 向きの門の保持を「素材単位の数え方」にだけ効かせるとしたら何秒か（2026-09-17 の段で使う）。 */
+const STRICT_HOLD_SECONDS = 0.5;
 
 const pad = (s, n) => String(s).padEnd(n, ' ');
 const num = (v, n) => (v === null ? pad('—', n) : String(v.toFixed(3)).padStart(n, ' '));
@@ -674,6 +677,117 @@ console.log(
   console.log('music-flute は 81% で 4 番目だが、声のある speech-sustained-hats が 76% で並ぶ。');
   console.log('「線の近くに居る割合」は、線の下にべったり居るのと、線をまたぐのを区別できない。');
   console.log('またぐ回数を数える方向はまだ試していないが、実害が 1 秒弱しかないので後回しでよい。');
+}
+
+// --- 向きの門を入れた先で、素材単位に止められるか（2026-09-17）---
+//
+// 9/16 の 3 回目に、向きの門（`maxLowSkew`）で `speech-sparse-thump` の 5.60 秒が閉まった。
+// ところが同じ門が声ゼロの `music-thump` を 5.94 秒切る。割合が 99% → 25% と**半端に**落ち、
+// 5% の線を割らないので素材単位で止まらないため。9/16 の 2 回目は `music-hats` で
+// 同じ形を「深さ（dB）」で止めて既定にできたので、ここでも別の量を探した。
+//
+// **7 通り測って、全部駄目だった。** 下の表がその中身で、footer に理由を書いてある。
+// 次の回がここへ戻ってきたとき、同じ穴を掘り直さずに済むように測り方ごと残す。
+{
+  console.log('\n向きの門（0.4）を入れた先で、素材単位に止められるか\n');
+  console.log(
+    `${pad('素材', 34)}${pad('声', 4)}${pad('いま', 7)}${pad('読+向<0', 9)}${pad('保持.5', 8)}` +
+      `${pad('打点外の深さ', 14)}${pad('読めた', 8)}`,
+  );
+  console.log('-'.repeat(34 + 4 + 7 + 9 + 8 + 14 + 8));
+  const opts = { ...DEFAULT_JET_CUT, maxLowSkew: 0.4 };
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const thresholdDb = autoThresholdDb(track, opts.sensitivity);
+    // 判定と同じ道筋をなぞる。ここがずれると、測った数字が判定の出来と噛み合わない。
+    const sounding = (i) => track.db[i] > thresholdDb && track.db[i] > SILENCE_DB;
+    const holdFrames = Math.max(0, Math.round(opts.envelopeHold / track.hop));
+    const runGate = envelopeGateFrames(
+      features.envelopeFlux,
+      sounding,
+      opts.minEnvelopeChange,
+      Math.max(1, Math.round(opts.minEnvelopeRun / track.hop)),
+      holdFrames,
+    );
+    const readable = lowBandReadable(features.lowLevel, thresholdDb, modulationWindowFrames(track.hop));
+    // 素材単位の数え方にだけ効かせる保持。値は `envelopeHold` と揃えてあるが、
+    // ここは判定ではなく測る側なので、判定の既定に引きずられないよう別に置く。
+    const strictHold = Math.round(STRICT_HOLD_SECONDS / track.hop);
+    let inSpeech = false;
+    let openUntil = -1;
+    let closeUntil = -1;
+    let closeUntilHeld = -1;
+    let soundingFrames = 0;
+    let now = 0;
+    let negative = 0;
+    let held = 0;
+    // 「打点でないコマ」だけで読んだ深さ。向きで読む場所を選び、深さで判断する組み合わせ。
+    let depthOffBeat = 0;
+    let readableFrames = 0;
+    for (let i = 0; i < track.db.length; i += 1) {
+      if (readable[i]) {
+        readableFrames += 1;
+        if (features.lowLevelSkew[i] < opts.maxLowSkew && features.lowModulationDepth[i] > depthOffBeat) {
+          depthOffBeat = features.lowModulationDepth[i];
+        }
+      }
+      if (!sounding(i)) {
+        inSpeech = false;
+        openUntil = -1;
+        closeUntil = -1;
+        closeUntilHeld = -1;
+        continue;
+      }
+      soundingFrames += 1;
+      const score = features.speechScore[i];
+      inSpeech = inSpeech ? score >= Math.min(opts.speechExit, opts.speechThreshold) : score >= opts.speechThreshold;
+      if (!inSpeech) continue;
+      if (readable[i] && features.lowLevelSkew[i] >= opts.maxLowSkew) {
+        closeUntil = i;
+        closeUntilHeld = i + strictHold;
+      }
+      if (i <= closeUntil) continue;
+      if (features.envelopeChange[i] >= opts.minEnvelopeChange) openUntil = i + holdFrames;
+      if (i > openUntil) continue;
+      if (!runGate[i]) continue;
+      now += 1;
+      // ① 読めるコマで、向きが 0 より下のものだけを声の証拠として数える
+      if (readable[i] && features.lowLevelSkew[i] < 0) negative += 1;
+      // ② 門の保持（0.5 秒）を、コマ単位の切り口ではなく素材単位の数え方にだけ効かせる
+      if (i > closeUntilHeld) held += 1;
+    }
+    const pc = (a) => (soundingFrames > 0 ? `${Math.round((a / soundingFrames) * 100)}%` : '—');
+    console.log(
+      `${pad((fixture.hard ? '※ ' : '  ') + fixture.name, 34)}${pad(fixture.speech ? '有' : '無', 4)}` +
+        `${pad(pc(now), 7)}${pad(pc(negative), 9)}${pad(pc(held), 8)}` +
+        `${pad(`${depthOffBeat.toFixed(2)}dB`, 14)}${pad(`${(readableFrames * track.hop).toFixed(2)}s`, 8)}`,
+    );
+  }
+  console.log(`\n線は ${DEFAULT_JET_CUT.minSpeechRatio * 100}%（割合）と ${DEFAULT_JET_CUT.minModulationDepth}dB（深さ）。`);
+  console.log('「読+向<0」= 読めるコマで向きが 0 より下のものだけを声の証拠として数える。');
+  console.log('「保持.5」= 門の保持 0.5 秒を、コマ単位の切り口ではなく素材単位の数え方にだけ効かせる。');
+  console.log('「打点外の深さ」= 向きが線より下のコマだけで読んだ深さの最大。');
+  console.log('\n**3 通りとも線が引けない。止めたい 2 本と、守りたい声の薄い素材が同じ所に並ぶ:**');
+  console.log('  読+向<0   ※ music-thump-break 10% 対 ※ speech-sparse-bgm 5% / speech-sparse-hats 6%');
+  console.log('  保持.5    ※ music-thump 10% 対 ※ speech-sparse-bgm 7% / speech-sparse-hats 7%');
+  console.log('  打点外深さ ※ music-thump 1.18dB 対 ※ speech-bgm-loud 1.59dB（判断される素材の中で声側の最小）');
+  console.log('\n「読めた」が短い素材の 0.00dB は「動かなかった」ではなく「判断していない」。');
+  console.log(`深さの判定は読めた秒数が ${DEFAULT_JET_CUT.minDepthSeconds}s に満たなければ黙って通す（乾いた声はここに落ちる）。`);
+  console.log('\n**厳しくすると、音楽の取りこぼしと声の証拠が同じだけ減る。** 声が尺の 2 割しか無い素材では');
+  console.log('5% までの余裕が（声の割合 0.2）×（数えられた割合）しかないので、先にこちらが線を割る。');
+  console.log('\n**同じ日に、ほかに 4 通り測って捨てた**（数字は JOURNAL の 2026-09-17 を参照）:');
+  console.log('  ・向きが負へ届いた秒数 … ※ music-thump-break 1.16s 対 ※ speech-sparse-thump 1.66s。');
+  console.log('    しかも ※ speech-clipped-bgm では負の秒の 0% しか声でない（声を見ていない）。');
+  console.log('  ・生き延びたコマの続きの長さ … 0.5 秒以上で ※ music-thump 9% 対 ※ speech-sparse-bgm 15%。');
+  console.log('  ・低い側の音量が等間隔に繰り返しているか（自己相関の山の立ち方）…');
+  console.log('    ※ music-thump 0.243 対 ※ speech-sparse-thump の声 0.197。打点のほうが規則正しく見えない。');
+  console.log('    減衰 0.035 秒はコマ幅 0.02 秒で 1〜2 コマなので、繰り返しの形がコマに残らない。');
+  console.log('  ・打点（700Hz 以下）を外した「間の帯」(700〜2000Hz) … 読めたコマが 0.00s になる。');
+  console.log('    `lowBandReadable` は**全域のしきい値**を当てるので、帯を狭めると一度も鳴っている扱いにならない。');
 }
 
 console.log('\n※ は意地悪な素材（BGM が大きい / 刻む打楽器 / 震える楽器 / 母音を伸ばす声 など）。');

@@ -1943,6 +1943,17 @@ export function runSelfTest(): TestResult[] {
         `読めた ${(readableFrames * hop).toFixed(2)}s`,
       );
 
+      // ①' **読んでよいかは、全域と同じしきい値で決めている。** だから見る帯を狭めると、
+      //     その帯の音量だけが下がって一度も線を超えず、読めるコマが丸ごと無くなる。
+      //     2026-09-17 に、打点（700Hz 以下）を外した 700〜2000Hz の帯で深さを読もうとして
+      //     全素材が 0.00s になり、そこで初めて気づいた。**狭めた帯で測るなら、
+      //     しきい値も一緒に持ち直さないと「動かなかった」ではなく「測れていない」になる。**
+      const narrow = constant(-50);
+      const narrowReadable = lowBandReadable(narrow, -40, windowFrames);
+      let narrowFrames = 0;
+      for (let i = 0; i < frames; i += 1) narrowFrames += narrowReadable[i];
+      check('全域のしきい値より静かな帯は、1 コマも読めない', narrowFrames === 0, `読めた ${(narrowFrames * hop).toFixed(2)}s`);
+
       const sr = 16000;
       const sounding = analyzeLoudness(makeTone(4, sr, [{ from: 0, to: 4 }]), 0.02);
       const n = sounding.db.length;
