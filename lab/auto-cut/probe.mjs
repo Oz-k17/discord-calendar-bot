@@ -23,7 +23,7 @@ import { isSpeechAt, SHORT_FIXTURES } from '../fixtures/spec.mjs';
 const { analyzeLoudness, SILENCE_DB } = await import('./src/loudness.ts');
 const { analyzeFeatures, FEATURE_NAMES, MOD_SPLIT_HZ, modulationWindowFrames } = await import('./src/features.ts');
 
-const { autoThresholdDb, cutSoundingSeconds, DEFAULT_JET_CUT, envelopeGateFrames, lowBandReadable, planJetCut } =
+const { autoThresholdDb, cutSoundingSeconds, DEFAULT_JET_CUT, envelopeGateFrames, lowBandDepthSeconds, lowBandReadable, planJetCut } =
   await import('./src/silence.ts');
 /**
  * 特徴量の出し方。既定は**出荷されている側**（全域）に揃える。
@@ -1000,4 +1000,72 @@ console.log('0.5 を下回るのは「逆向きに効いている」という意
   console.log('\n下限は「窓 ÷ 尺」なので、尺を伸ばすほど外れやすくなる（同じ素材をつないで実測）:');
   console.log('  13s 下限 4.6% → 実害 1.60s ／ 26s 2.3% → 3.20s ／ 39s 1.5% → 4.80s ／ 65s 0.9% → 8.00s');
   console.log('**13 秒で線のすぐ下だったのは素材の都合で、現実の尺ではもっと外れる。**');
+}
+
+// --- 深さ（dB）の線は、群を分けていない（2026-09-18）---
+//
+// 深さは 2026-09-16（2 回目）に「割合では線を引けない」を解いた量として既定になった。
+// ところが深さも**比**である。dB の列の揺れ幅なので、線形に直せば
+// 「窓の中の最大と最小の比」でしかなく、**一定の伴奏を下に敷くと縮む**。
+// 声が動かした絶対量は変わらないのに、伴奏が大きいほど値が下がる（検算 ⑥）。
+//
+// だから声のある素材が、伴奏を上げるだけで音楽の側へ滑っていく。
+// この段は**線の上下に誰が居るか**を出す。素材が増えたら線を置き直すための表。
+{
+  console.log('\n低い側の揺れの深さ（dB）— 線の上下に誰が居るか\n');
+  console.log(`${pad('素材', 30)}${pad('声', 4)}${pad('深さ最大', 10)}${pad('読めた', 10)}線との関係`);
+  console.log('-'.repeat(30 + 4 + 10 + 10 + 12));
+  const line = DEFAULT_JET_CUT.minModulationDepth;
+  const rows = [];
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const thresholdDb = autoThresholdDb(track, DEFAULT_JET_CUT.sensitivity);
+    const depth = lowBandDepthSeconds(
+      features.lowLevel,
+      features.lowModulationDepth,
+      track.hop,
+      thresholdDb,
+      modulationWindowFrames(track.hop),
+      line,
+    );
+    // 読めたコマが足りない素材は、そもそも深さでは判断していない（黙って通す側）。
+    const judged = depth.judged >= DEFAULT_JET_CUT.minDepthSeconds;
+    rows.push({ fixture, max: depth.max, judged: depth.judged, decides: judged });
+  }
+  rows.sort((a, b) => a.max - b.max);
+  for (const r of rows) {
+    const stops = r.decides && r.max < line;
+    // 声があるのに止まる／声が無いのに通る、が実害の出る側。
+    // ここで言えるのは**深さの判定だけ**の結論。`music-swell` のように
+    // 割合や形で止まる素材も「通る」に出るので、素材の最終的な扱いと混ぜて読まないこと。
+    const mark = !r.decides
+      ? '判断しない'
+      : stops
+        ? r.fixture.speech
+          ? '止まる ← 声があるのに'
+          : '止まる'
+        : r.fixture.speech
+          ? '通る'
+          : '通る（深さでは止まらない）';
+    console.log(
+      `${pad((r.fixture.hard ? '※ ' : '  ') + r.fixture.name.replace('.wav', ''), 30)}${pad(r.fixture.speech ? '有' : '無', 4)}` +
+        `${pad(r.max.toFixed(3), 10)}${pad(r.judged.toFixed(2) + 's', 10)}${mark}`,
+    );
+  }
+  console.log(`\n線は ${line}dB（silence.ts の \`minModulationDepth\`）。\`LAB_DEPTH=0.42 npm run lab:bench\` で振り直せる。`);
+  console.log('「判断しない」= 読めたコマが 1.28 秒に足りない素材（深さでは何も言わない）。');
+  console.log('**この段の結論は深さの判定だけのもの。** 割合や形で止まる素材も「通る」に出る。');
+  console.log('\n**この量は群を分けていない。** 伴奏を上げるだけで、声のある素材が音楽の側へ滑る');
+  console.log('（`speech-flat-bgm*.wav` は `speech-bgm-loud` からうねりを外しただけの素材）:');
+  console.log('\n  伴奏の大きさ  0.4    0.5    0.6    0.7    0.8    1.0    1.2');
+  console.log('  深さ最大      1.09   0.85   0.69   0.58   0.50   0.39   0.34   ← すべて声あり');
+  console.log('  （声は 0.5。1.2 は声より 7.6dB 大きい）');
+  console.log('\n声ゼロの ※ music-chords-faster が 0.361 なので、**伴奏が声より 7.6dB 大きくなると**');
+  console.log('**声のある素材のほうが下に来る。** 線をどこに置いても、その 2 本は分けられない。');
+  console.log('いまの 0.5 は「止めたい最大 0.361」と「守ると決めた下限 0.688」の間を比で等しく取っただけで、');
+  console.log('**群の切れ目ではない。素材が増えたらまた動く線である。**');
 }

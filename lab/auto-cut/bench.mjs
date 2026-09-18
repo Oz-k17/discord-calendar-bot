@@ -128,6 +128,9 @@ for (const file of files) {
       mode: 'speech',
       ...(process.env.LAB_NO_RUN ? { minEnvelopeRun: 0 } : {}),
       ...(process.env.LAB_NO_LEAD ? { speechLeadIn: 0 } : {}),
+      // 低い側の揺れの「深さ」の線（dB）。既定 0.8。線の置き場所は素材を足すたびに
+      // 動き得るので、いつでも振り直せるようにしておく（`LAB_DEPTH=0.5`）。
+      ...(process.env.LAB_DEPTH ? { minModulationDepth: Number(process.env.LAB_DEPTH) } : {}),
       // 向きの門は既定では入っていない（silence.ts の `maxLowSkew` の注を参照）。
       // `LAB_SKEW=1` で線 0.4、`LAB_SKEW=0.6` のように線そのものも渡せる。
       ...(process.env.LAB_SKEW ? { maxLowSkew: Number(process.env.LAB_SKEW) === 1 ? 0.4 : Number(process.env.LAB_SKEW) } : {}),

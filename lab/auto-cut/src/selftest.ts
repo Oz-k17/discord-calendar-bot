@@ -1757,6 +1757,45 @@ export function runSelfTest(): TestResult[] {
       // ⑤ まったく動かない列は 0。`music-hats` の低い側がこれ。
       const flat = middle(modulationDepthDb(levelTrack(0, 4.5)));
       check('動かない列の深さは 0', flat < 0.01, `${flat.toFixed(4)}dB`);
+
+      // ⑥ **一定の底を足すと、同じ揺れでも深さは縮む**（2026-09-18）。
+      //
+      //    ③ が言っているのは「**全体**を何倍しても動かない」で、
+      //    **底だけを持ち上げると動く。** 深さは dB の列の揺れ幅なので、
+      //    線形に直せば「窓の中の最大と最小の比」でしかない。
+      //    下に一定の伴奏が敷かれるほど比は 1 に近づき、値は縮む。
+      //
+      //    ここが**素材単位の判定の線が素材ごとに動く理由**で、
+      //    実際 `speech-bgm-loud`（1.59dB）はうねりを止めるだけで 1.09dB、
+      //    伴奏を声より大きくすると 0.69dB まで落ちる。
+      //    列は線形の包絡から組む（dB の列に定数を足しても「底を敷いた」ことにはならない）。
+      const depthUnderFloor = (floor: number) => {
+        const db = new Float32Array(frames);
+        for (let i = 0; i < frames; i += 1) {
+          // 音節の速さで 0.1〜0.9 に揺れる「声」に、一定の「伴奏」を足してから dB にする。
+          const voice = 0.5 + 0.4 * Math.sin(2 * Math.PI * 4.5 * i * hop);
+          db[i] = 20 * Math.log10(voice + floor);
+        }
+        return middle(modulationDepthDb({ hop, db, duration: frames * hop }));
+      };
+      const bare = depthUnderFloor(0);
+      const onFloor = depthUnderFloor(1);
+      check(
+        '一定の底を足すと、同じ揺れでも深さは縮む（深さも比である）',
+        onFloor < bare / 3,
+        `底なし ${bare.toFixed(2)}dB → 底あり ${onFloor.toFixed(2)}dB`,
+      );
+
+      // ⑦ 線の置き場所を、測った 2 つの数字で挟んで固定しておく。
+      //    止めたい側の最大は `music-chords-faster` の 0.361dB（声ゼロ）、
+      //    守ると決めた下限は `speech-flat-bgm-loud` の 0.688dB（声あり）。
+      //    **群が分かれていない量なので、線は宣言でしかない。**
+      //    ここを外れたら、それは素材が増えたのではなく線がずれたということ。
+      check(
+        '深さの線は、測った 0.361dB と 0.688dB の間にある',
+        DEFAULT_JET_CUT.minModulationDepth > 0.361 && DEFAULT_JET_CUT.minModulationDepth < 0.688,
+        `${DEFAULT_JET_CUT.minModulationDepth}dB`,
+      );
     }
 
     // --- 深さを「読んでよいコマだけ」で集計する（lowBandDepthSeconds）---
