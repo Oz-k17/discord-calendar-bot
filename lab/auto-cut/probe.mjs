@@ -1279,3 +1279,303 @@ console.log('0.5 を下回るのは「逆向きに効いている」という意
     console.log('残っているのは**倍率の基準を窓の外から持ってくる**手だけ（素材の音量は伴奏込みなので使えない）。');
   }
 }
+
+// --- 倍率の基準を窓の外から持ってくる手は、そもそも成り立つか（2026-09-18・3 回目）---
+//
+// 前の回の積み残しの第一候補。`energyModulationDepthDb`（対数を外した深さ）は
+// **底に不変・大きさを持つ**が、**倍率に不変でない**（素材を 2 倍すれば 6dB 上がる）。
+// 残っていた道は「倍率の基準を素材の中から持ってくる」＝ 2 段階にする形だけだった。
+//
+// この段は、その道が**塞がっている**ことを 3 通りの基準で示す。
+// 結論を先に書くと、**どの基準も、声の無い素材では背景から作られる。**
+// 素材の中に「声ならこれくらいの大きさだ」と言うものが無い。
+{
+  const median = (a) => {
+    const s = [...a].sort((x, y) => x - y);
+    return s.length ? s[Math.floor(s.length / 2)] : NaN;
+  };
+  const dB = (v) => (v > 0 ? 10 * Math.log10(v) : NaN);
+
+  // 素材を 1 回だけ読んで、以下の 3 つの段で使い回す（26 本 × 3 回読むと分待たされる）。
+  const measured = [];
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const thresholdDb = autoThresholdDb(track, DEFAULT_JET_CUT.sensitivity);
+    const readable = lowBandReadable(features.lowLevel, thresholdDb, modulationWindowFrames(track.hop));
+    const energy = energyModulationDepthDb({ hop: track.hop, db: features.lowLevel, duration: track.duration });
+    // 分子と同じ土俵（低い側のエネルギーの列）で基準を作る。ここを track.db で作ると
+    // 「低い側の揺れを、全域の音量で割る」ことになって、何を測ったのか読めなくなる。
+    const power = Float64Array.from(features.lowLevel, (db) => 10 ** (Math.max(SILENCE_DB + 40, db) / 10));
+
+    let judged = 0;
+    let energyMax = -Infinity;
+    const readableEnergy = [];
+    for (let i = 0; i < track.db.length; i += 1) {
+      if (!readable[i]) continue;
+      judged += 1;
+      readableEnergy.push(energy[i]);
+      if (energy[i] > energyMax) energyMax = energy[i];
+    }
+    // 「最大を基準に取る」を素材単位で読むための量。**最大からどれだけ離れたコマが並んでいるか。**
+    // 最大そのものを基準にすると定義から 0 にしかならないので、中央のコマで見る。
+    const energyMedianRel = readableEnergy.length ? median(readableEnergy) - energyMax : NaN;
+
+    // 正解の発話区間から作る「理想の基準」。**手では作れない量**で、
+    // 実装の当てではなく「作れたとしても効くのか」を先に確かめるために置いている。
+    const onIdx = [];
+    const offIdx = [];
+    for (let i = 0; i < track.db.length; i += 1) (isSpeechAt(fixture, i * track.hop) ? onIdx : offIdx).push(i);
+    const oracle = onIdx.length && offIdx.length ? median(onIdx.map((i) => power[i])) - median(offIdx.map((i) => power[i])) : NaN;
+
+    const plan = planJetCut(
+      track,
+      { mode: 'speech' },
+      features.speechScore,
+      features.shapeChange,
+      features.envelopeChange,
+      features.envelopeFlux,
+      features.lowLevel,
+      features.lowModulationDepth,
+      features.lowLevelSkew,
+    );
+    const kept = new Uint8Array(track.db.length);
+    for (const r of plan.keep) {
+      const from = Math.max(0, Math.round(r.start / track.hop));
+      const to = Math.min(track.db.length, Math.round(r.end / track.hop));
+      for (let i = from; i < to; i += 1) kept[i] = 1;
+    }
+    const keepE = [...power.keys()].filter((i) => kept[i]).map((i) => power[i]);
+    const cutE = [...power.keys()].filter((i) => !kept[i]).map((i) => power[i]);
+    // 1 段目の結論から作る、実際に手の届く基準（＝ 2 段階）。
+    const stage2 = keepE.length && cutE.length ? median(keepE) - median(cutE) : NaN;
+
+    measured.push({
+      fixture,
+      track,
+      features,
+      thresholdDb,
+      energy,
+      energyMax,
+      energyMedianRel,
+      judged: judged * track.hop,
+      oracle,
+      stage2,
+      level: power.reduce((a, b) => a + b, 0) / power.length,
+      cutSeconds: plan.cut.reduce((a, r) => a + (r.end - r.start), 0),
+    });
+  }
+
+  console.log('\n\n2 段階の基準（発話の区間の声の大きさ）は、どの素材で作れるか\n');
+  console.log(`${pad('素材', 30)}${pad('声', 4)}${pad('ｵﾗｸﾙ基準', 12)}${pad('2段階の基準', 14)}1段目が落とした秒`);
+  console.log('-'.repeat(74));
+  for (const m of measured) {
+    if (m.judged < DEFAULT_JET_CUT.minDepthSeconds) continue;
+    console.log(
+      `${pad((m.fixture.hard ? '※ ' : '  ') + m.fixture.name.replace('.wav', ''), 30)}${pad(m.fixture.speech ? '有' : '無', 4)}` +
+        `${pad(Number.isFinite(dB(m.oracle)) ? dB(m.oracle).toFixed(2) : '作れない', 12)}` +
+        `${pad(Number.isFinite(dB(m.stage2)) ? dB(m.stage2).toFixed(2) : '作れない', 14)}${m.cutSeconds.toFixed(2)}s`,
+    );
+  }
+  {
+    const judged = measured.filter((m) => m.judged >= DEFAULT_JET_CUT.minDepthSeconds);
+    const ok = (g) => judged.filter((m) => m.fixture.speech === g && Number.isFinite(dB(m.oracle))).length;
+    const all = (g) => judged.filter((m) => m.fixture.speech === g).length;
+    console.log(`\nオラクル基準が作れた素材: 声あり ${ok(true)}/${all(true)} ・ **声なし ${ok(false)}/${all(false)}**`);
+    console.log('\n**これが行き止まりの正体。** 基準は「発話の区間の声の大きさ」なので、');
+    console.log('**声の無い素材では定義そのものが無い。** ところが素材単位の判定が答えを出したいのは');
+    console.log('まさにその側で、**分母が要るのは声なしの側、分母が作れるのは声ありの側**という向きになっている。');
+    console.log('正解を渡しても作れないので、1 段目の精度を上げても届かない。');
+    console.log('\n「基準が作れなければ声なしと決める」という逃げ道も無い。1 段目が落とした秒が 0 の素材は');
+    console.log('**すでに 1 コマも削っていない**ので、その門は全素材で何も変えない（上の右端の列）。');
+  }
+
+  console.log('\n\n基準で割ると、素材単位の群は分かれるか（分子＝ｴﾈﾙｷﾞｰの深さ）\n');
+  const REFS = [
+    ['素材の音量', (m) => m.level],
+    ['2段階', (m) => m.stage2],
+    ['ｵﾗｸﾙ', (m) => m.oracle],
+  ];
+  console.log(`${pad('基準', 14)}${pad('作れた本数', 12)}${pad('声あり最小', 12)}${pad('声なし最大', 12)}隙間`);
+  console.log('-'.repeat(62));
+  for (const [name, pick] of REFS) {
+    const rows = measured
+      .filter((m) => m.judged >= DEFAULT_JET_CUT.minDepthSeconds && Number.isFinite(dB(pick(m))))
+      .map((m) => ({ speech: m.fixture.speech, v: m.energyMax - dB(pick(m)) }));
+    const sp = rows.filter((r) => r.speech).map((r) => r.v);
+    const mu = rows.filter((r) => !r.speech).map((r) => r.v);
+    if (!sp.length || !mu.length) {
+      console.log(`${pad(name, 14)}${pad(`${rows.length} 本`, 12)}片側が空なので線の話ができない`);
+      continue;
+    }
+    const gap = Math.min(...sp) - Math.max(...mu);
+    console.log(
+      `${pad(name, 14)}${pad(`${rows.length} 本`, 12)}${pad(Math.min(...sp).toFixed(2), 12)}${pad(Math.max(...mu).toFixed(2), 12)}` +
+        `${gap.toFixed(2)}dB ${gap > 0 ? '← 重なりなし' : '← 混ざる'}`,
+    );
+  }
+  console.log('\n「素材の音量」は**低い側のエネルギーの平均**（分子と同じ土俵）。前の段は全域の音量で');
+  console.log('割っていて -7.27 / -2.71 だが、0.02dB しか違わない。**帯を揃えても結論は動かない。**');
+  console.log('\n割らない生の分子は、この素材の並びでは**重なりなく割れる**（前の段）。');
+  console.log('**どちらの基準で割っても、割れていたものが混ざる。** 基準が素材ごとの散らばりを足しているだけ。');
+  console.log('「ｵﾗｸﾙ」は声なしでは作れないので、そもそも線の話にならない（それが上の表の要点）。');
+
+  // 3 つ目の基準（その素材の深さの最大）は、割ると定義から 0 にしかならない。
+  // **最大そのものではなく、最大からどれだけ離れたコマが並んでいるか**で読む。
+  console.log('\n\n基準を「その素材の深さの最大」に取ったとき、コマはどこに並ぶか\n');
+  console.log(`${pad('素材', 30)}${pad('声', 4)}中央のコマは最大から`);
+  console.log('-'.repeat(58));
+  {
+    const rows = measured
+      .filter((m) => m.judged >= DEFAULT_JET_CUT.minDepthSeconds && Number.isFinite(m.energyMedianRel))
+      .sort((a, b) => a.energyMedianRel - b.energyMedianRel);
+    for (const m of rows) {
+      console.log(
+        `${pad((m.fixture.hard ? '※ ' : '  ') + m.fixture.name.replace('.wav', ''), 30)}${pad(m.fixture.speech ? '有' : '無', 4)}` +
+          `${m.energyMedianRel.toFixed(2)}dB`,
+      );
+    }
+    const sp = rows.filter((m) => m.fixture.speech).map((m) => m.energyMedianRel);
+    const mu = rows.filter((m) => !m.fixture.speech).map((m) => m.energyMedianRel);
+    if (sp.length && mu.length) {
+      console.log(`\n声あり ${Math.min(...sp).toFixed(2)}〜${Math.max(...sp).toFixed(2)}dB / 声なし ${Math.min(...mu).toFixed(2)}〜${Math.max(...mu).toFixed(2)}dB`);
+      console.log('**群を分けていない。しかも並んでいる順が「声があるか」ですらない。**');
+      console.log('上から順に読むと、離れている側は**黙る時間のある素材**（疎な声 -13dB 台）、');
+      console.log('近い側は**鳴りっぱなしの素材**（乾いた声 -0.5dB、`bgm` -1.3dB）で、');
+      console.log('音楽はその間にまんべんなく散る。**測っているのは「鳴りっぱなしか」であって声ではない。**');
+    }
+  }
+  console.log('\nこの基準は声なしでも作れて倍率にも底にも不変（検算 ⑨）だが、');
+  console.log('**素材単位では上のとおり群を分けない。** コマ単位で声なしの素材まで混ぜると:');
+  {
+    // 記録に引用する数字なので、使い捨ての道具ではなくここから出す。
+    // 声なしの素材の**鳴っているコマ**のうち、線を超えたものの割合。
+    let over = 0;
+    let all = 0;
+    for (const m of measured) {
+      if (m.fixture.speech || !Number.isFinite(m.energyMax)) continue;
+      for (let i = 0; i < m.track.db.length; i += 1) {
+        if (!(m.track.db[i] > m.thresholdDb)) continue;
+        all += 1;
+        if (m.energy[i] - m.energyMax >= -3) over += 1;
+      }
+    }
+    if (all) console.log(`  線 -3dB で、**音楽のコマの ${((100 * over) / all).toFixed(1)}% が「声」の側に来る**`);
+  }
+  console.log('  （声の無い素材では、最大そのものが背景だから）。');
+  console.log('3 通りとも外れ方は同じで、**素材の中から持ってきた基準は、声が無ければ背景から作られる。**');
+
+  // --- 副産物：対数はもう一方向にも効いていた（2026-09-18・3 回目）---
+  //
+  // 9/18（2 回目）に見つけたのは「対数が**声の証拠を縮める**」ほう。
+  // 同じ列をコマ単位で測り直すと、**逆向き**がもう 1 つ出る。
+  // dB は**小さな打点の揺れを、大きな声の揺れと同じ重さで数える**（比だから）。
+  // 打点の合間は底へ落ちるので、dB の列では打点のほうが「深く」揺れて見える。
+  console.log('\n\nコマ単位で、声と背景を分ける力（AUC・鳴っているコマだけ）\n');
+  console.log(`${pad('素材', 30)}${pad('深さ(dB・既定)', 18)}${pad('ｴﾈﾙｷﾞｰの深さ', 16)}声/背景の中央値（dB の深さ）`);
+  console.log('-'.repeat(88));
+  const pooled = { db: { p: [], n: [] }, energy: { p: [], n: [] } };
+  for (const m of measured) {
+    if (!m.fixture.speech) continue;
+    const g = { dbP: [], dbN: [], eP: [], eN: [] };
+    for (let i = 0; i < m.track.db.length; i += 1) {
+      // 鳴っているコマだけ。無音を当てても「声を見分けた」ことにはならない。
+      if (!(m.track.db[i] > m.thresholdDb)) continue;
+      const speech = isSpeechAt(m.fixture, i * m.track.hop);
+      (speech ? g.dbP : g.dbN).push(m.features.lowModulationDepth[i]);
+      (speech ? g.eP : g.eN).push(m.energy[i]);
+    }
+    pooled.db.p.push(...g.dbP);
+    pooled.db.n.push(...g.dbN);
+    pooled.energy.p.push(...g.eP);
+    pooled.energy.n.push(...g.eN);
+    const a1 = auc(g.dbP, g.dbN);
+    const a2 = auc(g.eP, g.eN);
+    if (a1 === null) continue;
+    // 既定の量が 0.5 を割る＝**偶然より悪い**素材に印を付ける。そこがこの段の眼目。
+    const flag = a1 < 0.5 ? ' ← 偶然以下' : '';
+    console.log(
+      `${pad((m.fixture.hard ? '※ ' : '  ') + m.fixture.name.replace('.wav', ''), 30)}${pad(a1.toFixed(3) + flag, 18)}` +
+        `${pad(a2 === null ? '—' : a2.toFixed(3), 16)}${median(g.dbP).toFixed(2)} / ${median(g.dbN).toFixed(2)}`,
+    );
+  }
+  console.log('-'.repeat(88));
+  {
+    // 素材が一式そろっていないと片側が空になる。`auc` は null を返すので、
+    // そのまま toFixed すると落ちる（数字が出ないのは構わないが、段ごと止まるのは困る）。
+    const a1 = auc(pooled.db.p, pooled.db.n);
+    const a2 = auc(pooled.energy.p, pooled.energy.n);
+    console.log(
+      `${pad('全部混ぜて 1 本の線', 30)}${pad(a1 === null ? '—' : a1.toFixed(3), 18)}${a2 === null ? '—' : a2.toFixed(3)}`,
+    );
+  }
+  console.log('\n**既定の深さは、打楽器の上では偶然より悪い。** 声と背景の中央値が逆転している');
+  console.log('（`speech-drums` は 声 5.52 に対して打点 6.14 で、**打点のほうが深く揺れて見える**）。');
+  console.log('対数は比なので、**-30dB の打点の「10 倍」と、声の「10 倍」を同じ 10dB として数える。**');
+  console.log('打点の合間は底へ落ちるので、小さい打点ほど dB の列では深く見える。');
+  console.log('エネルギーの列で測ると向きが戻る（`speech-vowels-hats` は 2.60/2.35 が -25.27/-57.23 になる）。');
+  console.log('\n9/18（2 回目）に見つけたのは「対数が**声の証拠を縮める**」ほうだった。');
+  console.log('**同じ 1 行が、コマ単位では逆向きにも効いている。** 3 日追ってきた打点の問題と同じ根。');
+
+  // --- では「深さの最大」を基準にコマ単位の門を置けるか ---
+  //
+  // 素材単位では上のとおり駄目だが、**コマ単位の門は素材単位の判定が通した先でしか働かない。**
+  // ＝声ありと決まった素材の中だけで見れば、「最大は声である」が成り立つ余地がある。
+  // 倍率にも底にも不変で、声なしでも作れる（作っても意味が無いだけ）ので、形としては筋がよい。
+  console.log('\n\n声ありの素材だけで、コマ単位の線を振る（基準＝その素材の深さの最大）\n');
+  console.log(`${pad('線', 10)}${pad('声を残せた率', 16)}${pad('残したうち声', 16)}落とした背景のコマ`);
+  console.log('-'.repeat(62));
+  const forSweep = measured.filter((m) => m.fixture.speech && Number.isFinite(m.energyMax));
+  const sweep = (pick) => {
+    let tp = 0;
+    let fn = 0;
+    let fp = 0;
+    let tn = 0;
+    for (const m of forSweep) {
+      for (let i = 0; i < m.track.db.length; i += 1) {
+        if (!(m.track.db[i] > m.thresholdDb)) continue;
+        const speech = isSpeechAt(m.fixture, i * m.track.hop);
+        const keep = pick(m, i);
+        if (speech) keep ? (tp += 1) : (fn += 1);
+        else keep ? (fp += 1) : (tn += 1);
+      }
+    }
+    // 素材が欠けていると分母が 0 になる。NaN% を並べても読めないので「—」で出す。
+    const rate = (a, b) => (a + b > 0 ? `${((100 * a) / (a + b)).toFixed(1)}%` : '—');
+    return { recall: rate(tp, fn), precision: rate(tp, fp), rejected: rate(tn, fp) };
+  };
+  for (const x of [1, 2, 3, 4, 6, 8, 12]) {
+    const r = sweep((m, i) => m.energy[i] - m.energyMax >= -x);
+    console.log(`${pad(`-${x}dB`, 10)}${pad(r.recall, 16)}${pad(r.precision, 16)}${r.rejected}`);
+  }
+  {
+    const now = sweep((m, i) => m.features.speechScore[i] >= DEFAULT_JET_CUT.speechThreshold);
+    console.log(`\n${pad(`いまの声らしさ ${DEFAULT_JET_CUT.speechThreshold}`, 22)}${now.recall} / ${now.precision} / ${now.rejected}`);
+  }
+  console.log('\n**-6dB の線は、3 つの数字とも今のコマ単位の判定を上回る。** それでも入れていない。');
+  console.log('理由は下の「読めた秒」で、`speech-sparse-thump-loud.wav`（打点だけを 2 倍にした素材）が出す:');
+  console.log('');
+  console.log(`${pad('素材', 32)}${pad('読めた秒', 12)}深さの最大`);
+  console.log('-'.repeat(60));
+  for (const name of ['speech-sparse-thump.wav', 'speech-sparse-thump-loud.wav']) {
+    const m = measured.find((x) => x.fixture.name === name);
+    if (!m) continue;
+    console.log(
+      `${pad('※ ' + name.replace('.wav', ''), 32)}${pad(m.judged.toFixed(2) + 's', 12)}` +
+        `${Number.isFinite(m.energyMax) ? m.energyMax.toFixed(2) : '読めるコマなし'}`,
+    );
+  }
+  console.log('\n**壊れるのではなく、消える。** 0.04s は**コマ 2 つ**なので、');
+  console.log('基準（その素材の深さの最大）がコマ 2 つで決まっている＝もう何も測れていない。');
+  console.log('打点が大きくなると低い側が打点の合間にへこみ、');
+  console.log('`lowBandReadable`（窓が丸ごと鳴っているか）が読めるコマを返さなくなる。');
+  console.log('門は誤るのではなく**自分から働かなくなる**ので、数字の上では何も悪くならない。');
+  console.log('**いちばん要る素材でだけ、静かに居なくなる門**を入れることになる。');
+  console.log('2026-09-17 の「門は読めるコマにしか触れない」が、別の場所でもう一度出た形。');
+  console.log('\n次にここへ戻るなら、**`lowBandReadable` のしきい値**から。');
+  console.log('いまは全域と同じ自動しきい値を低い側にも当てているので、低い側が大きい素材ほど読めなくなる。');
+  console.log('（2026-09-17 の「狭めた帯で測るなら、しきい値も一緒に持ち直すこと」と同じ相手。）');
+}

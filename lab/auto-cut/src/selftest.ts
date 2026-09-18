@@ -1847,6 +1847,84 @@ export function runSelfTest(): TestResult[] {
         DEFAULT_JET_CUT.minModulationDepth > 0.361 && DEFAULT_JET_CUT.minModulationDepth < 0.688,
         `${DEFAULT_JET_CUT.minModulationDepth}dB`,
       );
+
+      // ⑧ **対数は、もう一方向にも効いている**（2026-09-18・3 回目）。
+      //
+      //    ⑥' で見たのは「対数が**声の証拠を縮める**」ほう。逆向きがもう 1 つある。
+      //    dB は比なので、**小さな打点の「10 倍」と、声の「10 倍」を同じ 10dB として数える。**
+      //    打点は合間に底へ落ちるので、**小さい打点ほど dB の列では深く揺れて見える。**
+      //
+      //    ここでは「大きく鳴りながら音節の速さで 0.5〜1.0 に揺れる声」と、
+      //    「うんと小さく、同じ速さで 0.01〜0.1 に落ち込む打点」を並べる。
+      //    **動いた絶対量は声のほうが 5 倍以上大きい**のに、dB の列では打点のほうが深い。
+      //    実測でも `speech-drums` は 声 5.52 に対して打点 6.14 で、既定の量の AUC は
+      //    0.430（偶然以下）になる。エネルギーの列で測ると 0.952 まで戻る。
+      const swingTrack = (high: number, low: number) => {
+        const db = new Float32Array(frames);
+        for (let i = 0; i < frames; i += 1) {
+          // 0〜1 の三角波ではなく正弦で作る（⑥ と同じ形にして、違いを列の取り方だけに絞る）。
+          const shape = 0.5 + 0.5 * Math.sin(2 * Math.PI * 4.5 * i * hop);
+          const amp = low + (high - low) * shape;
+          db[i] = 20 * Math.log10(amp);
+        }
+        return { hop, db, duration: frames * hop };
+      };
+      {
+        const voice = swingTrack(1.0, 0.5);
+        const thump = swingTrack(0.1, 0.01);
+        const voiceDb = middle(modulationDepthDb(voice));
+        const thumpDb = middle(modulationDepthDb(thump));
+        const voiceEnergy = middle(energyModulationDepthDb(voice));
+        const thumpEnergy = middle(energyModulationDepthDb(thump));
+        check(
+          'dB の列では、小さな打点のほうが大きな声より深く揺れて見える',
+          thumpDb > voiceDb,
+          `声 ${voiceDb.toFixed(2)}dB / 打点 ${thumpDb.toFixed(2)}dB`,
+        );
+        check(
+          'エネルギーの列で測ると向きが戻る（動いた絶対量の順になる）',
+          voiceEnergy > thumpEnergy,
+          `声 ${voiceEnergy.toFixed(2)}dB / 打点 ${thumpEnergy.toFixed(2)}dB`,
+        );
+      }
+
+      // ⑨ **基準を「その素材の深さの最大」に取ると、倍率にも底にも不変になる**
+      //    （2026-09-18・3 回目）。⑥'' の「倍率に不変でない」を外せる唯一の形で、
+      //    しかも 2 段階の基準と違って**声の無い素材でも作れる**。
+      //
+      //    **それでも入れていない。** 声の無い素材では最大そのものが背景なので、
+      //    全コマが「最大の近く」に来て素材単位の判定には使えない。
+      //    コマ単位でも、打点を大きくすると `lowBandReadable` が読めるコマを返さなくなり、
+      //    門が自分から消える（`speech-sparse-thump-loud.wav` で 12.38s → 0.04s）。
+      //    ここで固定しているのは**性質だけ**で、使ってよいという意味ではない。
+      {
+        const base = levelTrack(6, 4.5);
+        const relative = (track: LoudnessTrack) => {
+          const e = energyModulationDepthDb(track);
+          let max = -Infinity;
+          // 端は窓の埋め方で値が甘くなるので、ほかの検算と同じく真ん中だけを見る。
+          const from = Math.floor(track.db.length / 4);
+          const to = track.db.length - from;
+          for (let i = from; i < to; i += 1) if (e[i] > max) max = e[i];
+          return middle(e) - max;
+        };
+        const louder = { ...base, db: Float32Array.from(base.db, (v) => v + 6) };
+        check(
+          '最大を基準にすると、素材を 2 倍しても値は動かない',
+          near(relative(louder), relative(base), 0.01),
+          `${relative(base).toFixed(3)} → ${relative(louder).toFixed(3)}`,
+        );
+        // 底はエネルギーの列へ足す（⑥' と同じ理由。dB の列に足しても混ぜたことにならない）。
+        const withFloor = {
+          ...base,
+          db: Float32Array.from(base.db, (v) => 10 * Math.log10(10 ** (v / 10) + 10 ** (base.db[0] / 10))),
+        };
+        check(
+          '最大を基準にすると、一定の底を敷いても値は動かない',
+          near(relative(withFloor), relative(base), 0.01),
+          `${relative(base).toFixed(3)} → ${relative(withFloor).toFixed(3)}`,
+        );
+      }
     }
 
     // --- 深さを「読んでよいコマだけ」で集計する（lowBandDepthSeconds）---
