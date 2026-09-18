@@ -22,6 +22,7 @@ import { buildPeaks } from './peaks.ts';
 import {
   analyzeFeatures,
   centroidDescentRatio,
+  energyModulationDepthDb,
   highBandAloneRatio,
   levelSkewness,
   MOD_SPLIT_HZ,
@@ -1785,6 +1786,56 @@ export function runSelfTest(): TestResult[] {
         onFloor < bare / 3,
         `底なし ${bare.toFixed(2)}dB → 底あり ${onFloor.toFixed(2)}dB`,
       );
+
+      // ⑥' **縮ませているのは「比」ではなく対数だった**（2026-09-18・2 回目）。
+      //
+      //    ⑥ を「深さも比だから縮む」と読んでいたが、原因はもう一段手前にある。
+      //    無相関の音を混ぜると**エネルギーの列には定数が足されるだけ**で、
+      //    定数は窓の平均を引く工程で消える。**3〜6Hz の帯域には 1 ビットも残らない。**
+      //    縮むのは、その列を dB へ直してから引き算しているからでしかない。
+      //
+      //    ここでは ⑥ と違って**エネルギーの列に直に定数を足す**（⑥ は線形の包絡に足していた）。
+      //    包絡に足すと「声と伴奏が同じ位相で重なった」ことになり、混ぜたことにならない。
+      //    無相関なら足し合わさるのはエネルギーのほうなので、こちらが実際の混ざり方に近い。
+      const underEnergyFloor = (floor: number) => {
+        const db = new Float32Array(frames);
+        for (let i = 0; i < frames; i += 1) {
+          const voice = 0.5 + 0.4 * Math.sin(2 * Math.PI * 4.5 * i * hop);
+          db[i] = 10 * Math.log10(voice * voice + floor);
+        }
+        const t = { hop, db, duration: frames * hop };
+        return { db: middle(modulationDepthDb(t)), energy: middle(energyModulationDepthDb(t)) };
+      };
+      const noFloor = underEnergyFloor(0);
+      const withFloor = underEnergyFloor(4);
+      check(
+        'エネルギーの列に定数を足しても、エネルギーで測った深さは動かない',
+        near(withFloor.energy, noFloor.energy, 0.01),
+        `${noFloor.energy.toFixed(3)}dB → ${withFloor.energy.toFixed(3)}dB`,
+      );
+      check(
+        '同じ定数でも、dB へ直してから測ると深さは潰れる（犯人は対数）',
+        withFloor.db < noFloor.db / 3,
+        `${noFloor.db.toFixed(2)}dB → ${withFloor.db.toFixed(2)}dB`,
+      );
+
+      // ⑥'' **対数を外すと、倍率への不変性がそのまま外れる。**
+      //     ③ の「素材の音量を変えても動かない」がこちらでは成り立たない。
+      //     エネルギーなので 2 倍で 6dB ちょうど上がる。**この量を素材単位の線に使えない理由**が
+      //     ここで、素材 26 本が重なりなく割れていても隙間は 0.25dB しかない
+      //     （＝ 1 本を 0.5dB 下げれば声のある素材が音楽の側へ落ちる）。
+      //     3 つのうち 2 つしか取れない、というのが 2026-09-18・2 回目の結論。
+      {
+        const base = levelTrack(6, 4.5);
+        const twice = { ...base, db: Float32Array.from(base.db, (v) => v + 6) };
+        const a = middle(energyModulationDepthDb(base));
+        const b = middle(energyModulationDepthDb(twice));
+        check(
+          'エネルギーで測ると、素材を 2 倍しただけで 6dB 動く（倍率に不変ではない）',
+          near(b - a, 6, 0.1),
+          `${a.toFixed(2)}dB → ${b.toFixed(2)}dB（差 ${(b - a).toFixed(2)}dB）`,
+        );
+      }
 
       // ⑦ 線の置き場所を、測った 2 つの数字で挟んで固定しておく。
       //    止めたい側の最大は `music-chords-faster` の 0.361dB（声ゼロ）、

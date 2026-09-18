@@ -851,6 +851,25 @@ export function modulationRatio(track: LoudnessTrack, low = MOD_LOW, high = MOD_
  * 2026-09-16（2 回目）に割合からこちらへ移したのは
  * 「割合は揺れの大きさを捨てた比だった」からだが、**移した先も比だった。**
  * 捨てているものが「揺れの大きさ」から「伴奏の大きさ」へ移っただけになっている。
+ *
+ * ## 縮ませているのは「比」ではなく**対数**だった（2026-09-18・2 回目）
+ *
+ * 上を「比だから縮む」と書いたが、原因はもう一段手前にある。
+ * 無相関の音を混ぜると、**エネルギーの列には定数が足されるだけ**（E = E声 + E伴奏）。
+ * 定数は窓の平均を引く工程で消えるので、3〜6Hz の帯域には 1 ビットも残らない。
+ * **縮むのは、その列を dB へ直してから引き算しているから**（検算 ⑥'）。
+ *
+ * エネルギーの列に定数を足して両方で測ると、そこがはっきり分かれる:
+ *
+ * | 足した定数（声のエネルギー比） | ×0 | ×0.25 | ×1 | ×4 | ×16 |
+ * | --- | --- | --- | --- | --- | --- |
+ * | この量（dB の列で測る） | 7.851 | 2.751 | 1.297 | 0.447 | **0.125** |
+ * | `energyModulationDepthDb`（エネルギーの列） | -23.896 | -23.896 | -23.896 | -23.896 | **-23.896** |
+ *
+ * **本物の伴奏では原因が 2 つ重なる。** 伴奏は一定ではないので、自分の揺れも持ち込む。
+ * 切り分けると、伴奏 0 → 1.2 での 45 分の 1 のうち
+ * **対数が 23 倍ぶん・伴奏自身の揺れが 1.9 倍ぶん**だった（`lab:probe` の段）。
+ * 後者は本当に証拠が薄まっているので避けられないが、**前者は列の取り方の話**である。
  */
 export function modulationDepthDb(
   track: LoudnessTrack,
@@ -885,6 +904,85 @@ export function modulationDepthDb(
     for (let b = lowBin; b <= highBin; b += 1) band += scratch.mag[b] * scratch.mag[b];
     // パーセバル。片側だけを足しているので 2 倍して、窓長で割ると時間側の実効値になる。
     out[i] = Math.sqrt(2 * band) / n / hannRms;
+  }
+  return out;
+}
+
+/**
+ * 揺れの深さを、**dB の列ではなくエネルギーの列**で測ったもの（目盛りは dBFS）。
+ *
+ * `modulationDepthDb` と窓・帯域・端の埋め方は 1 つも変えていない。違いは
+ * **対数を取る前に測るか、取ってから測るか**だけ。並べて読むために切り出してある。
+ *
+ * ## なぜ置いてあるか（**既定では使っていない**）
+ *
+ * 一定の音を混ぜてもエネルギーの列には定数が足されるだけなので、
+ * この量は**底に完全に不変**（検算 ⑥'）。`modulationDepthDb` が 3 日追っていた
+ * 「伴奏を上げると声の証拠が縮む」は、こちらでは起きない。
+ * 実際、素材 26 本を**重なりなく割る**（`lab:probe` の段）:
+ *
+ * | | 声あり最小 | 声なし最大 | |
+ * | --- | --- | --- | --- |
+ * | `modulationDepthDb`（既定） | 0.688 | 1.882 | **逆転している** |
+ * | この量 | **-24.75** | **-25.00** | 重なりなし |
+ *
+ * ## それでも入れていない理由
+ *
+ * **対数を外すと、倍率への不変性がそのまま外れる。** この量は素材を 2 倍すれば 6dB 上がる。
+ * 上の「重なりなし」の隙間は **0.25dB しかない**ので、
+ * **素材 1 本を 0.5dB 下げるだけで、声のある素材が音楽の側へ落ちる**（実測）。
+ * 手元の素材が同じ音量に揃えて作ってあるから割れて見えているだけで、
+ * 録音レベルの揃っていない本物の素材には使えない。
+ *
+ * では素材の音量で割り戻せばよいかというと、**そこで元へ戻る**。
+ * 割り戻すと声あり最小 -7.27 / 声なし最大 -2.71 で、重なるどころか**声のほうが下**になる。
+ * 素材の音量そのものが伴奏込みなので、割った先で伴奏を分母に戻していることになる。
+ *
+ * **つまり 3 つのうち 2 つしか取れない**（2026-09-18・2 回目に測って確かめた）:
+ *
+ * | | 倍率に不変 | 底に不変 | 大きさを持つ |
+ * | --- | --- | --- | --- |
+ * | 割合（`modulationRatio`） | ○ | ○ | **×** |
+ * | 深さ（`modulationDepthDb`・いま既定） | ○ | **×** | ○ |
+ * | この量 | **×** | ○ | ○ |
+ *
+ * 次にここへ戻ってくるなら、**倍率の基準を窓の外から持ってくる**手しか残っていない
+ * （素材の音量は伴奏込みなので使えない。使えるとしたら発話の区間が分かってからの話になる）。
+ */
+export function energyModulationDepthDb(
+  track: LoudnessTrack,
+  low = MOD_LOW,
+  high = MOD_HIGH,
+  windowSeconds = MOD_WINDOW,
+): Float32Array {
+  const fs = 1 / track.hop;
+  const n = modulationWindowFrames(track.hop, windowSeconds);
+
+  const out = new Float32Array(track.db.length);
+  const scratch = fftScratch(n);
+  const buffer = new Float64Array(n);
+  const lowBin = Math.max(1, Math.round((low * n) / fs));
+  const highBin = Math.min(n / 2, Math.round((high * n) / fs));
+  const hannRms = Math.sqrt(3 / 8);
+
+  for (let i = 0; i < track.db.length; i += 1) {
+    let mean = 0;
+    for (let k = 0; k < n; k += 1) {
+      const at = Math.max(0, Math.min(track.db.length - 1, i - (n >> 1) + k));
+      // 無音の底は `modulationDepthDb` と同じ所で踏む。踏む場所を変えると
+      // 「対数を外したから動いたのか、底の扱いを変えたからか」が切り分けられなくなる。
+      buffer[k] = Math.pow(10, Math.max(SILENCE_DB + 40, track.db[at]) / 10);
+      mean += buffer[k];
+    }
+    mean /= n;
+    for (let k = 0; k < n; k += 1) buffer[k] -= mean;
+    magnitudes(buffer, scratch.re, scratch.im, scratch.mag);
+    let band = 0;
+    for (let b = lowBin; b <= highBin; b += 1) band += scratch.mag[b] * scratch.mag[b];
+    const rms = Math.sqrt(2 * band) / n / hannRms;
+    // エネルギーの実効値なので 10log10。dB の列で測る側と桁を揃えるためではなく、
+    // 「6dB/倍で動く量である」ことを表の上でそのまま読めるようにするため。
+    out[i] = rms > 0 ? 10 * Math.log10(rms) : SILENCE_DB;
   }
   return out;
 }

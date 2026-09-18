@@ -18,10 +18,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readWav } from '../fixtures/wav.mjs';
-import { isSpeechAt, SHORT_FIXTURES } from '../fixtures/spec.mjs';
+import { renderShort } from '../fixtures/make-audio.mjs';
+import { isSpeechAt, SHORT_FIXTURES, UTTERANCES } from '../fixtures/spec.mjs';
 
 const { analyzeLoudness, SILENCE_DB } = await import('./src/loudness.ts');
-const { analyzeFeatures, FEATURE_NAMES, MOD_SPLIT_HZ, modulationWindowFrames } = await import('./src/features.ts');
+const { analyzeFeatures, energyModulationDepthDb, FEATURE_NAMES, MOD_SPLIT_HZ, modulationDepthDb, modulationWindowFrames } =
+  await import('./src/features.ts');
 
 const { autoThresholdDb, cutSoundingSeconds, DEFAULT_JET_CUT, envelopeGateFrames, lowBandDepthSeconds, lowBandReadable, planJetCut } =
   await import('./src/silence.ts');
@@ -1068,4 +1070,212 @@ console.log('0.5 を下回るのは「逆向きに効いている」という意
   console.log('**声のある素材のほうが下に来る。** 線をどこに置いても、その 2 本は分けられない。');
   console.log('いまの 0.5 は「止めたい最大 0.361」と「守ると決めた下限 0.688」の間を比で等しく取っただけで、');
   console.log('**群の切れ目ではない。素材が増えたらまた動く線である。**');
+}
+
+// --- 「比」の棚卸し：何が量を潰しているのかを、底と倍率に分けて測る（2026-09-18・2 回目）---
+//
+// 9/16 の 2 回目に「割合は揺れの大きさを捨てた比だった」と直し、9/18 の 1 回目に
+// 「移した先の深さも比だった」と分かった。**同じ形の見落としがほかにも残っていないか**を
+// 一度に見るための段。いま使っている量を全部並べて、2 通りの触り方で揺さぶる。
+//
+//   (A) 全体を k 倍する         … 「音量に依らない」と書いてきたのはこちら
+//   (B) 一定の伴奏を下に敷く    … 声は 1 ビットも変えずに底だけを上げる
+//
+// **(A) はこの表のどの量も完全に不変で、(B) はどの量も不変でない。**
+// 「音量に依らない」は掛け算に対しての話で、足し算に対しては誰も守られていなかった。
+{
+  const NAMES = [
+    'modulation',
+    'lowModulationDepth',
+    'tone',
+    'shapeChange',
+    'envelopeChange',
+    'speechScore',
+    'harmonicity',
+    'flux',
+    'lowLevelSkew',
+  ];
+  const median = (a) => {
+    const s = [...a].sort((x, y) => x - y);
+    return s.length ? s[Math.floor(s.length / 2)] : NaN;
+  };
+  // 声のコマだけを見る。**声の証拠がどれだけ縮むか**が知りたいので、間のコマは混ぜない。
+  const speechFrames = (i, hop) => {
+    const t = i * hop;
+    return (
+      UTTERANCES.some(([from, to]) => t >= from && t < to) &&
+      UTTERANCES.some(([from, to]) => t - 0.15 >= from && t - 0.15 < to) ===
+        UTTERANCES.some(([from, to]) => t + 0.15 >= from && t + 0.15 < to)
+    );
+  };
+  const measure = (data, gain = 1) => {
+    const d = gain === 1 ? data : Float32Array.from(data, (v) => v * gain);
+    const buffer = { sampleRate: 44100, numberOfChannels: 1, length: d.length, getChannelData: () => d };
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const energy = energyModulationDepthDb({ hop: track.hop, db: features.lowLevel, duration: track.duration });
+    const rows = Object.fromEntries(NAMES.map((n) => [n, []]));
+    const extra = { level: [], energyDepth: [] };
+    for (let i = 0; i < track.db.length; i += 1) {
+      if (!speechFrames(i, track.hop)) continue;
+      for (const n of NAMES) rows[n].push(features[n][i]);
+      extra.level.push(track.db[i]);
+      extra.energyDepth.push(energy[i]);
+    }
+    const out = { level: median(extra.level), energyDepth: median(extra.energyDepth) };
+    for (const n of NAMES) out[n] = median(rows[n]);
+    return out;
+  };
+
+  // `speech-flat-bgm.wav` と同じ作り。伴奏は乱数を引かないので、
+  // どの行でも**声は 1 ビット同じ**（作りの詳細は make-audio.mjs の `renderShort` を参照）。
+  const base = { bgm: true, bgmSwellDepth: 0, noiseLevel: 0.0005, seed: 6 };
+  const levels = [0, 0.2, 0.4, 0.8, 1.2];
+
+  console.log('\n\n(B) 一定の伴奏を下に敷くと、声の証拠はどれだけ縮むか（声は 1 ビット同じ・声のコマの中央値）\n');
+  console.log(`${pad('伴奏', 6)}${pad('音量dB', 8)}${NAMES.map((n) => pad(n, 20)).join('')}${pad('ｴﾈﾙｷﾞｰの深さ', 14)}`);
+  console.log('-'.repeat(14 + NAMES.length * 20 + 14));
+  const first = {};
+  for (const level of levels) {
+    const m = measure(renderShort({ ...base, bgm: level > 0, bgmLevel: level }));
+    if (level === 0) Object.assign(first, m);
+    const cells = NAMES.map((n) => pad(`${m[n].toFixed(4)} (${(m[n] / first[n]).toFixed(2)})`, 20)).join('');
+    // 最後の列だけは dB なので、比ではなく「何 dB 上がったか」を添える
+    // （ここが「伴奏自身の揺れ」ぶん。対数のぶんと分けて読むための列）。
+    const drift = m.energyDepth - first.energyDepth;
+    console.log(`${pad(level, 6)}${pad(m.level.toFixed(1), 8)}${cells}${pad(`${m.energyDepth.toFixed(2)} (+${drift.toFixed(2)})`, 14)}`);
+  }
+  console.log('\n括弧は伴奏なしを 1.00 としたときの比。**声は 1 ビットも変えていない。**');
+  console.log('`lowModulationDepth`（＝いま素材単位の判定に使っている深さ）が飛び抜けて弱い。');
+  console.log('次に弱い `modulation` / `envelopeChange` でも 0.30 なのに、こちらは **0.02（45 分の 1）**。');
+  console.log('`tone` と `harmonicity` だけは上がるが、**上がる向きが音楽らしさのほう**なので救いにならない');
+  console.log('（伴奏そのものが音程を持つため）。`lowLevelSkew` は -1.09 → +0.25 と**符号ごと裏返る**。');
+  console.log('\n右端は同じ揺れを**エネルギーの列で**測ったもの（dBFS）。伴奏を 1.2 まで上げても');
+  console.log('**2.9dB（1.9 倍）しか動かない。** 深さの 45 分の 1 のうち、本当に証拠が薄まったのは');
+  console.log('この 1.9 倍ぶんだけで、**残る 23 倍は対数のせい**。次の段でそこを切り分ける。');
+
+  console.log('\n(A) 全体を k 倍する（伴奏 0.4 の同じ素材）\n');
+  console.log(`${pad('倍率', 6)}${pad('音量dB', 8)}${NAMES.map((n) => pad(n, 20)).join('')}`);
+  console.log('-'.repeat(14 + NAMES.length * 20));
+  const rendered = renderShort({ ...base, bgmLevel: 0.4 });
+  const unity = measure(rendered, 1);
+  for (const k of [0.25, 1, 4]) {
+    const m = measure(rendered, k);
+    const cells = NAMES.map((n) => pad(`${m[n].toFixed(4)} (${(m[n] / unity[n]).toFixed(2)})`, 20)).join('');
+    console.log(`${pad(k, 6)}${pad(m.level.toFixed(1), 8)}${cells}`);
+  }
+  console.log('\n**16 倍ぶん振っても、どの量も 1 ビット動かない。** ここだけを見て');
+  console.log('「この量は音量に依らない」と書いてきたのが、3 日ぶんの取り違えのもと。');
+
+  // --- 犯人は「比」ではなく対数だった ---
+  //
+  // (B) には原因が 2 つ混ざっている。**底そのもの**と、**伴奏自身の揺れ**。
+  // 無相関の音を混ぜるとエネルギーの列には定数が足されるだけなので、
+  // 定数は窓の平均を引く工程で消える ＝ 本来 3〜6Hz には 1 ビットも残らないはず。
+  // そこで、実際の伴奏の代わりに**エネルギーの列へ直に定数を足して**切り分ける。
+  console.log('\n\nエネルギーの列に「理想の一定の伴奏」（定数）を足すと、どちらが動くか\n');
+  {
+    const data = renderShort({ bgm: false, noiseLevel: 0.0005, seed: 6 });
+    const buffer = { sampleRate: 44100, numberOfChannels: 1, length: data.length, getChannelData: () => data };
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const power = Float64Array.from(features.lowLevel, (db) => 10 ** (Math.max(SILENCE_DB + 40, db) / 10));
+    const speechIdx = [...power.keys()].filter((i) => speechFrames(i, track.hop));
+    const voice = median(speechIdx.map((i) => power[i]));
+    console.log(`${pad('足した定数', 12)}${pad('dB の列で測る（いま）', 24)}エネルギーの列で測る`);
+    console.log('-'.repeat(58));
+    for (const mult of [0, 0.25, 1, 4, 16]) {
+      const db = Float32Array.from(power, (v) => 10 * Math.log10(v + voice * mult));
+      const t = { hop: track.hop, db, duration: track.duration };
+      const asDbTrack = modulationDepthDb(t);
+      const asEnergyTrack = energyModulationDepthDb(t);
+      const asDb = median(speechIdx.map((i) => asDbTrack[i]));
+      const asEnergy = median(speechIdx.map((i) => asEnergyTrack[i]));
+      console.log(`${pad(`×${mult}`, 12)}${pad(asDb.toFixed(3), 24)}${asEnergy.toFixed(3)}`);
+    }
+    console.log('\n**エネルギーの列で測ると、小数 3 桁まで 1 ビットも動かない。**');
+    console.log('同じ列を dB へ直してから測ると 63 分の 1 に潰れる。**縮ませているのは対数。**');
+    console.log('本物の伴奏では原因が 2 つ重なる（伴奏は一定ではないので自分の揺れも持ち込む）。');
+    console.log('切り分けると、前の段の 45 分の 1 のうち**対数が 23 倍ぶん・伴奏自身の揺れが 1.9 倍ぶん**。');
+    console.log('後者は本当に証拠が薄まっているので避けられないが、**前者は列の取り方の話**である。');
+  }
+}
+
+// --- では対数を外せばよいのか（2026-09-18・2 回目）---
+//
+// 上で「潰しているのは対数」と分かったので、外した量（`energyModulationDepthDb`）で
+// 素材 26 本を測り直す。**割れる。既定の深さのほうは逆転している。**
+// それでも入れない理由が下の 2 行で、そこがこの回のいちばんの収穫。
+{
+  console.log('\n\n対数を外した深さで、素材単位の線は引けるか\n');
+  console.log(`${pad('素材', 30)}${pad('声', 4)}${pad('ｴﾈﾙｷﾞｰの深さ', 14)}${pad('dB の深さ', 12)}素材の音量`);
+  console.log('-'.repeat(72));
+  const rows = [];
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const threshold = autoThresholdDb(track, DEFAULT_JET_CUT.sensitivity);
+    const readable = lowBandReadable(features.lowLevel, threshold, modulationWindowFrames(track.hop));
+    const energy = energyModulationDepthDb({ hop: track.hop, db: features.lowLevel, duration: track.duration });
+    let judged = 0;
+    let energyMax = -Infinity;
+    let depthMax = 0;
+    let sum = 0;
+    for (let i = 0; i < track.db.length; i += 1) {
+      sum += 10 ** (track.db[i] / 10);
+      if (!readable[i]) continue;
+      judged += 1;
+      if (energy[i] > energyMax) energyMax = energy[i];
+      if (features.lowModulationDepth[i] > depthMax) depthMax = features.lowModulationDepth[i];
+    }
+    // 読めたコマが足りない素材は深さでは何も言わないので、線の話からも外す。
+    if (judged * track.hop < DEFAULT_JET_CUT.minDepthSeconds) continue;
+    rows.push({ fixture, energyMax, depthMax, level: 10 * Math.log10(sum / track.db.length) });
+  }
+  rows.sort((a, b) => a.energyMax - b.energyMax);
+  for (const r of rows) {
+    console.log(
+      `${pad((r.fixture.hard ? '※ ' : '  ') + r.fixture.name.replace('.wav', ''), 30)}${pad(r.fixture.speech ? '有' : '無', 4)}` +
+        `${pad(r.energyMax.toFixed(2), 14)}${pad(r.depthMax.toFixed(3), 12)}${r.level.toFixed(1)}`,
+    );
+  }
+  const speech = rows.filter((r) => r.fixture.speech);
+  const music = rows.filter((r) => !r.fixture.speech);
+  // 素材が一式そろっていないときは、片側が空のまま Math.min(...[]) が ∞ を返して
+  // 「隙間 Infinity dB・重なりなし」という嘘の行が出る。そこで止める。
+  if (speech.length === 0 || music.length === 0) {
+    console.log(`\n声あり ${speech.length} 本 / 声なし ${music.length} 本では線の話ができない。`);
+    console.log('`npm run lab:fixtures` で素材を作り直してから読むこと。');
+  } else {
+    const gap = Math.min(...speech.map((r) => r.energyMax)) - Math.max(...music.map((r) => r.energyMax));
+    console.log(
+      `\nエネルギーの深さ: 声あり最小 ${Math.min(...speech.map((r) => r.energyMax)).toFixed(2)} / ` +
+        `声なし最大 ${Math.max(...music.map((r) => r.energyMax)).toFixed(2)}（隙間 ${gap.toFixed(2)}dB・**重なりなし**）`,
+    );
+    console.log(
+      `dB の深さ（既定）: 声あり最小 ${Math.min(...speech.map((r) => r.depthMax)).toFixed(3)} / ` +
+        `声なし最大 ${Math.max(...music.map((r) => r.depthMax)).toFixed(3)}（**逆転している**）`,
+    );
+    const normalized = rows.map((r) => r.energyMax - r.level);
+    console.log(
+      `素材の音量で割り戻すと: 声あり最小 ${Math.min(...rows.filter((r) => r.fixture.speech).map((r) => r.energyMax - r.level)).toFixed(2)} / ` +
+        `声なし最大 ${Math.max(...rows.filter((r) => !r.fixture.speech).map((r) => r.energyMax - r.level)).toFixed(2)}（**声のほうが下**）`,
+    );
+    console.log(`（割り戻した列の幅は ${(Math.max(...normalized) - Math.min(...normalized)).toFixed(1)}dB）`);
+    console.log('\n**それでも入れていない。** この量は素材を 2 倍すれば 6dB 上がる（検算 ⑥"）。');
+    console.log(`上の隙間は ${gap.toFixed(2)}dB しかないので、**素材 1 本を ${(gap + 0.25).toFixed(2)}dB 下げれば`);
+    console.log('声のある素材が音楽の側へ落ちる**（`speech-vowels-hats` を 0.5dB 下げて確かめた）。');
+    console.log('手元の素材が同じ音量に揃えて作ってあるから割れて見えているだけで、');
+    console.log('録音レベルの揃っていない本物の素材には使えない。**9/18 の 1 回目と同じ取り違え**');
+    console.log('（最小値を「下限」と呼ぶ前に、それが何で決まっているかを見ること）を、');
+    console.log('今度は**隙間の側**でやらないための行がこれ。');
+    console.log('\n3 つのうち 2 つしか取れない（測って確かめた・features.ts の注に表がある）:');
+    console.log('  割合   … 倍率に不変 ○ / 底に不変 ○ / 大きさを持つ ×');
+    console.log('  深さ   … 倍率に不変 ○ / 底に不変 × / 大きさを持つ ○  ← いま既定');
+    console.log('  ｴﾈﾙｷﾞｰ … 倍率に不変 × / 底に不変 ○ / 大きさを持つ ○');
+    console.log('残っているのは**倍率の基準を窓の外から持ってくる**手だけ（素材の音量は伴奏込みなので使えない）。');
+  }
 }

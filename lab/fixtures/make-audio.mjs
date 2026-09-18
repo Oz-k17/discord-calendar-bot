@@ -852,8 +852,16 @@ function chordInto(data, starts, level, length) {
   }
 }
 
-function makeShort(
-  name,
+/**
+ * 素材を 1 本ぶん**組み立てて返す**（ファイルには書かない）。
+ *
+ * 測る側（probe / bench / selftest）から呼べるようにしてあるのは、
+ * **「1 つの摘みだけを動かした列」をその場で作って並べたい**ことがあるため。
+ * ディスクへ出す素材にすると、1 回しか使わない中間の素材が `out/` に溜まるうえ、
+ * 「どの版の素材で測った数字か」が後から分からなくなる。
+ * 種は引数で固定されるので、その場で作っても毎回まったく同じ音が出る。
+ */
+export function renderShort(
   {
     speech = true,
     sparse = false,
@@ -964,30 +972,40 @@ function makeShort(
   // 低い側へ寄せた打点も、ハイハットとまったく同じ場所で引く。こうしておくと
   // `hat: 4.2` と `thump: 4.2` の 2 本は**打点の帯域だけ**が違う（乱数の消費も同じ）。
   if (thump) thumps(data, 0, SHORT_LENGTH, thumpLevel, thump, random, thumpBreaks);
-  return writeWav(name, data);
+  return data;
 }
 
-fs.mkdirSync(OUT, { recursive: true });
-console.log(`出力先: ${OUT}\n`);
-
-// 何をどう作るかは spec.mjs にまとめてある（測る側からも同じものを参照するため）。
-for (const fixture of SHORT_FIXTURES) {
-  process.stdout.write(`${fixture.hard ? '※ ' : '  '}${fixture.note.padEnd(24, '　')} `);
-  makeShort(fixture.name, fixture.options);
+/** 組み立てて `out/` へ書く。中身は `renderShort` と 1 ビットも変わらない。 */
+function makeShort(name, options) {
+  return writeWav(name, renderShort(options));
 }
-console.log('\n※ は、声を見分ける処理をいじめるために足した素材。');
 
-if (process.argv.includes('long')) {
-  // 長尺での処理時間とメモリを測るためのもの。10 分ぶん。
-  const minutes = 10;
-  const random = rng(9);
-  const data = new Float32Array(Math.round(minutes * 60 * SR));
-  noise(data, 0.002, random);
-  for (let t = 0; t + 6 < minutes * 60; t += 6) {
-    speak(data, t + 0.5, t + 2.2, 0.5, random);
-    speak(data, t + 3.0, t + 5.0, 0.5, random);
+// ここから下は「素材を一式ディスクへ書く」側。**直接起動されたときだけ走らせる。**
+// `renderShort` を import しただけで `out/` が作り直されると、
+// 測っている最中に素材が入れ替わる（測り終わったあとの数字がどの素材のものか言えなくなる）。
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  fs.mkdirSync(OUT, { recursive: true });
+  console.log(`出力先: ${OUT}\n`);
+
+  // 何をどう作るかは spec.mjs にまとめてある（測る側からも同じものを参照するため）。
+  for (const fixture of SHORT_FIXTURES) {
+    process.stdout.write(`${fixture.hard ? '※ ' : '  '}${fixture.note.padEnd(24, '　')} `);
+    makeShort(fixture.name, fixture.options);
   }
-  writeWav('speech-long.wav', data);
-}
+  console.log('\n※ は、声を見分ける処理をいじめるために足した素材。');
 
-console.log('\n完了。');
+  if (process.argv.includes('long')) {
+    // 長尺での処理時間とメモリを測るためのもの。10 分ぶん。
+    const minutes = 10;
+    const random = rng(9);
+    const data = new Float32Array(Math.round(minutes * 60 * SR));
+    noise(data, 0.002, random);
+    for (let t = 0; t + 6 < minutes * 60; t += 6) {
+      speak(data, t + 0.5, t + 2.2, 0.5, random);
+      speak(data, t + 3.0, t + 5.0, 0.5, random);
+    }
+    writeWav('speech-long.wav', data);
+  }
+
+  console.log('\n完了。');
+}
