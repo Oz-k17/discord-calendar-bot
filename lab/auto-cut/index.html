@@ -139,7 +139,37 @@
       </section>
 
       <section class="card">
-        <h2>3. セルフテスト</h2>
+        <h2>3. ラウドネス（音の大きさ）を揃える</h2>
+        <p class="muted">
+          上で読み込んだ素材の大きさを LUFS で測り、配信先の基準へ揃える倍率を出します。
+          ピークで合わせても揃わないのは、人が感じる大きさが瞬間の高さではなく一定時間の平均で決まるためです。
+        </p>
+
+        <div class="controls">
+          <label>
+            目標の大きさ <output id="out-target"></output>
+            <input type="range" id="target-lufs" min="-24" max="-8" step="0.5" value="-14" />
+            <small>ショート動画の配信先はだいたい -14〜-16 LUFS。ここより大きく出しても向こうで下げられる</small>
+          </label>
+          <label>
+            真のピークの天井 <output id="out-ceiling"></output>
+            <input type="range" id="ceiling-db" min="-3" max="0" step="0.1" value="-1" />
+            <small>0 にしないのは、変換先の符号化で標本の間が少し膨らむため</small>
+          </label>
+        </div>
+
+        <dl class="stats" id="loudness-stats"></dl>
+        <p class="warn" id="loudness-warning" hidden></p>
+
+        <div class="row">
+          <button type="button" id="play-loud-before" disabled>元のまま再生</button>
+          <button type="button" id="play-loud-after" disabled>揃えたあとを再生</button>
+          <button type="button" id="stop-loud" disabled>停止</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>4. セルフテスト</h2>
         <p class="muted">
           合成した波形で計算そのものを確かめます。素材が無くても、壊れていないことがここで分かります。
         </p>

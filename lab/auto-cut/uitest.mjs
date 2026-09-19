@@ -159,6 +159,59 @@ try {
   ok('戻すと音量だけの判定に戻る', (await page.evaluate(() => window.__lab.state())).plan.usedMode === 'level');
   ok('戻すとつまみも隠れる', !(await page.locator('.speech-only').first().isVisible()));
 
+  // --- ラウドネス（LUFS）---
+  //
+  // 計算そのものは selftest が規格の試験信号で押さえているので、ここで見るのは配線だけ。
+  // **画面は「1ch を 2ch 扱いで測る」を自分で決めている**（本体の書き出しが 2ch のため）ので、
+  // そこが落ちると数字は出たまま 3dB ずれる。素材を替えて読みが動くことで確かめる。
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech.wav'));
+  await page.waitForFunction(() => window.__lab.state().loudness !== null, { timeout: 30000 });
+  await page.waitForTimeout(300);
+  const loud = await page.evaluate(() => window.__lab.state());
+  ok('ラウドネスが測れている', loud.loudness.integratedLufs !== null && loud.loudness.integratedLufs < 0,
+    `${loud.loudness.integratedLufs.toFixed(1)} LUFS`);
+  ok('1ch の素材を 2ch 扱いで測っている', Math.abs(loud.loudness.integratedLufs - -19.6) < 0.5,
+    `${loud.loudness.integratedLufs.toFixed(1)} LUFS（1ch のまま測ると -22.6 付近になる）`);
+  ok('倍率が出る', loud.loudnessPlan && Math.abs(loud.loudnessPlan.gainDb) > 0.1,
+    `${loud.loudnessPlan.gainDb.toFixed(2)} dB`);
+  ok('大きさの統計が画面に出る', (await page.locator('#loudness-stats div').count()) === 7,
+    `${await page.locator('#loudness-stats div').count()} 項目`);
+
+  // 目標を下げれば倍率も下がる（つまみが計算まで届いているか）。
+  const targetBefore = (await page.evaluate(() => window.__lab.state())).loudnessPlan.gainDb;
+  await setRange(page, '#target-lufs', '-20');
+  await page.waitForTimeout(200);
+  const targetAfter = (await page.evaluate(() => window.__lab.state())).loudnessPlan.gainDb;
+  ok('目標を下げると倍率も下がる', targetAfter < targetBefore - 1, `${targetBefore.toFixed(2)} → ${targetAfter.toFixed(2)} dB`);
+  await setRange(page, '#target-lufs', '-14');
+
+  // 真のピークが標本のピークを超えている素材で、天井が効いていること。
+  // **標本だけを見ていると「0dBFS ちょうどでまだ余裕がある」と読めてしまう**素材なので、
+  // ここが落ちるなら 4 倍に打ち直す側の配線が切れている。
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech-loud-clipped.wav'));
+  await page.waitForFunction(() => window.__lab.state().loudness?.truePeakDb > 0, { timeout: 30000 });
+  await page.waitForTimeout(300);
+  const clipped = (await page.evaluate(() => window.__lab.state())).loudness;
+  ok('叩き切った素材は真のピークが標本を超える', clipped.truePeakDb > clipped.samplePeakDb + 1,
+    `標本 ${clipped.samplePeakDb.toFixed(2)} dBFS / 真 ${clipped.truePeakDb.toFixed(2)} dBTP`);
+
+  // 一瞬の大きな音に倍率を人質に取られる素材では、届かなかったことを画面で知らせる。
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech-click.wav'));
+  await page.waitForFunction(() => window.__lab.state().loudnessPlan?.limitedBy === 'peak', { timeout: 30000 });
+  await page.waitForTimeout(300);
+  const clickPlan = (await page.evaluate(() => window.__lab.state())).loudnessPlan;
+  ok('届かなかったときは理由を画面で知らせる', await page.locator('#loudness-warning').isVisible(),
+    `届かなかったぶん ${clickPlan.shortfallDb.toFixed(2)} dB`);
+
+  await page.getByRole('button', { name: '揃えたあとを再生' }).click();
+  await page.waitForTimeout(300);
+  await page.getByRole('button', { name: '停止' }).last().click();
+
+  // 以降の段は声の入った素材を前提にしているので、読み直しておく。
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech.wav'));
+  await page.waitForFunction(() => window.__lab.state().plan?.noSpeechFound === false, { timeout: 30000 });
+  await page.waitForTimeout(300);
+
   // --- ダッキング ---
   await page.locator('#bgm-file').setInputFiles(path.join(fixtures, 'bgm.wav'));
   await page.waitForFunction(() => window.__lab.state().bgm !== null, { timeout: 30000 });

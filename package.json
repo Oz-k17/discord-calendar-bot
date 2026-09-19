@@ -16,6 +16,7 @@
     "lab:test": "node lab/auto-cut/selftest.mjs",
     "lab:fixtures": "node lab/fixtures/make-audio.mjs",
     "lab:bench": "node lab/auto-cut/bench.mjs",
+    "lab:loudness": "node lab/auto-cut/loudness.mjs",
     "lab:uitest": "node lab/auto-cut/uitest.mjs",
     "lab:probe": "node lab/auto-cut/probe.mjs"
   },

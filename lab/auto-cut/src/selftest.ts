@@ -32,6 +32,14 @@ import {
   modulationWindowFrames,
 } from './features.ts';
 import { fftScratch, magnitudes } from './fft.ts';
+import {
+  applyGain,
+  DEFAULT_NORMALIZATION,
+  kWeighting,
+  measureLoudness,
+  planLoudnessNormalization,
+  truePeakOf,
+} from './lufs.ts';
 
 export interface TestResult {
   name: string;
@@ -2420,6 +2428,166 @@ export function runSelfTest(): TestResult[] {
         `minEnergyDepthDrop = ${DEFAULT_JET_CUT.minEnergyDepthDrop}`,
       );
     }
+  }
+
+  // --- ラウドネス（LUFS）---
+  //
+  // ここは**ほかの検算とは性格が違う**。無音カットの判定は「何が正しいか」を
+  // 自分たちで決めているので、検算も自分で立てた理屈と突き合わせるしかない。
+  // ラウドネスには**外の正解がある**（ITU-R BS.1770-4 と EBU Tech 3341 の試験信号）ので、
+  // そちらと合わせる。合わなければ、こちらが間違っている。
+  {
+    const sr = 48000;
+
+    /** 区間ごとに dBFS を指定した 1kHz の正弦波。試験信号はどれもこの形。 */
+    const sine = (segments: { seconds: number; db: number | null }[], rate = sr, channels = 2) => {
+      const total = segments.reduce((a, s) => a + s.seconds, 0);
+      const length = Math.round(total * rate);
+      const data = new Float32Array(length);
+      let at = 0;
+      for (const seg of segments) {
+        const n = Math.round(seg.seconds * rate);
+        const amp = seg.db === null ? 0 : Math.pow(10, seg.db / 20);
+        for (let i = 0; i < n && at + i < length; i += 1) data[at + i] = amp * Math.sin((2 * Math.PI * 1000 * (at + i)) / rate);
+        at += n;
+      }
+      return { sampleRate: rate, numberOfChannels: channels, length, getChannelData: () => data } as AudioLike;
+    };
+    const lufsOf = (buffer: AudioLike, options = {}) =>
+      measureLoudness(buffer, { skipTruePeak: true, ...options }).integratedLufs;
+
+    // ① 係数を周波数から作り直したものが、規格が載せている 48kHz の表と一致すること。
+    //    **ここが合っていないと、以下の数字が全部それらしく見えたまま少しずつ狂う。**
+    //    教科書どおりの高域棚の式では小数 2 桁目から外れたので、Vh/Vb を使う形にしてある。
+    const [shelf, highpass] = kWeighting(48000);
+    const table = { b0: 1.53512485958697, b1: -2.69169618940638, b2: 1.19839281085285, a1: -1.69065929318241, a2: 0.73248077421585 };
+    const shelfError = Math.max(
+      ...(['b0', 'b1', 'b2', 'a1', 'a2'] as const).map((k) => Math.abs(shelf[k] - table[k])),
+    );
+    check('K 特性の係数が規格の 48kHz の表と一致する', shelfError < 1e-10, `最大のずれ ${shelfError.toExponential(1)}`);
+    check(
+      '2 段目の分子は (1, -2, 1) 固定',
+      highpass.b0 === 1 && highpass.b1 === -2 && highpass.b2 === 1 && near(highpass.a2, 0.99007225036621, 1e-10),
+      `a1 = ${highpass.a1.toFixed(11)}`,
+    );
+
+    // ②〜⑤ EBU Tech 3341 の試験信号。許容は規格と同じ ±0.1 LU。
+    const case1 = lufsOf(sine([{ seconds: 20, db: -23 }]));
+    check('1kHz -23dBFS 20 秒が -23.0 LUFS になる', near(case1 as number, -23, 0.1), `${(case1 as number).toFixed(2)} LUFS`);
+    const case2 = lufsOf(sine([{ seconds: 20, db: -33 }]));
+    check('1kHz -33dBFS 20 秒が -33.0 LUFS になる', near(case2 as number, -33, 0.1), `${(case2 as number).toFixed(2)} LUFS`);
+
+    // 相対ゲート: 前後に -36dBFS を足しても、真ん中の -23 のままでなければならない。
+    // **ゲートが無いと、間の長い素材ほど小さく測れてしまう。**
+    const case3 = lufsOf(sine([
+      { seconds: 10, db: -36 },
+      { seconds: 60, db: -23 },
+      { seconds: 10, db: -36 },
+    ]));
+    check('前後に小さい音が付いても値が動かない（相対ゲート）', near(case3 as number, -23, 0.1), `${(case3 as number).toFixed(2)} LUFS`);
+
+    // 絶対ゲート: -70 LUFS より静かなところは、相対ゲートを作る平均にも入れない。
+    const case4 = lufsOf(sine([
+      { seconds: 10, db: -72 },
+      { seconds: 10, db: -36 },
+      { seconds: 60, db: -23 },
+      { seconds: 10, db: -36 },
+      { seconds: 10, db: -72 },
+    ]));
+    check('ごく静かな区間を平均に入れない（絶対ゲート）', near(case4 as number, -23, 0.1), `${(case4 as number).toFixed(2)} LUFS`);
+
+    // ⑥ 測れないものは測れないと言う。ここで 0 や -100 を返すと、
+    //    呼ぶ側が「とても静かな素材」と読んで巨大な倍率を掛けることになる。
+    check('無音は測れない（null を返す）', lufsOf(sine([{ seconds: 5, db: null }])) === null, '');
+    check('窓に足りない素材は測れない（null を返す）', lufsOf(sine([{ seconds: 0.3, db: -23 }])) === null, '0.3 秒');
+
+    // ⑦ チャンネルの数え方。規格はパワーを**足す**ので、同じ音でも 1ch は 2ch より 3.01 小さい。
+    //    **どちらが正しいかは「最後に何 ch で出るか」で決まる。** 本体の書き出しは 2ch なので、
+    //    1ch の素材を測るときは `monoAsDualMono` を立てる（`loudness.mjs` がそうしている）。
+    const mono = sine([{ seconds: 20, db: -23 }], sr, 1);
+    const monoLufs = lufsOf(mono) as number;
+    check('1ch は 2ch より 3.01 小さく出る', near(monoLufs, -26.01, 0.1), `${monoLufs.toFixed(2)} LUFS`);
+    const dual = lufsOf(mono, { monoAsDualMono: true }) as number;
+    check('1ch を 2ch 扱いにすると一致する', near(dual, -23, 0.1), `${dual.toFixed(2)} LUFS`);
+
+    // ⑧ 標本化周波数が変わっても同じ値になること（＝係数をその場で作り直している証拠）。
+    //    48kHz の表を 44.1kHz へそのまま当てると、ここが 0.1 LU では収まらなくなる。
+    const at441 = lufsOf(sine([{ seconds: 20, db: -23 }], 44100)) as number;
+    check('44.1kHz でも同じ値になる', near(at441, -23, 0.1), `${at441.toFixed(2)} LUFS`);
+
+    // ⑨ 倍率に対しては素直に動く（2 倍で +6.02 LU）。これが崩れると正規化そのものが成り立たない。
+    const doubled = lufsOf(applyGain(sine([{ seconds: 20, db: -23 }]), 2)) as number;
+    check('2 倍にすると 6.02 LU 上がる', near(doubled - (case1 as number), 6.02, 0.05), `${(doubled - (case1 as number)).toFixed(2)} LU`);
+
+    // ⑩⑪ 真のピーク。**標本の間を見ないと、天井を超えていることに気づけない。**
+    //     fs/4 の正弦波を π/4 ずらすと、標本は山を外して -3.01dBFS に見えるが、実際は 0dBFS。
+    const n = sr;
+    const missed = new Float32Array(n);
+    for (let i = 0; i < n; i += 1) missed[i] = Math.sin((2 * Math.PI * i) / 4 + Math.PI / 4);
+    const missedBuffer = { sampleRate: sr, numberOfChannels: 1, length: n, getChannelData: () => missed } as AudioLike;
+    const peaks = measureLoudness(missedBuffer);
+    check('標本が山を外しても真のピークは 0dBTP を指す', near(peaks.truePeakDb, 0, 0.1), `標本 ${peaks.samplePeakDb.toFixed(2)} dBFS / 真 ${peaks.truePeakDb.toFixed(2)} dBTP`);
+    check('標本のピークとの差が 3dB ほど開く', near(peaks.truePeakDb - peaks.samplePeakDb, 3.01, 0.15), `${(peaks.truePeakDb - peaks.samplePeakDb).toFixed(2)} dB`);
+    // 位相 0 が δ になっていない実装だと、ここが破れる（真が標本を下回る）。
+    const onPeak = new Float32Array(n);
+    for (let i = 0; i < n; i += 1) onPeak[i] = 0.8 * Math.sin((2 * Math.PI * 1000 * i) / sr);
+    check('真のピークは標本のピークを下回らない', truePeakOf(onPeak) >= 0.8 - 1e-6, `${truePeakOf(onPeak).toFixed(4)}`);
+
+    // ⑫ 当てたら本当に目標になるか。**測り方と当て方を別々に信じないための往復。**
+    const quiet = sine([{ seconds: 20, db: -30 }]);
+    const plan = planLoudnessNormalization(measureLoudness(quiet));
+    const after = lufsOf(applyGain(quiet, plan.gain)) as number;
+    check('揃えると目標の大きさになる', near(after, DEFAULT_NORMALIZATION.targetLufs, 0.1), `${after.toFixed(2)} LUFS（倍率 ${plan.gainDb.toFixed(2)}dB）`);
+    check('目標に届いたときは何にも止められていない', plan.limitedBy === 'none' && plan.shortfallDb === 0, plan.limitedBy);
+
+    // ⑬ ピークが先に天井へ当たる素材では、**目標へ届かせない。**
+    //    無理に上げれば歪むので、届かなかったことを呼ぶ側へ返すのが正しい振る舞い。
+    //    12 秒の本体 + 0.1 秒だけ鳴る大きな音、という形（`speech-click.wav` と同じ形）。
+    //
+    //    **本体を -40dBFS にしてはいけない**（最初そう書いて落ちた）。
+    //    大きな音と 37dB も開くと、相対ゲートが本体のほうを丸ごと捨てて、
+    //    「短い大きな音だけの素材」として測られる。ゲートは**静かな所を捨てる**ので、
+    //    こういう素材では「全体としては静か」という読みのほうが成り立たない。
+    const spike = sine([
+      { seconds: 6, db: -20 },
+      { seconds: 0.1, db: -0.5 },
+      { seconds: 6, db: -20 },
+    ]);
+    const spikePlan = planLoudnessNormalization(measureLoudness(spike));
+    check('ピークが天井に当たるなら目標まで上げない', spikePlan.limitedBy === 'peak' && spikePlan.shortfallDb > 0, `${spikePlan.gainDb.toFixed(2)}dB / 届かなかったぶん ${spikePlan.shortfallDb.toFixed(2)}dB`);
+    check(
+      '止めた結果が天井ちょうどに収まる',
+      near(spikePlan.resultTruePeakDb, DEFAULT_NORMALIZATION.truePeakCeilingDb, 0.01),
+      `${spikePlan.resultTruePeakDb.toFixed(3)} dBTP`,
+    );
+
+    // ⑭ **持ち上げの上限は置いていない。** とても小さい素材でも目標まで上げる。
+    //    上限を置く手は 2026-09-19（3 回目）に 2 通り測って両方捨てた（`lufs.ts` の注を参照）。
+    //    ここが `limitedBy: 'peak'` 以外で止まるようになったら、その判断を変えたということ。
+    const tiny = sine([{ seconds: 20, db: -60 }]);
+    const tinyPlan = planLoudnessNormalization(measureLoudness(tiny));
+    check(
+      'とても小さい素材でも目標まで上げる（持ち上げの上限は置いていない）',
+      tinyPlan.limitedBy === 'none' && near(tinyPlan.gainDb, 46, 1),
+      `${tinyPlan.gainDb.toFixed(2)}dB`,
+    );
+
+    // ⑭' 静かなほうの窓の値は**出すだけ**（判断には使っていない）。
+    //    鳴りっぱなしの素材ではここに音楽そのものが出るので、雑音の底とは読めない。
+    const steadyTone = measureLoudness(sine([{ seconds: 20, db: -23 }]), { skipTruePeak: true });
+    check(
+      '鳴りっぱなしの素材では、静かな窓の値も本編と同じ',
+      steadyTone.quietBlockLufs !== null && near(steadyTone.quietBlockLufs, -23, 0.2),
+      `${(steadyTone.quietBlockLufs as number).toFixed(2)} LUFS`,
+    );
+
+    // ⑮ 測れなかった素材には倍率を掛けない。**1 倍で通す**のが唯一の安全な振る舞い。
+    const nothing = planLoudnessNormalization(measureLoudness(sine([{ seconds: 5, db: null }])));
+    check('測れない素材は 1 倍のまま通す', nothing.limitedBy === 'unmeasurable' && nothing.gain === 1, `${nothing.gainDb}dB`);
+
+    // ⑯ すでに大きい素材は素直に下げる（`speech-loud-clipped.wav` と同じ向き）。
+    const loud = planLoudnessNormalization(measureLoudness(sine([{ seconds: 20, db: -3 }])));
+    check('大きすぎる素材は下げる', loud.gainDb < -5 && loud.limitedBy === 'none', `${loud.gainDb.toFixed(2)}dB`);
   }
 
   return results;

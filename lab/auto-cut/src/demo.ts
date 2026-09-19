@@ -10,6 +10,12 @@ import { analyzeFeatures, type FeatureTrack } from './features.ts';
 import { planJetCut, type JetCutPlan } from './silence.ts';
 import { applyDucking, gainAt, planDucking, type GainPoint } from './ducking.ts';
 import { summarize, toClipEdits } from './edits.ts';
+import {
+  measureLoudness,
+  planLoudnessNormalization,
+  type LoudnessMeasurement,
+  type NormalizationPlan,
+} from './lufs.ts';
 import { runSelfTest } from './selftest.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -41,12 +47,18 @@ interface Loaded {
   peaks: Peaks;
   /** 声らしさなど。重いので、読み込んだときに一度だけ作る。 */
   features: FeatureTrack;
+  /**
+   * ラウドネス（LUFS）と真のピーク。目標の値には依らないので、ここで一度だけ測る。
+   * つまみを回したときに作り直すのは「倍率をどう決めるか」だけ。
+   */
+  loudness: LoudnessMeasurement;
 }
 
 let voice: Loaded | null = null;
 let bgm: Loaded | null = null;
 let plan: JetCutPlan | null = null;
 let duckPoints: GainPoint[] = [];
+let loudnessPlan: NormalizationPlan | null = null;
 
 // ---------- 読み込み ----------
 
@@ -61,6 +73,10 @@ async function load(file: File, canvas: HTMLCanvasElement): Promise<Loaded> {
     track,
     peaks: buildPeaks(buffer, Math.max(200, canvas.clientWidth || 800)),
     features: analyzeFeatures(buffer, track),
+    // **1ch の素材は 2ch 扱いで測る。** 本体の書き出しが 2ch なので、
+    // 1ch のまま測ると耳に届くときより 3.01 LU 小さく読み、そのぶん大きく書き出してしまう
+    // （`src/engine/offline-export.ts` の CHANNELS = 2）。
+    loudness: measureLoudness(buffer, { monoAsDualMono: buffer.numberOfChannels === 1 }),
   };
 }
 
@@ -305,6 +321,7 @@ function refreshCut() {
 
   drawVoice();
   refreshDuck();
+  refreshLoudness();
 }
 
 /** 残す区間だけを順に鳴らす。詰めた結果がそのまま耳で確かめられる。 */
@@ -322,6 +339,87 @@ function playRanges(loaded: Loaded, ranges: { start: number; end: number }[]) {
     playing.push(node);
     at += length;
   }
+}
+
+// ---------- ラウドネス ----------
+
+/**
+ * 測った結果から倍率を決め直して、画面へ出す。
+ *
+ * **測り直さない**のがここの肝で、ラウドネスも真のピークも目標には依らない。
+ * つまみが動かすのは「その値をどう使うか」だけなので、読み込みのときの 1 回で足りる。
+ */
+function refreshLoudness() {
+  const target = Number($<HTMLInputElement>('target-lufs').value);
+  const ceiling = Number($<HTMLInputElement>('ceiling-db').value);
+  $<HTMLOutputElement>('out-target').textContent = `${target.toFixed(1)} LUFS`;
+  $<HTMLOutputElement>('out-ceiling').textContent = `${ceiling.toFixed(1)} dBTP`;
+
+  const stats = $<HTMLDListElement>('loudness-stats');
+  const warning = $<HTMLParagraphElement>('loudness-warning');
+  if (!voice) {
+    stats.innerHTML = '';
+    warning.hidden = true;
+    loudnessPlan = null;
+    return;
+  }
+
+  const m = voice.loudness;
+  loudnessPlan = planLoudnessNormalization(m, { targetLufs: target, truePeakCeilingDb: ceiling });
+  const lufs = (v: number | null) => (v === null ? '測れません' : `${v.toFixed(1)} LUFS`);
+  stats.innerHTML = [
+    ['いまの大きさ', lufs(m.integratedLufs)],
+    ['短期の最大', lufs(m.shortTermMaxLufs)],
+    // 判断には使っていない。素材にどれだけ「黙っている所」があるかの目安として出すだけ。
+    ['静かな窓', lufs(m.quietBlockLufs)],
+    ['標本のピーク', `${m.samplePeakDb.toFixed(1)} dBFS`],
+    // 標本と真の差は「叩き切ってあるか」の目安になるので、並べて出す。
+    ['真のピーク', `${m.truePeakDb.toFixed(1)} dBTP`],
+    ['当てる倍率', `${loudnessPlan.gainDb >= 0 ? '+' : ''}${loudnessPlan.gainDb.toFixed(1)} dB`],
+    ['揃えたあと', `${lufs(loudnessPlan.resultLufs)} / ${loudnessPlan.resultTruePeakDb.toFixed(1)} dBTP`],
+  ]
+    .map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`)
+    .join('');
+
+  // 目標へ届かなかったときは、**なぜ届かなかったか**まで出す。
+  // 倍率だけ見せると「効いていない」と読まれるが、ここは効かせないのが正しい振る舞い。
+  if (loudnessPlan.limitedBy === 'peak') {
+    warning.textContent =
+      `目標まで上げるとピークが天井（${ceiling.toFixed(1)} dBTP）を超えるので、` +
+      `${Math.abs(loudnessPlan.shortfallDb).toFixed(1)} dB 手前で止めました。` +
+      '一瞬の大きな音が倍率を決めています。そこを均さない限り、倍率ひとつでは届きません。';
+    warning.hidden = false;
+  } else if (loudnessPlan.limitedBy === 'unmeasurable') {
+    warning.textContent =
+      '鳴っているところが見つからないので、大きさを測れませんでした。何もしていません（倍率は 1 倍）。';
+    warning.hidden = false;
+  } else {
+    warning.hidden = true;
+  }
+
+  const ready = !!voice;
+  $<HTMLButtonElement>('play-loud-before').disabled = !ready;
+  $<HTMLButtonElement>('play-loud-after').disabled = !ready;
+  $<HTMLButtonElement>('stop-loud').disabled = !ready;
+}
+
+/**
+ * 揃える前と後を聴き比べる。
+ *
+ * 倍率は `GainNode` で当てる。配列を作り直して当てても同じだが、
+ * **耳で比べるのに「押した瞬間に鳴る」ほうが大事**で、13 秒ぶんを作り直すと待たされる。
+ */
+function playLoudness(normalized: boolean) {
+  if (!voice) return;
+  stopAll();
+  const ctx = ensureAudio();
+  const node = ctx.createBufferSource();
+  node.buffer = voice.buffer;
+  const gain = ctx.createGain();
+  gain.gain.value = normalized && loudnessPlan ? loudnessPlan.gain : 1;
+  node.connect(gain).connect(ctx.destination);
+  node.start(ctx.currentTime + 0.05);
+  playing.push(node);
 }
 
 // ---------- ダッキング ----------
@@ -404,6 +502,9 @@ for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="mod
 for (const id of ['duck-db', 'hold', 'release']) {
   $<HTMLInputElement>(id).addEventListener('input', refreshDuck);
 }
+for (const id of ['target-lufs', 'ceiling-db']) {
+  $<HTMLInputElement>(id).addEventListener('input', refreshLoudness);
+}
 
 $<HTMLButtonElement>('play-original').addEventListener('click', () => {
   if (voice) playRanges(voice, [{ start: 0, end: voice.buffer.duration }]);
@@ -418,6 +519,9 @@ $<HTMLButtonElement>('play-bgm').addEventListener('click', () => {
 });
 $<HTMLButtonElement>('play-mix').addEventListener('click', () => playMix(true));
 $<HTMLButtonElement>('play-flat').addEventListener('click', () => playMix(false));
+$<HTMLButtonElement>('play-loud-before').addEventListener('click', () => playLoudness(false));
+$<HTMLButtonElement>('play-loud-after').addEventListener('click', () => playLoudness(true));
+$<HTMLButtonElement>('stop-loud').addEventListener('click', stopAll);
 
 $<HTMLButtonElement>('run-tests').addEventListener('click', () => {
   const results = runSelfTest();
@@ -433,13 +537,21 @@ window.addEventListener('resize', () => {
 
 refreshCut();
 refreshDuck();
+refreshLoudness();
 
 // Playwright から呼べるようにしておく（画面を触らずに中身を確かめるため）。
 declare global {
   interface Window {
     __lab: {
       selfTest: typeof runSelfTest;
-      state: () => { voice: number | null; bgm: number | null; plan: JetCutPlan | null; duckPoints: GainPoint[] };
+      state: () => {
+        voice: number | null;
+        bgm: number | null;
+        plan: JetCutPlan | null;
+        duckPoints: GainPoint[];
+        loudness: LoudnessMeasurement | null;
+        loudnessPlan: NormalizationPlan | null;
+      };
     };
   }
 }
@@ -450,5 +562,7 @@ window.__lab = {
     bgm: bgm?.buffer.duration ?? null,
     plan,
     duckPoints,
+    loudness: voice?.loudness ?? null,
+    loudnessPlan,
   }),
 };

@@ -648,6 +648,39 @@ function thumps(data, from, to, level, hitsPerSecond, random, breaks = []) {
   pulses(data, from, to, level, hitsPerSecond, random, (x) => lowpass(filter, x) / gain, breaks);
 }
 
+/**
+ * 1 発だけの大きな打撃音（扉・拍手・机を叩く音のつもり）。
+ *
+ * **ラウドネス正規化を潰しにいくための素材**（2026-09-19・3 回目）。
+ * LUFS は 0.4 秒の窓をならした値なので、**13 秒のうち 1 発だけ鳴るものはほとんど効かない。**
+ * ところがピークのほうは、その 1 発がそのまま最大になる。
+ * つまり「小さく測れるのにピークだけ高い」形が作れて、
+ * **倍率を 1 つ掛けるだけで目標へ揃える**という設計がいちばん苦しむところに当たる。
+ */
+function oneShot(data, at, level, random) {
+  const start = Math.round(at * SR);
+  for (let i = start; i < Math.min(data.length, start + Math.round(0.25 * SR)); i += 1) {
+    const env = Math.exp(-(i - start) / (0.03 * SR));
+    const t = i / SR;
+    data[i] += level * env * ((random() - 0.5) * 1.4 + 0.5 * Math.sin(2 * Math.PI * 120 * t));
+  }
+}
+
+/**
+ * 全体を持ち上げてから ±1 で叩き切る（すでに詰めて仕上げられた素材のつもり）。
+ *
+ * **真のピークを潰しにいくための素材**（2026-09-19・3 回目）。
+ * 叩き切ると波形の角が立ち、**標本と標本の間が標本より高くなる。**
+ * 標本の最大だけを見ていると 0dBFS ちょうどに見えるので「まだ余裕がある」と読めてしまうが、
+ * 実際にはすでに天井を超えている。4 倍に打ち直して測る理由がここにある。
+ */
+function hardClip(data, boostDb) {
+  const gain = Math.pow(10, boostDb / 20);
+  for (let i = 0; i < data.length; i += 1) {
+    data[i] = Math.max(-1, Math.min(1, data[i] * gain));
+  }
+}
+
 /** 管楽器の息の雑音（音の実効値に対する比）と、寄せる高さ（Hz）。 */
 const FLUTE_BREATH_LEVEL = 0.32;
 const FLUTE_BREATH_CUTOFF = 2000;
@@ -946,6 +979,17 @@ export function renderShort(
     chordIntoLevel = 0.3,
     /** 和音の長さ（秒）。遡りの既定（0.32 秒）よりずっと長くしておく。 */
     chordIntoLength = 1.0,
+    /**
+     * 1 発だけ鳴る大きな打撃音の位置（秒）。0 で鳴らさない。
+     * ラウドネス正規化（`lufs.ts`）を潰しにいくための形。詳しくは `oneShot` を参照。
+     */
+    click = 0,
+    clickLevel = 0.95,
+    /**
+     * 全体をこれだけ持ち上げてから ±1 で叩き切る（dB）。0 なら叩き切らない。
+     * **いちばん最後に掛ける**（叩き切ったあとに何かを足したら、それはもう叩き切った音ではない）。
+     */
+    hardClipBoostDb = 0,
     seed = 1,
   },
 ) {
@@ -982,6 +1026,11 @@ export function renderShort(
   // 低い側へ寄せた打点も、ハイハットとまったく同じ場所で引く。こうしておくと
   // `hat: 4.2` と `thump: 4.2` の 2 本は**打点の帯域だけ**が違う（乱数の消費も同じ）。
   if (thump) thumps(data, 0, SHORT_LENGTH, thumpLevel, thump, random, thumpBreaks);
+  // 打撃と叩き切りは、ほかを全部置き終わってから当てる。
+  // **乱数はここでしか引かない位置に置いてある**ので、`click` を足しても
+  // 声・伴奏・刻みは 1 ビットも変わらない（`speech-dry.wav` と突き合わせられる）。
+  if (click) oneShot(data, click, clickLevel, random);
+  if (hardClipBoostDb) hardClip(data, hardClipBoostDb);
   return data;
 }
 

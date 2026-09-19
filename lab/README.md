@@ -21,6 +21,7 @@ npm run lab:test       # 計算の検算（合成波形・ブラウザ不要・�
 npm run lab:fixtures   # 試し用の素材を作る（lab/fixtures/out/、git には入れない）
 npm run lab:probe      # 「どの特徴量なら声を見分けられるか」を正解付きで測る
 npm run lab:bench      # その素材で「実際どれくらい効くか」を測る
+npm run lab:loudness   # 素材の大きさ（LUFS）を測り、目標へ揃えたらどうなるかを並べる
 npm run lab:uitest     # 画面まで通して確かめる（playwright が無ければ飛ばす）
 npm run lab:typecheck  # 型だけ確認する
 npm run lab:build      # 単体で配れる形にする（lab/auto-cut/dist）
@@ -34,6 +35,9 @@ npm run lab:build      # 単体で配れる形にする（lab/auto-cut/dist）
 | `lab:probe` | どの手なら見分けられるか | 新しい判定を考えるとき。**実装する前に** |
 | `lab:bench` | 実際どれくらい効くか | 効きに関わる変更をしたとき。**数字を記録に残す** |
 | `lab:uitest` | 読み込む → 描く → 鳴らす、が繋がっているか | 画面に手を入れたとき |
+
+`lab:loudness` はこの 4 段とは別の軸です。上の 4 つが「どこを切るか」を見るのに対して、
+あちらは「どれくらいの大きさで出すか」（ラウドネス正規化）を見ます。
 
 **声の無い素材の「削減 X%」を、そのまま実害として読まないでください。**
 素材にもともと開いている無音を切っただけなら、曲は壊れていません。
