@@ -105,16 +105,36 @@ try {
   ok('割合が低ければ注意書きを出す', await page.locator('#cut-warning').isVisible(),
     `割合 ${(sparse.speechRatio * 100).toFixed(0)}%`);
 
-  // 包絡の門が画面からも効くこと。BGM の上でたまにしゃべる素材は、
-  // 保持を伸ばすほど BGM だけの所まで残るようになるので、そこが動けば繋がっている。
+  // 深さの門（`minEnergyDepthDrop`）が画面でも効いていること。**つまみは無いので、
+  // ここが唯一の「列を渡し忘れていないか」の網。** 渡し忘れると画面だけ門の無い判定になり、
+  // 数字は出たままなので気づけない。BGM の上でたまにしゃべる素材は門がいちばん働く相手で、
+  // 既定で 2 秒以上を背景として落とす。
+  ok('深さの門が画面でも効いている', sparse.energySeconds > 1,
+    `門が落とした ${sparse.energySeconds.toFixed(2)} 秒`);
+
+  // 包絡の門が画面からも効くこと。保持を伸ばすほど、音色が動いていない所まで残るようになる。
+  //
+  // **素材を `speech-sparse-bgm` から替えた**（2026-09-19・2 回目）。あちらで保持が伸ばしていた
+  // 0.08 秒は「BGM だけの所まで残る」ぶんで、そこはいま深さの門が落とす。
+  // **つまみが壊れたのではなく、同じ秒を別の門が先に落としている**（`lab:bench` では
+  // あの素材の精度が 56% → 70% に上がっている）。保持の配線を見るには、
+  // 門が触れない所で伸びる素材が要る。
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech-bgm-loud.wav'));
+  await page.waitForFunction(() => window.__lab.state().plan?.noSpeechFound === false, { timeout: 30000 });
+  await page.waitForTimeout(400);
+  const shortHold = (await page.evaluate(() => window.__lab.state())).plan;
   await setRange(page, '#envelope-hold', '1.2');
   await page.waitForTimeout(400);
   const longHold = (await page.evaluate(() => window.__lab.state())).plan;
-  ok('保持を伸ばすと残る所が増える', longHold.resultDuration > sparse.resultDuration,
-    `${sparse.resultDuration.toFixed(2)} → ${longHold.resultDuration.toFixed(2)} 秒`);
-  ok('門が開いていた秒数も出る', longHold.envelopeSeconds > sparse.envelopeSeconds,
-    `${sparse.envelopeSeconds.toFixed(2)} → ${longHold.envelopeSeconds.toFixed(2)} 秒`);
+  ok('保持を伸ばすと残る所が増える', longHold.resultDuration > shortHold.resultDuration,
+    `${shortHold.resultDuration.toFixed(2)} → ${longHold.resultDuration.toFixed(2)} 秒`);
+  ok('門が開いていた秒数も出る', longHold.envelopeSeconds > shortHold.envelopeSeconds,
+    `${shortHold.envelopeSeconds.toFixed(2)} → ${longHold.envelopeSeconds.toFixed(2)} 秒`);
   await setRange(page, '#envelope-hold', '0.5');
+  // 遡りの確認はもとの素材（BGM の上でたまにしゃべる）へ戻してから行う。
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech-sparse-bgm.wav'));
+  await page.waitForFunction(() => window.__lab.state().plan?.noSpeechFound === false, { timeout: 30000 });
+  await page.waitForTimeout(400);
 
   // 発話の頭を遡るつまみも画面から効くこと。BGM の上でたまにしゃべる素材は、
   // 遡りを伸ばすほど発話の手前の BGM まで残るので、そこが動けば繋がっている。

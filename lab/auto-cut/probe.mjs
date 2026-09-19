@@ -1773,3 +1773,91 @@ console.log('0.5 を下回るのは「逆向きに効いている」という意
   }
   }
 }
+
+// --- 2026-09-19（2 回目）: 入れた門を、素材ごとにどう当たっているかで読む ---
+//
+// 前の回の積み残しの第一候補（「エネルギーの深さをコマ単位の門に置く」）を既定にした。
+// 線は「その素材の読めるコマでの最大から 6dB 下」。
+//
+// **入れる前のいちばんの心配は「基準（最大）が声だとは決まっていない」ところ**だった。
+// ここはその心配を素材ごとに数字で潰す段で、見るのは 3 つ:
+//   ① 基準を出すコマが、本当に声の区間に居るか（声のある素材で）
+//   ② 門が落とすのは背景か、声か
+//   ③ 潰しにいった素材で、どういう外れ方をするか
+{
+  console.log('\n\n入れた門（最大から -6dB）が、素材ごとにどう当たっているか\n');
+  console.log(`${pad('素材', 30)}${pad('読めた秒', 10)}${pad('基準dB', 9)}${pad('基準は', 8)}${pad('落とす声%', 11)}落とす背景%`);
+  console.log('-'.repeat(78));
+  const DROP = DEFAULT_JET_CUT.minEnergyDepthDrop || 6;
+  let baseFromSpeech = 0;
+  let baseTotal = 0;
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const thresholdDb = autoThresholdDb(track, DEFAULT_JET_CUT.sensitivity);
+    const line = lowBandLineDb(features.lowLevel, thresholdDb, DEFAULT_JET_CUT.lowBandRangeDb, track.hop);
+    const readable = lowBandReadable(features.lowLevel, line, modulationWindowFrames(track.hop));
+    const column = features.lowEnergyDepth;
+    let base = -Infinity;
+    let baseAt = -1;
+    let readableFrames = 0;
+    for (let i = 0; i < readable.length; i += 1) {
+      if (!readable[i]) continue;
+      readableFrames += 1;
+      if (column[i] > base) {
+        base = column[i];
+        baseAt = i;
+      }
+    }
+    // ① 基準のコマが声かどうか。**門そのものより先に、ここが崩れていないかを見る。**
+    const baseIsSpeech = baseAt >= 0 && isSpeechAt(fixture, baseAt * track.hop);
+    if (fixture.speech && baseAt >= 0) {
+      baseTotal += 1;
+      if (baseIsSpeech) baseFromSpeech += 1;
+    }
+    // ② 門が触れるのは読めるコマだけ。そこを声と背景に分けて数える。
+    let sp = 0;
+    let spDrop = 0;
+    let bg = 0;
+    let bgDrop = 0;
+    for (let i = 0; i < track.db.length; i += 1) {
+      if (!(track.db[i] > thresholdDb && track.db[i] > SILENCE_DB) || !readable[i]) continue;
+      const speech = isSpeechAt(fixture, i * track.hop);
+      const drop = Number.isFinite(base) && column[i] - base < -DROP;
+      if (speech) {
+        sp += 1;
+        if (drop) spDrop += 1;
+      } else {
+        bg += 1;
+        if (drop) bgDrop += 1;
+      }
+    }
+    const rate = (a, b) => (b > 0 ? `${((100 * a) / b).toFixed(0)}%` : '—');
+    console.log(
+      `${pad((fixture.hard ? '※ ' : '  ') + fixture.name.replace('.wav', ''), 30)}` +
+        `${pad((readableFrames * track.hop).toFixed(2) + 's', 10)}` +
+        `${pad(Number.isFinite(base) ? base.toFixed(2) : '—', 9)}` +
+        `${pad(baseAt < 0 ? '—' : baseIsSpeech ? '声' : '背景', 8)}` +
+        `${pad(rate(spDrop, sp), 11)}${rate(bgDrop, bg)}`,
+    );
+  }
+  console.log(`\n**基準が声の区間から取れている声のある素材: ${baseFromSpeech} / ${baseTotal} 本**（読めるコマを持つものだけ）。`);
+  console.log('入れる前の心配（最大が声だとは決まっていない）は、**声のある素材では起きていない。**');
+  console.log('理由は門の側ではなく読めるコマの条件にある。窓が丸ごと鳴っているコマしか読まないので、');
+  console.log('**合間にへこむもの（打点・刻み）は、深く揺れていても基準を取りにいけない。**');
+  console.log('\n声の無い素材では基準は背景から取れる。そこで門が落とすのは「その素材の中でいちばん');
+  console.log('揺れていない背景」なので、**声ゼロの素材に対しては門が正しいほど切る秒が増える**。');
+  console.log('実際 `music-thump-drop`（声ゼロなのに素材単位の判定を通る 1 本）は 1.60s → 2.96s。');
+  console.log('**門は「ここは声でない」を正しく言っていて、それを受け止める素材単位の判定が無い**のが残っている穴。');
+
+  console.log('\n\n潰しにいった素材 2 本の外れ方（どちらも「声を食う」ではなく「黙る」）\n');
+  console.log('  ※ speech-sparse-thump-loud（打点が声より深い）: 基準 -19.74 と 3dB 以上高く、');
+  console.log('     **基準を打点に奪われる**。落とす背景は 3%（ほかの素材は 55〜100%）で、門は誤らずに効かなくなる。');
+  console.log('  ※ speech-sustained-thump（今回足した。伸ばした声＋低い側の打点）: 読めた秒が 2.56s しか無く、');
+  console.log('     **基準は声から取れた**（打点のへこみが読めるコマから外れるため）。落とす声 14% で残せた率は動かない。');
+  console.log('\n**2 通り試して 2 通りとも「黙る」だった。** 声を食う形で外せたのは');
+  console.log('`speech-clipped-bgm`（短く区切る声）だけで、そこは残せた率 100% → 96% と引き換えに精度 20% → 88%。');
+}

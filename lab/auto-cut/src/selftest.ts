@@ -2319,6 +2319,107 @@ export function runSelfTest(): TestResult[] {
         `${windowFrames - 1} コマ（窓 ${windowFrames} コマ）`,
       );
     }
+
+    // ㉑ **対数を外した深さの門**（`minEnergyDepthDrop`。2026-09-19・2 回目に既定にした）。
+    //
+    //    この門は「その素材の最大から何 dB 下か」で声と背景を分ける。
+    //    列そのものは**倍率に不変でない**ので、**差にして初めて使える**量になっている。
+    //    ここで守るのはその 1 点と、門が読めるコマの外へ出ないこと。
+    {
+      const sr = 16000;
+      const sounding = analyzeLoudness(makeTone(4, sr, [{ from: 0, to: 4 }]), 0.02);
+      const n = sounding.db.length;
+      const fill = (v: number) => new Float32Array(n).fill(v);
+      const lowLevel = new Float32Array(n);
+      for (let i = 0; i < n; i += 1) lowLevel[i] = sounding.db[i];
+      const bare = { mode: 'speech' as const, minSilence: 0.05, padding: 0, minKeep: 0, speechLeadIn: 0, minEnergyDepthDrop: 0 };
+      const gate = { ...bare, minEnergyDepthDrop: 6, minModulationDepth: 0 };
+      // 前半を「最大」、後半を「最大から 10dB 下」にした列。線 6dB なら後半だけが落ちる。
+      const half = new Float32Array(n);
+      for (let i = 0; i < n; i += 1) half[i] = i < n / 2 ? -20 : -30;
+
+      const dropped = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, lowLevel, undefined, undefined, half);
+      check(
+        '最大から線より下のコマは声だと言わない',
+        dropped.energySeconds > 0 && dropped.energyBaseDb !== null && near(dropped.energyBaseDb as number, -20, 1e-6),
+        `落とした ${dropped.energySeconds.toFixed(2)}s / 基準 ${dropped.energyBaseDb?.toFixed(2)}dB`,
+      );
+
+      // ㉑' **倍率に不変。** 列を丸ごと持ち上げても（＝素材の音量を上げても）結論は 1 ミリも動かない。
+      //     この門の存在理由そのもの。ここが崩れたら、素材の録音レベルで結果が変わる道具になる。
+      const lifted = new Float32Array(n);
+      for (let i = 0; i < n; i += 1) lifted[i] = half[i] + 12;
+      const liftedPlan = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, lowLevel, undefined, undefined, lifted);
+      check(
+        '列を丸ごと持ち上げても、落とすコマは変わらない',
+        near(liftedPlan.energySeconds, dropped.energySeconds, 1e-9) && near(liftedPlan.removed, dropped.removed, 1e-9),
+        `落とした ${liftedPlan.energySeconds.toFixed(2)}s（+12dB 前 ${dropped.energySeconds.toFixed(2)}s）`,
+      );
+
+      // ㉑'' その不変性は列の側にも要る。**素材を 2 倍すれば列は 6dB 上がる**（差は変わらない）。
+      //      ここが 6dB でなければ、上の「差にすれば打ち消える」が成り立たない。
+      const quiet = analyzeLoudness(makeTone(2, sr, [{ from: 0, to: 2, amp: 0.25 }]), 0.02);
+      const loud = analyzeLoudness(makeTone(2, sr, [{ from: 0, to: 2, amp: 0.5 }]), 0.02);
+      // 揺れの無い正弦波では深さが底に張り付くので、音量を 4.2Hz で揺らした列を直に渡す。
+      const wobble = (track: LoudnessTrack, offsetDb: number) => {
+        const db = new Float32Array(track.db.length);
+        for (let i = 0; i < db.length; i += 1) db[i] = offsetDb + 3 * Math.sin((2 * Math.PI * 4.2 * i * track.hop));
+        return energyModulationDepthDb({ hop: track.hop, db, duration: track.duration });
+      };
+      const mid = Math.round(quiet.db.length / 2);
+      const gapDb = wobble(loud, -20)[mid] - wobble(quiet, -26)[mid];
+      check(
+        '素材を 2 倍すると、この列はちょうど 6dB 上がる',
+        near(gapDb, 6, 0.05),
+        `${gapDb.toFixed(3)}dB`,
+      );
+
+      // ㉑''' **渡されないものを背景と読まない。** 列を渡し忘れただけで声が消える壊れ方をしないこと。
+      const noColumn = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, lowLevel);
+      check(
+        '列を渡さなければ、深さでは判断しない',
+        noColumn.energySeconds === 0 && noColumn.energyBaseDb === null && !noColumn.noSpeechFound,
+        '',
+      );
+
+      // ㉑'''' 低い側の音量だけ渡し忘れても同じ。**どのコマを読んでよいかがそこで決まる**ので、
+      //       無いまま読むと窓の縁の段差を「よく揺れている」と読んで基準を奪われる。
+      const noLow = planJetCut(sounding, gate, fill(0.5), fill(0.2), undefined, undefined, undefined, undefined, undefined, half);
+      check('低い側の音量が無ければ、深さでは判断しない', noLow.energySeconds === 0 && noLow.energyBaseDb === null, '');
+
+      // ㉑''''' **読めるコマが 1 つも無ければ、基準が作れないので門を立てない。**
+      //        ここで無理に基準を作ると、縁 1 コマが基準になって門が丸ごと誤る。
+      //        窓の幅より短い素材は、低い側が全編鳴っていても読めるコマを持たない（⑥'''' と同じ理由）。
+      const shortTrack = analyzeLoudness(makeTone(0.3, sr, [{ from: 0, to: 0.3 }]), 0.02);
+      const k = shortTrack.db.length;
+      const shortLow = new Float32Array(k);
+      for (let i = 0; i < k; i += 1) shortLow[i] = shortTrack.db[i];
+      const shortPlan = planJetCut(
+        shortTrack,
+        gate,
+        new Float32Array(k).fill(0.5),
+        new Float32Array(k).fill(0.2),
+        undefined,
+        undefined,
+        shortLow,
+        undefined,
+        undefined,
+        new Float32Array(k).fill(-20),
+      );
+      check(
+        '読めるコマが無ければ、基準を作らず門も立てない',
+        shortPlan.energyBaseDb === null && shortPlan.energySeconds === 0,
+        `${k} コマ（窓 ${modulationWindowFrames(shortTrack.hop)} コマ）`,
+      );
+
+      // ㉑'''''' 既定は 6dB。**ここが動いたら既定を変えたということ**で、記録に前後の数字が
+      //        並んでいなければならない（24 本で 残せた率 99.6% / 精度 72.3% / 実害 2.96s）。
+      check(
+        '既定で深さの門が入っている（線は 6dB）',
+        DEFAULT_JET_CUT.minEnergyDepthDrop === 6,
+        `minEnergyDepthDrop = ${DEFAULT_JET_CUT.minEnergyDepthDrop}`,
+      );
+    }
   }
 
   return results;

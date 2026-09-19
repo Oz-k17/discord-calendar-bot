@@ -40,6 +40,18 @@ export interface FeatureTrack {
    */
   lowModulationDepth: Float32Array;
   /**
+   * `lowModulationDepth` と同じ揺れを、**対数を取る前**（エネルギーの列）で見たもの
+   * （`energyModulationDepthDb` を参照。目盛りは dBFS だが 6dB/倍で動く）。
+   *
+   * dB の列で測ると、小さな打点の「10 倍」と声の「10 倍」が同じ 10dB になる。
+   * こちらは大きさが残るので、**声の帯域に居座る打点をコマ単位で落とせる**
+   * （silence.ts の `minEnergyDepthDrop`）。
+   *
+   * **単体で線を引いてはいけない。** 素材を 2 倍すれば 6dB 上がるので、
+   * 読むときは必ず**同じ素材の中の値との差**にすること。
+   */
+  lowEnergyDepth: Float32Array;
+  /**
    * 低い帯域だけの音量（dBFS）。`lowModulation` の材料で、
    * 「そこで何が起きているか」を外から確かめるために出している。
    *
@@ -1412,6 +1424,10 @@ export function analyzeFeatures(
   const lowModulationDepth = modulationDepthDb(lowTrack);
   // 向きも深さと同じ理由で、境目を置いていなくても出す（probe で並べて読めるように）。
   const lowLevelSkew = smoothMean(levelSkewness(lowTrack), Math.round(SKEW_SMOOTH / track.hop));
+  // 対数を外した深さ。コマ単位の門（silence.ts の `minEnergyDepthDrop`）がこの列を使う。
+  // 単体では倍率に不変でないので、**素材の中の最大からの差**としてしか読んではいけない。
+  // 理由は `energyModulationDepthDb` の注（素材を 2 倍すれば 6dB 上がる）。
+  const lowEnergyDepth = energyModulationDepthDb(lowTrack);
   const tone = new Float32Array(frames);
   const raw = new Float32Array(frames);
   for (let i = 0; i < frames; i += 1) {
@@ -1443,6 +1459,7 @@ export function analyzeFeatures(
     modulation,
     lowModulation,
     lowModulationDepth,
+    lowEnergyDepth,
     lowLevel,
     lowLevelSkew,
     centroid,
@@ -1471,6 +1488,7 @@ export const FEATURE_NAMES = [
   'modulation',
   'lowModulation',
   'lowModulationDepth',
+  'lowEnergyDepth',
   'lowLevelSkew',
   'flatness',
   'tone',

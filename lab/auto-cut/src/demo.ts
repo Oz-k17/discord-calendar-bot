@@ -237,6 +237,9 @@ function refreshCut() {
     voice.features.lowModulationDepth,
     // 低い帯域の音量の向き。こちらはコマ単位の門で、声の帯域に居座る打点を落とす。
     voice.features.lowLevelSkew,
+    // 対数を外した深さ。コマ単位の門（既定で入っている。silence.ts の `minEnergyDepthDrop`）。
+    // **渡し忘れると画面だけ門の無い判定になる**ので、列はここでも必ず渡す。
+    voice.features.lowEnergyDepth,
   );
 
   $<HTMLOutputElement>('out-sensitivity').textContent = Number($<HTMLInputElement>('sensitivity').value).toFixed(2);

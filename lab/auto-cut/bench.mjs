@@ -136,6 +136,9 @@ for (const file of files) {
       // `LAB_SKEW=1` で線 0.4、`LAB_SKEW=0.6` のように線そのものも渡せる。
       ...(process.env.LAB_SKEW ? { maxLowSkew: Number(process.env.LAB_SKEW) === 1 ? 0.4 : Number(process.env.LAB_SKEW) } : {}),
       ...(process.env.LAB_SKEW_HOLD ? { skewHold: Number(process.env.LAB_SKEW_HOLD) } : {}),
+      // 対数を外した深さの門（その素材の最大から何 dB 下までを声として通すか）。
+      // `LAB_EDEPTH=6` のように線そのものを渡す。0 と既定の差は silence.ts の注を参照。
+      ...(process.env.LAB_EDEPTH !== undefined ? { minEnergyDepthDrop: Number(process.env.LAB_EDEPTH) } : {}),
       // 低い側を「鳴っている」とみなす線を、その場の低い側の大きさから何 dB 下に置くか。
       // 既定 20（2026-09-19 から）。`LAB_LOWTHR=0` で全域と同じ線＝それより前の振る舞いに戻る。
       ...(process.env.LAB_LOWTHR ? { lowBandRangeDb: Number(process.env.LAB_LOWTHR) } : {}),
@@ -149,6 +152,8 @@ for (const file of files) {
     // 低い帯域の音量の向き。これだけはコマ単位の門（声の帯域に居座る打点を落とす）。
     // 列はいつでも渡す。効かせるかどうかは上の `maxLowSkew` が決める。
     features.lowLevelSkew,
+    // 対数を外した深さ。列はいつでも渡す（効かせるかは `minEnergyDepthDrop` が決める）。
+    features.lowEnergyDepth,
   );
   const speechMs = performance.now() - t1;
 

@@ -614,6 +614,44 @@ export interface JetCutOptions {
    * 無音を挟んだら切る（包絡の保持と同じ理由。曲の切れ目をまたいで閉め続けない）。
    */
   skewHold: number;
+  /**
+   * 低い側の揺れを**対数を外した深さ**（`lowEnergyDepth`）で見て、
+   * **その素材の最大から何 dB 下**までを声として通すか。0 で門を入れない。
+   *
+   * ## なぜ「最大からの差」なのか
+   *
+   * この量は底に不変で大きさも持つが、**倍率に不変でない**（素材を 2 倍すれば 6dB 上がる）。
+   * 絶対値で線を引くと、素材 1 本を 0.5dB 下げただけで結論が変わる
+   * （`energyModulationDepthDb` の注）。**同じ素材の中の最大との差**なら倍率は打ち消える。
+   *
+   * 2026-09-18（3 回目）に「最大を基準にする」を**素材単位**で試して駄目だった
+   * （並ぶ順が「声があるか」ではなく「鳴りっぱなしか」になる）。
+   * ここがそれと違うのは、**素材どうしを比べていない**ところ。
+   * コマ単位では、同じ素材の中で声のコマと背景のコマを分けるだけでよい。
+   *
+   * ## 基準が声から取れているかは、測って確かめてある
+   *
+   * 「最大が声だとは決まっていない」が入れる前の心配だった。読めるコマを持つ
+   * **声のある素材 21 本すべてで、最大を出すコマは声の区間にある**（`lab:probe` の段で毎回数える）。
+   *
+   * 守っているのは門の側ではなく**読めるコマの条件**のほう。窓が丸ごと鳴っているコマしか
+   * 読まないので、**合間にへこむもの（打点・刻み）は、深く揺れていても基準を取りにいけない。**
+   * 声の無い素材では背景から取れるが、そちらは門が背景どうしを比べるだけなので、
+   * 落ちるコマは「その素材の中でいちばん揺れていない背景」になる。
+   *
+   * ## 読めるコマにしか触れない
+   *
+   * 深さ・向きとまったく同じ条件（`lowBandReadable`）。窓に無音の縁が入ると
+   * 段差だけで深さが跳ね上がるので、そこを読むと**縁のコマが基準になって門が緩む**。
+   *
+   * ## 受け皿を付けていない（付ける必要が出ていない、が正しい）
+   *
+   * 向きの門には「門だけで 5% を割ったら、その素材では門を外す」（`skewDropped`）がある。
+   * こちらには入れていない。**38 本で「声が見つからない」に転んだ素材が 1 本も無い**ため。
+   * ただし余裕は減っていて、`speech-clipped-bgm`（短く区切る声）の割合は
+   * **25% → 12%**（線は 5%）。**門を強めるか、割合の線を上げるときは、ここを先に見ること。**
+   */
+  minEnergyDepthDrop: number;
 }
 
 /**
@@ -661,6 +699,12 @@ export const DEFAULT_JET_CUT: JetCutOptions = {
   // **既定は 0＝入れていない**（2026-09-16・3 回目に測って見送った。理由は上の注）。
   maxLowSkew: 0,
   skewHold: 0,
+  // 2026-09-19（2 回目）に足して、同じ日に既定にした。**-6dB は膝**で、
+  // そこから狭めると声を食い始め（-5dB で残せた率 98.9%・-3dB で 97.1%）、
+  // 広げると効きが落ちていくだけ（-8dB で精度 71.3%・-11dB で 70.0%）。
+  // 24 本の平均で **残せた率 99.7% → 99.6% / 精度 68.1% → 72.3%**。
+  // 代価は `music-thump-drop` の 1.60s → 2.96s（注と JOURNAL を参照）。
+  minEnergyDepthDrop: 6,
 };
 
 export interface JetCutPlan {
@@ -743,6 +787,20 @@ export interface JetCutPlan {
    * 声の有無を併せて見ないと、この印は読めない。
    */
   skewDropped: boolean;
+  /**
+   * 対数を外した深さの門（`minEnergyDepthDrop`）が背景として落としたコマの秒数。
+   *
+   * 向きの門の `skewSeconds` と同じ読み方で、**声らしさは超えていたのに落としたコマ**だけを数える。
+   * ここが 0 のまま数字が動いたら、効いているのはこの門ではない。
+   */
+  energySeconds: number;
+  /**
+   * 門が使った基準（読めるコマでの深さの最大 dB）。門が立たなかったときは null。
+   *
+   * 出しているのは、**この量が素材どうしで比べられないから**。
+   * 「-6dB 落ちた」が何からの -6dB かは素材ごとに違うので、線の意味を読むには基準が要る。
+   */
+  energyBaseDb: number | null;
 }
 
 /**
@@ -994,6 +1052,7 @@ export function planJetCut(
   lowLevel?: Float32Array,
   lowDepth?: Float32Array,
   lowSkew?: Float32Array,
+  lowEnergyDepth?: Float32Array,
 ): JetCutPlan {
   const opts = { ...DEFAULT_JET_CUT, ...options };
   const thresholdDb = opts.thresholdDb ?? autoThresholdDb(track, opts.sensitivity);
@@ -1035,12 +1094,34 @@ export function planJetCut(
   // 読んでよいコマは深さの判定とまったく同じ条件で決める（`lowBandReadable`）。
   const useSkew =
     !!lowSkew && !!lowLevel && lowSkew.length === track.db.length && lowLevel.length === track.db.length && opts.maxLowSkew > 0;
-  const skewReadable = useSkew
-    ? lowBandReadable(lowLevel as Float32Array, lowThresholdDb, modulationWindowFrames(track.hop))
-    : null;
+  // 対数を外した深さの門。読んでよいコマの条件は向きとまったく同じ。
+  const useEnergyDepth =
+    !!lowEnergyDepth &&
+    !!lowLevel &&
+    lowEnergyDepth.length === track.db.length &&
+    lowLevel.length === track.db.length &&
+    opts.minEnergyDepthDrop > 0;
+  // 印は 1 回だけ作って 2 つの門で使い回す。**別々に作ると、片方の線を持ち直したときに
+  // もう片方が静かに食い違う**（`lowBandReadable` の注と同じ理由）。
+  const lowReadable =
+    useSkew || useEnergyDepth
+      ? lowBandReadable(lowLevel as Float32Array, lowThresholdDb, modulationWindowFrames(track.hop))
+      : null;
+  const skewReadable = useSkew ? lowReadable : null;
   const skewHoldFrames = Math.max(0, Math.round(opts.skewHold / track.hop));
   let skewCloseUntil = -1;
   let skewFrames = 0;
+  // 基準は「読めるコマでの最大」。**この素材の中でいちばん揺れているコマ**を声とみなして、
+  // そこからどれだけ落ちたかで測る。読めるコマが 1 つも無ければ基準が作れないので、
+  // 門は立てない（黙って通す。深さの素材単位の判定と同じ構え）。
+  let energyBase = -Infinity;
+  if (useEnergyDepth) {
+    const marks = lowReadable as Uint8Array;
+    const column = lowEnergyDepth as Float32Array;
+    for (let i = 0; i < marks.length; i += 1) if (marks[i] && column[i] > energyBase) energyBase = column[i];
+  }
+  const energyGate = useEnergyDepth && Number.isFinite(energyBase);
+  let energyFrames = 0;
   // 発話の頭を遡って拾うぶん。level モードでは鳴っているコマをすべて拾うので出番が無い。
   const leadFrames = usedMode === 'speech' ? Math.max(0, Math.round(opts.speechLeadIn / track.hop)) : 0;
   // どこまで拾ったか。同じコマを二度拾わないため（重なっても mergeRanges が畳むが、
@@ -1082,6 +1163,12 @@ export function planJetCut(
       if (useSkew && (skewReadable as Uint8Array)[i] && (lowSkew as Float32Array)[i] >= opts.maxLowSkew) skewCloseUntil = i + skewHoldFrames;
       if (useSkew && i <= skewCloseUntil) {
         skewFrames += 1;
+        continue;
+      }
+      // 低い側の揺れが、この素材のいちばん揺れているコマから大きく落ちているなら背景。
+      // 向きの門と同じく `inSpeech` は触らない（門で閉めたことをヒステリシスに伝えない）。
+      if (energyGate && (lowReadable as Uint8Array)[i] && (lowEnergyDepth as Float32Array)[i] - energyBase < -opts.minEnergyDepthDrop) {
+        energyFrames += 1;
         continue;
       }
       // 包絡の門。声らしさ（揺れ × 音程）は「音色が動いているか」を見ていないので、
@@ -1182,6 +1269,7 @@ export function planJetCut(
       lowLevel,
       lowDepth,
       lowSkew,
+      lowEnergyDepth,
     );
     // 門を外しても割合が線を割るなら、`withoutSkew` 側が同じ理由で止まっている。
     // そのときは外したこと自体が結論に効いていないので、印も付けない。
@@ -1208,6 +1296,8 @@ export function planJetCut(
       depthMax: depth.max,
       skewSeconds: skewFrames * track.hop,
       skewDropped: false,
+      energySeconds: energyFrames * track.hop,
+      energyBaseDb: energyGate ? energyBase : null,
     };
   }
 
@@ -1233,6 +1323,8 @@ export function planJetCut(
     depthMax: depth.max,
     skewSeconds: skewFrames * track.hop,
     skewDropped: false,
+    energySeconds: energyFrames * track.hop,
+    energyBaseDb: energyGate ? energyBase : null,
   };
 }
 
