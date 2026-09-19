@@ -180,6 +180,32 @@ export interface JetCutOptions {
    */
   minDepthSeconds: number;
   /**
+   * 低い側を「鳴っている」とみなす線を、**その場の低い側の大きさから何 dB 下に置くか**。
+   * 0 なら全域と同じ自動しきい値をそのまま当てる（2026-09-19 より前の振る舞い）。
+   *
+   * **全域の線をそのまま低い側に当てると、混ざっているものが大きくなるほど読めなくなる。**
+   * 低い側の音量は「全域の音量 × 低い側の取り分」なので目盛りは同じだが、
+   * 自動しきい値は**全域の分布**（底から 25%）で決まる。低い側で鳴っているものを大きくすると
+   * 全域の分布が広がって線が上がり、低い側の谷はそこに置いたまま取り残される。
+   * 実際 `speech-sparse-thump` の打点を 2 倍にするだけで、
+   * 読めた秒が **12.38s → 0.04s** になる（`speech-sparse-thump-loud.wav`）。
+   * **門は誤るのではなく、いちばん要る素材でだけ自分から働かなくなる。**
+   *
+   * だから線は**低い側の大きさだけ**から作る（`lowBandLineDb`）。
+   * 素材ぜんたいの分位点で取らないのは、**素材の中で音量が動くと外れる**ため。
+   * ナレーションの下で伴奏が 13 秒で 24dB 下がる素材（`speech-bgm-fade.wav`）では、
+   * p90 から 14dB 下に置くと後半の読めた秒が 2.12s → 1.18s と**全域の線より減る**。
+   * その場の大きさから取れば線が一緒に下がるので、そこが起きない。
+   *
+   * 既定の 20 は、6〜40dB を振って決めた（JOURNAL 2026-09-19）。
+   * 直したい `speech-sparse-thump-loud` が読めるのは **14dB から**だが、
+   * 14 では `music-flute`（声ゼロ）の読めた秒が 1.28s を割って**深さの判定が止めなくなる**
+   * （鳴っているところを 0.46s 切る）。深いほうは **24dB で `music-tremolo` が丸ごと読める**
+   * ようになり、30dB で `drums` まで読み始める。**20 はその間で、38 本の判定がどれも動かない。**
+   * `LAB_LOWTHR=0 npm run lab:bench` で全域と同じ線＝2026-09-19 より前に戻せる。
+   */
+  lowBandRangeDb: number;
+  /**
    * 「スペクトルの形が動いた」とみなす下限（`FeatureTrack.shapeChange` の値）。
    *
    * 声らしさ（modulation × tone）は「音程のある音が音節の速さで揺れている」だけを見るので、
@@ -622,6 +648,10 @@ export const DEFAULT_JET_CUT: JetCutOptions = {
   // 2026-09-18 に 0.8 から下げた（うねらない伴奏の上の声を丸ごと止めていた。上の注）。
   minModulationDepth: 0.5,
   minDepthSeconds: 1.28,
+  // 2026-09-19 に足して、同じ日に既定にした（0 にすれば全域と同じ線＝それより前の振る舞い）。
+  // **38 本の判定は 1 つも動かない。** 直っているのは「読めるコマ」のほうで、
+  // `speech-sparse-thump-loud` が 0.04s → 12.38s（測りかたは JOURNAL と `lowBandRangeDb` の注）。
+  lowBandRangeDb: 20,
   minShapeChange: 0.09,
   minShapeSeconds: 0.5,
   minEnvelopeChange: 0.09,
@@ -729,6 +759,16 @@ export function autoThresholdDb(track: LoudnessTrack, sensitivity: number): numb
   return floor + (voice - floor) * ratio;
 }
 
+/**
+ * 低い側の線を引くときに「その場の大きさ」を測る幅（秒・前後それぞれ）。
+ *
+ * 下見では 1.0 秒と 2.5 秒で結果がほとんど動かなかった（`music-tremolo` の読めた秒が
+ * 1.46s 対 0.50s、ほかの 37 本は 0.1 秒未満の差）。**動かないほうを選ぶ理由が無いので、
+ * 深さの窓（0.64 秒）よりはっきり長い側に置いてある。** 短いと、窓の中の谷そのものが
+ * 基準を下げて「へこんでいない」ことになってしまう。
+ */
+const LOW_LINE_REFERENCE = 2.5;
+
 /** 区間を繋いだり広げたりする小道具。start 昇順で重なりのない列を返す。 */
 function mergeRanges(ranges: Range[], gap: number): Range[] {
   const sorted = [...ranges].sort((a, b) => a.start - b.start);
@@ -822,7 +862,7 @@ export function lowBandDepthSeconds(
   lowLevel: Float32Array,
   depth: Float32Array,
   hop: number,
-  thresholdDb: number,
+  thresholdDb: number | Float32Array,
   windowFrames: number,
   minDepth: number,
 ): { judged: number; above: number; max: number } {
@@ -841,6 +881,48 @@ export function lowBandDepthSeconds(
 }
 
 /**
+ * 低い側を「鳴っている」とみなす線を、**その場の低い側の大きさ**から作る。
+ *
+ * 全域の自動しきい値（`autoThresholdDb`）は底から 25% の位置なので、
+ * **分布が広がると線が上がる**。低い側で鳴っているものを大きくすると全域の分布が広がり、
+ * 低い側の谷はそこに置いたまま線の下へ落ちる（`lowBandRangeDb` の注に数字がある）。
+ *
+ * 素材ぜんたいの分位点（p90）で取る形も測ったが、**素材の中で音量が動くと外れる**
+ * （伴奏がフェードしていく素材で、後半が丸ごと読めなくなる）。
+ * だから**前後 `LOW_LINE_REFERENCE` 秒の最大**を基準にして、そこから下へ取る。
+ * こうすると線が音量の動きに付いてくる。
+ *
+ * 基準に最小や中央値ではなく**最大**を使うのは、見たいのが「へこんでいるか」だから。
+ * 底を基準にすると、底そのものが持ち上がったときに一緒に上がってしまう。
+ *
+ * @param rangeDb その場の大きさから何 dB 下に置くか。0 以下なら `fallbackDb` をそのまま返す。
+ */
+export function lowBandLineDb(lowLevel: Float32Array, fallbackDb: number, rangeDb: number, hop: number): number | Float32Array {
+  if (!(rangeDb > 0) || lowLevel.length === 0 || !(hop > 0)) return fallbackDb;
+  const half = Math.max(1, Math.round(LOW_LINE_REFERENCE / hop));
+  const frames = lowLevel.length;
+  const line = new Float32Array(frames);
+  // 移動最大は単調な待ち行列で出す。窓を 1 コマずつ舐め直すと尺の 2 乗になる
+  // （`lowBandReadable` や `envelopeGateFrames` と同じ理由。10 分の素材で刺さる）。
+  const queue = new Int32Array(frames);
+  let head = 0;
+  let tail = 0;
+  let next = 0;
+  for (let i = 0; i < frames; i += 1) {
+    const to = Math.min(frames - 1, i + half);
+    for (; next <= to; next += 1) {
+      while (tail > head && lowLevel[queue[tail - 1]] <= lowLevel[next]) tail -= 1;
+      queue[tail] = next;
+      tail += 1;
+    }
+    const from = i - half;
+    while (queue[head] < from) head += 1;
+    line[i] = lowLevel[queue[head]] - rangeDb;
+  }
+  return line;
+}
+
+/**
  * 低い帯域の窓を**読んでよいコマ**に印を付ける。
  *
  * 読んでよいのは「窓が丸ごと、低い側が鳴っている」コマだけ。窓の縁に無音が入ると、
@@ -852,16 +934,23 @@ export function lowBandDepthSeconds(
  * 2 か所に同じ規則を書くと、片方だけ直したときに
  * 「縁を外したつもりで外せていない」という静かな壊れ方をする。
  */
-export function lowBandReadable(lowLevel: Float32Array, thresholdDb: number, windowFrames: number): Uint8Array {
+export function lowBandReadable(
+  lowLevel: Float32Array,
+  thresholdDb: number | Float32Array,
+  windowFrames: number,
+): Uint8Array {
   const frames = lowLevel.length;
   const out = new Uint8Array(frames);
   const half = windowFrames >> 1;
+  // 線はコマごとに動くこともある（`lowBandLineDb`）。1 本の値で呼べる形も残してあるのは、
+  // 検算が「この線ならこう読める」を直に書けるようにするため。
+  const lineAt = typeof thresholdDb === 'number' ? () => thresholdDb : (i: number) => thresholdDb[i];
   // 窓が丸ごと鳴っているかは、鳴っていないコマからの距離で決める。
   // 1 コマずつ窓を舐め直すと尺の 2 乗になる（`envelopeGateFrames` と同じ理由）。
   const since = new Int32Array(frames);
   let run = 0;
   for (let i = 0; i < frames; i += 1) {
-    run = lowLevel[i] > thresholdDb && lowLevel[i] > SILENCE_DB ? run + 1 : 0;
+    run = lowLevel[i] > lineAt(i) && lowLevel[i] > SILENCE_DB ? run + 1 : 0;
     since[i] = run;
   }
   for (let i = 0; i < frames; i += 1) {
@@ -908,6 +997,9 @@ export function planJetCut(
 ): JetCutPlan {
   const opts = { ...DEFAULT_JET_CUT, ...options };
   const thresholdDb = opts.thresholdDb ?? autoThresholdDb(track, opts.sensitivity);
+  // 低い側の線は別に持つ。**深さ（`lowBandDepthSeconds`）と向き（`skewReadable`）で同じものを使う**
+  // （`lowBandReadable` の注と同じ理由。片方だけ持ち直すと静かに食い違う）。
+  const lowThresholdDb = lowLevel ? lowBandLineDb(lowLevel, thresholdDb, opts.lowBandRangeDb, track.hop) : thresholdDb;
   const duration = track.duration;
   const usedMode = opts.mode === 'speech' && speechScore && speechScore.length === track.db.length ? 'speech' : 'level';
 
@@ -944,7 +1036,7 @@ export function planJetCut(
   const useSkew =
     !!lowSkew && !!lowLevel && lowSkew.length === track.db.length && lowLevel.length === track.db.length && opts.maxLowSkew > 0;
   const skewReadable = useSkew
-    ? lowBandReadable(lowLevel as Float32Array, thresholdDb, modulationWindowFrames(track.hop))
+    ? lowBandReadable(lowLevel as Float32Array, lowThresholdDb, modulationWindowFrames(track.hop))
     : null;
   const skewHoldFrames = Math.max(0, Math.round(opts.skewHold / track.hop));
   let skewCloseUntil = -1;
@@ -1044,7 +1136,7 @@ export function planJetCut(
         lowLevel as Float32Array,
         lowDepth as Float32Array,
         track.hop,
-        thresholdDb,
+        lowThresholdDb,
         modulationWindowFrames(track.hop),
         opts.minModulationDepth,
       )

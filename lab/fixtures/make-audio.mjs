@@ -460,17 +460,21 @@ function speak(
  * 深さは 0〜1 のつもり。1 を超えると音量が負になって位相が反転するが、
  * 弾いていない（試し用の素材を作るだけなので、渡す値はこのファイルの中で閉じている）。
  */
-function music(data, from, to, level, tremolo = 0, swellDepth = 0.15, tremoloDepth = 0.45) {
+function music(data, from, to, level, tremolo = 0, swellDepth = 0.15, tremoloDepth = 0.45, fadeDb = 0) {
   const chord = [220, 277.18, 329.63, 440];
   for (let i = Math.round(from * SR); i < Math.min(data.length, Math.round(to * SR)); i += 1) {
     const t = i / SR;
+    // 尺の頭から終わりまでで `fadeDb` だけ下がる（0 なら何も掛からない）。
+    // **段差を作らずに「素材の中で低い側の大きさが変わる」形を作る**ためのもの。
+    // 段差で作ると、その段差自体が縁になって別の話になってしまう。
+    const fade = fadeDb ? Math.pow(10, ((fadeDb * (t - from)) / Math.max(1e-9, to - from)) / 20) : 1;
     // 2 秒周期で少し揺らして、まったくの定常にならないようにする。
     const swell = 1 - swellDepth + swellDepth * Math.sin(2 * Math.PI * 0.5 * t);
     // ビブラート気味に深く揺らす。声の音節（4.2Hz）と同じ帯域を狙う。
     const shake = tremolo ? 1 - tremoloDepth + tremoloDepth * Math.sin(2 * Math.PI * tremolo * t) : 1;
     let v = 0;
     for (const f of chord) v += Math.sin(2 * Math.PI * f * t);
-    data[i] += (level * swell * shake * v) / chord.length;
+    data[i] += (level * fade * swell * shake * v) / chord.length;
   }
 }
 
@@ -872,6 +876,12 @@ export function renderShort(
     bgmSwellDepth = 0.15,
     /** トレモロの深さ。浅くすると「うねりに隠れた刻み」が作れる。 */
     bgmTremoloDepth = 0.45,
+    /**
+     * 伴奏が尺の頭から終わりまでで何 dB 下がるか（負の値）。0 なら下げない。
+     * **低い側の線を「その素材の大きいほうから何 dB 下」で置く手を潰しにいく**ための形。
+     * 段差を作らずに、素材の中で低い側の大きさだけを動かせる。
+     */
+    bgmFadeDb = 0,
     /** 声の音節と同じ速さで共鳴が動く楽器（Hz）。0 で鳴らさない。 */
     wah = 0,
     wahLevel = 0.3,
@@ -942,7 +952,7 @@ export function renderShort(
   const random = rng(seed);
   const data = new Float32Array(Math.round(SHORT_LENGTH * SR));
   noise(data, noiseLevel, random);
-  if (bgm) music(data, 0, SHORT_LENGTH, bgmLevel, bgmTremolo, bgmSwellDepth, bgmTremoloDepth);
+  if (bgm) music(data, 0, SHORT_LENGTH, bgmLevel, bgmTremolo, bgmSwellDepth, bgmTremoloDepth, bgmFadeDb);
   if (wah) wahChord(data, 0, SHORT_LENGTH, wahLevel, wah);
   if (chordEvery) chordProgression(data, 0, SHORT_LENGTH, chordLevel, chordEvery, chordBreaks);
   if (beat) drums(data, 0, SHORT_LENGTH, beatLevel, beat, random);

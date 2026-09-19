@@ -9,6 +9,7 @@
  *   LAB_SKEW=1 npm run lab:bench      # 向きの門を入れた側（2026-09-16・3 回目。既定では入れていない）
  *   LAB_FULLBAND=1 npm run lab:bench   # 揺れを全域で見る（2026-09-16・2 回目より前の振る舞い）
  *   LAB_LOWBAND=4000 npm run lab:bench # 低い側の境目を変えて振る（Hz。1 なら既定の 2000Hz）
+ *   LAB_LOWTHR=0 npm run lab:bench     # 低い側の線を全域と同じにする（2026-09-19 より前の振る舞い）
  *
  * `LAB_NO_RUN` は A/B を並べるためのもの。判定に手を入れたら、
  * **入れる前と入れたあとを同じコマンドで出せる**ようにしておかないと、
@@ -135,6 +136,9 @@ for (const file of files) {
       // `LAB_SKEW=1` で線 0.4、`LAB_SKEW=0.6` のように線そのものも渡せる。
       ...(process.env.LAB_SKEW ? { maxLowSkew: Number(process.env.LAB_SKEW) === 1 ? 0.4 : Number(process.env.LAB_SKEW) } : {}),
       ...(process.env.LAB_SKEW_HOLD ? { skewHold: Number(process.env.LAB_SKEW_HOLD) } : {}),
+      // 低い側を「鳴っている」とみなす線を、その場の低い側の大きさから何 dB 下に置くか。
+      // 既定 20（2026-09-19 から）。`LAB_LOWTHR=0` で全域と同じ線＝それより前の振る舞いに戻る。
+      ...(process.env.LAB_LOWTHR ? { lowBandRangeDb: Number(process.env.LAB_LOWTHR) } : {}),
     },
     features.speechScore,
     features.shapeChange,

@@ -12,6 +12,7 @@ import {
   keepEdgeSeconds,
   keepScoreSeconds,
   lowBandDepthSeconds,
+  lowBandLineDb,
   lowBandReadable,
   minimalKeepRanges,
   planJetCut,
@@ -2121,6 +2122,73 @@ export function runSelfTest(): TestResult[] {
       let narrowFrames = 0;
       for (let i = 0; i < frames; i += 1) narrowFrames += narrowReadable[i];
       check('全域のしきい値より静かな帯は、1 コマも読めない', narrowFrames === 0, `読めた ${(narrowFrames * hop).toFixed(2)}s`);
+
+      // ①'' **そこを 2026-09-19 に持ち直した**（`lowBandLineDb`）。線を低い側の大きさから取れば、
+      //      帯ごと静かでも読める。①' の素材（一定の -50dB）がそのまま材料になる。
+      const ownLine = lowBandLineDb(narrow, -40, 20, hop);
+      const ownReadable = lowBandReadable(narrow, ownLine, windowFrames);
+      let ownFrames = 0;
+      for (let i = 0; i < frames; i += 1) ownFrames += ownReadable[i];
+      check(
+        '低い側の大きさから線を取れば、静かな帯でも読める',
+        ownFrames === frames - (windowFrames - 1),
+        `読めた ${ownFrames} コマ（縁 ${windowFrames - 1} コマを除く ${frames - (windowFrames - 1)} コマ）`,
+      );
+
+      // ①''' **直した眼目はここ。全域の線は「混ざっているものを大きくすると上がる」。**
+      //       低い側が -20dB で鳴っていて、合間に -30dB までへこむ列を作る。
+      //       全域の線が -25dB なら、へこみが線を割って窓ごと読めなくなる（＝素材を大きくした側）。
+      //       線を低い側の大きさ（-20dB）から 20dB 下に取れば -40dB なので、へこみは割らない。
+      const dips = constant(-20);
+      for (let i = 20; i < frames; i += 10) dips[i] = -30;
+      let fullbandFrames = 0;
+      const fullband = lowBandReadable(dips, -25, windowFrames);
+      for (let i = 0; i < frames; i += 1) fullbandFrames += fullband[i];
+      let ownDipFrames = 0;
+      const ownDip = lowBandReadable(dips, lowBandLineDb(dips, -25, 20, hop), windowFrames);
+      for (let i = 0; i < frames; i += 1) ownDipFrames += ownDip[i];
+      check(
+        '打点の合間のへこみは、全域の線だと窓ごと落ちる',
+        fullbandFrames === 0,
+        `全域の線で読めた ${fullbandFrames} コマ / 低い側の線で読めた ${ownDipFrames} コマ`,
+      );
+      check(
+        '低い側の線なら、同じへこみを読み切る',
+        ownDipFrames === frames - (windowFrames - 1),
+        `読めた ${ownDipFrames} コマ`,
+      );
+
+      // ①'''' **線はその場の大きさに付いてくる（素材の中で音量が動いても外れない）。**
+      //        前半 -20dB / 後半 -50dB の列。素材ぜんたいの分位点で取ると後半が丸ごと落ちるが、
+      //        その場の大きさから取れば後半も読める（`speech-bgm-fade.wav` がこの形）。
+      // ①''''' **線を低い側から取ると、無音の素材で「全部読める」に化けないか。**
+      //         線は底より下（-120dB）に下がるので、線だけを見れば全コマ通る。
+      //         そこを止めているのは `SILENCE_DB` の判定で、**線と別に置いてある意味がここに出る。**
+      const silent = constant(-100);
+      const silentReadable = lowBandReadable(silent, lowBandLineDb(silent, -40, 20, hop), windowFrames);
+      let silentFrames = 0;
+      for (let i = 0; i < frames; i += 1) silentFrames += silentReadable[i];
+      check('無音の素材は、線を低い側から取っても 1 コマも読めない', silentFrames === 0, `読めた ${silentFrames} コマ`);
+
+      // 基準の幅（前後 2.5 秒）よりはっきり長い列でないと、素材ぜんたいが 1 つの窓に入って
+      // 「付いてくる」を確かめられない。12 秒ぶんで作る。
+      const longFrames = Math.round(12 / hop);
+      const fading = new Float32Array(longFrames);
+      for (let i = 0; i < longFrames; i += 1) fading[i] = i < longFrames / 2 ? -20 : -50;
+      const movingLine = lowBandLineDb(fading, -40, 20, hop) as Float32Array;
+      check(
+        '線は、その場の低い側の大きさに付いてくる',
+        near(movingLine[10], -40, 1e-6) && near(movingLine[longFrames - 10], -70, 1e-6),
+        `頭 ${movingLine[10].toFixed(1)}dB / 尻 ${movingLine[longFrames - 10].toFixed(1)}dB`,
+      );
+      // 基準は**前後 2.5 秒の最大**なので、段差のすぐ先では大きいほうが残る（窓の幅の意味）。
+      // ここが「その場」の粗さで、細かくすると窓の中の谷そのものが基準を下げてしまう。
+      const atStep = movingLine[Math.round(longFrames / 2) + 10];
+      check(
+        '段差の先でも、前後 2.5 秒に大きい側が居れば線は下がらない',
+        near(atStep, -40, 1e-6),
+        `段差の 0.2 秒あと ${atStep.toFixed(1)}dB`,
+      );
 
       const sr = 16000;
       const sounding = analyzeLoudness(makeTone(4, sr, [{ from: 0, to: 4 }]), 0.02);

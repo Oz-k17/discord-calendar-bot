@@ -21,11 +21,11 @@ import { readWav } from '../fixtures/wav.mjs';
 import { renderShort } from '../fixtures/make-audio.mjs';
 import { isSpeechAt, SHORT_FIXTURES, UTTERANCES } from '../fixtures/spec.mjs';
 
-const { analyzeLoudness, SILENCE_DB } = await import('./src/loudness.ts');
+const { analyzeLoudness, percentileDb, SILENCE_DB } = await import('./src/loudness.ts');
 const { analyzeFeatures, energyModulationDepthDb, FEATURE_NAMES, MOD_SPLIT_HZ, modulationDepthDb, modulationWindowFrames } =
   await import('./src/features.ts');
 
-const { autoThresholdDb, cutSoundingSeconds, DEFAULT_JET_CUT, envelopeGateFrames, lowBandDepthSeconds, lowBandReadable, planJetCut } =
+const { autoThresholdDb, cutSoundingSeconds, DEFAULT_JET_CUT, envelopeGateFrames, lowBandDepthSeconds, lowBandLineDb, lowBandReadable, planJetCut } =
   await import('./src/silence.ts');
 /**
  * 特徴量の出し方。既定は**出荷されている側**（全域）に揃える。
@@ -1578,4 +1578,198 @@ console.log('0.5 を下回るのは「逆向きに効いている」という意
   console.log('\n次にここへ戻るなら、**`lowBandReadable` のしきい値**から。');
   console.log('いまは全域と同じ自動しきい値を低い側にも当てているので、低い側が大きい素材ほど読めなくなる。');
   console.log('（2026-09-17 の「狭めた帯で測るなら、しきい値も一緒に持ち直すこと」と同じ相手。）');
+  console.log('→ **2026-09-19 に持ち直した。次の段を参照。**');
+}
+
+// --- 低い側の線を持ち直す（2026-09-19）---
+//
+// 前の回の積み残しの第一候補。上の段の最後で行き止まりになっていた相手。
+//
+// 直す前の形: 低い側を「鳴っている」とみなす線に、**全域の自動しきい値をそのまま当てていた。**
+// 目盛りは合っている（低い側の音量は全域の音量に取り分を掛け戻して作ってある）が、
+// **線の決め方が全域の分布に乗っている**（底から 25%）。低い側で鳴っているものを大きくすると
+// 全域の分布が広がって線が上がり、低い側の谷はそこに置いたまま線の下へ落ちる。
+//
+// この段は 4 通りの置き方を並べる。結論を先に書くと、
+// **「その場の低い側の大きさから 20dB 下」が要る 3 つを同時に満たした。**
+{
+  const LINES = [
+    ['A 全域(旧)', (f, thr) => thr],
+    ['B 低い側の自動', (f, thr) => autoThresholdDb({ hop: 1, db: f.lowLevel, duration: f.lowLevel.length }, DEFAULT_JET_CUT.sensitivity)],
+    ['C 素材のp90-20', (f, thr) => percentileDb({ hop: 1, db: f.lowLevel, duration: f.lowLevel.length }, 0.9) - 20],
+    ['D その場-20', (f, thr, hop) => lowBandLineDb(f.lowLevel, thr, 20, hop)],
+  ];
+
+  const measured = [];
+  for (const fixture of SHORT_FIXTURES) {
+    const file = path.join(out, fixture.name);
+    if (!fs.existsSync(file)) continue;
+    const buffer = readWav(file);
+    const track = analyzeLoudness(buffer, 0.02);
+    const features = analyzeFeatures(buffer, track, featureOptions);
+    const thresholdDb = autoThresholdDb(track, DEFAULT_JET_CUT.sensitivity);
+    const wf = modulationWindowFrames(track.hop);
+    const energy = energyModulationDepthDb({ hop: track.hop, db: features.lowLevel, duration: track.duration });
+    const marks = LINES.map(([, pick]) => lowBandReadable(features.lowLevel, pick(features, thresholdDb, track.hop), wf));
+    measured.push({ fixture, track, features, thresholdDb, energy, marks });
+  }
+
+  /** 印の列から「読めた秒」と「そこで読める深さの最大」を出す。 */
+  const readOf = (m, marks, depth) => {
+    let judged = 0;
+    let max = 0;
+    for (let i = 0; i < marks.length; i += 1) {
+      if (!marks[i]) continue;
+      judged += 1;
+      if (depth[i] > max) max = depth[i];
+    }
+    return { judged: judged * m.track.hop, max };
+  };
+
+  console.log('\n\n低い側の線をどこに置くか（読めた秒 / 深さの最大 dB）\n');
+  console.log(`${pad('素材', 30)}${LINES.map(([name]) => pad(name, 18)).join('')}`);
+  console.log('-'.repeat(30 + 18 * LINES.length));
+  for (const m of measured) {
+    const cells = m.marks.map((marks) => {
+      const r = readOf(m, marks, m.features.lowModulationDepth);
+      return pad(`${r.judged.toFixed(2)}s / ${r.max.toFixed(2)}`, 18);
+    });
+    console.log(`${pad((m.fixture.hard ? '※ ' : '  ') + m.fixture.name.replace('.wav', ''), 30)}${cells.join('')}`);
+  }
+  console.log('\n読みどころは 3 つある。**どれか 1 つを見て決めると、ほかの 2 つで外れる。**');
+  console.log('  ① 直したい相手: `speech-sparse-thump-loud`（打点だけを 2 倍）。A では 0.04s ＝ コマ 2 つ。');
+  console.log('     **B（低い側の分布に同じ規則を当てる）では直らない。** 底から 25% という決め方が');
+  console.log('     揺れの中を通るので、揺れが大きくなるほど線が上がって同じことが起きる。');
+  console.log('  ② 縁を外し続けているか: `music-hats-break` は縁を数えると 2.77dB、外すと 0.32dB。');
+  console.log('     C も D も 0.32 のままで、**縁の段差は入っていない。**');
+  console.log('  ③ 潰し素材でも消えないか: `speech-bgm-fade`（伴奏がフェードアウトする）。下の表。');
+
+  console.log('\n\n潰し素材（伴奏が 13 秒で 24dB 下がる）を、前半と後半に割って読む\n');
+  console.log(`${pad('線', 18)}${pad('前半', 10)}${pad('後半', 10)}後半で何が起きているか`);
+  console.log('-'.repeat(70));
+  {
+    const m = measured.find((x) => x.fixture.name === 'speech-bgm-fade.wav');
+    if (m) {
+      const mid = Math.floor(m.track.db.length / 2);
+      // C（素材ぜんたいの p90）は、大きかった頃の値が小さくなった側にも残る。
+      // そこを見るために 14dB 下も並べる（20dB では素材が足りず、まだ届かないだけ）。
+      const extra = [['C 素材のp90-14', percentileDb({ hop: 1, db: m.features.lowLevel, duration: m.features.lowLevel.length }, 0.9) - 14],
+                     ['D その場-14', lowBandLineDb(m.features.lowLevel, m.thresholdDb, 14, m.track.hop)]];
+      const rows = [
+        ...LINES.map(([name, pick], k) => [name, m.marks[k]]),
+        ...extra.map(([name, line]) => [name, lowBandReadable(m.features.lowLevel, line, modulationWindowFrames(m.track.hop))]),
+      ];
+      for (const [name, marks] of rows) {
+        let first = 0;
+        let second = 0;
+        for (let i = 0; i < marks.length; i += 1) if (marks[i]) (i < mid ? (first += 1) : (second += 1));
+        const note = second * m.track.hop < 1.28 ? '← 深さで判断できる秒数を割る' : '';
+        console.log(`${pad(name, 18)}${pad(`${(first * m.track.hop).toFixed(2)}s`, 10)}${pad(`${(second * m.track.hop).toFixed(2)}s`, 10)}${note}`);
+      }
+      console.log('\n**素材ぜんたいの分位点（C）で取ると、後半が大きかった頃の線で測られる。**');
+      console.log('この素材（24dB 下がる）の 20dB 下では C と D の差は 0.02s で、**まだ punisher になっていない。**');
+      console.log('差が出るのは幅を狭めたとき（14dB 下で C 1.18s ＜ 全域の線 2.12s）と、');
+      console.log('フェードをきつくしたとき（30dB 下がる素材で C は全域の線と同じ 1.92s まで落ち、D は 2.08s）。');
+      console.log('**「素材の中で低い側の大きさが動く」は、フェード・ダッキング・盛り上がりでごく普通に起きる。**');
+      console.log('その場の大きさから取れば線が一緒に下がるので、D はどの幅でも先に落ちない。');
+      console.log('（素材は 24dB にしてある。それ以上は「フェードアウトして消える」ほうへ寄りすぎるので、');
+      console.log('  きつい側は上の数字を記録に残すだけにした。）');
+    }
+  }
+
+  // --- 筋が悪いと分かって引き返した手も残す ---
+  //
+  // 「線の高さ」ではなく「へこみが続いた長さ」で決める形も測った。
+  // 打点の減衰は 1〜2 コマ、曲の切れ目は数十コマなので、**長さで割れるはず**という読み。
+  console.log('\n\n引き返した手: 線は現行のまま「へこみが N コマ以上続いたら読めない」にする\n');
+  console.log(`${pad('素材', 30)}${[1, 3, 5, 8].map((g) => pad(`${g}ｺﾏ`, 16)).join('')}`);
+  console.log('-'.repeat(30 + 16 * 4));
+  {
+    const runReadable = (lowLevel, thresholdDb, windowFrames, gapFrames) => {
+      const frames = lowLevel.length;
+      const bad = new Uint8Array(frames);
+      let run = 0;
+      for (let i = 0; i <= frames; i += 1) {
+        const quiet = i < frames && !(lowLevel[i] > thresholdDb && lowLevel[i] > SILENCE_DB);
+        if (quiet) {
+          run += 1;
+          continue;
+        }
+        if (run >= Math.max(1, gapFrames)) for (let k = i - run; k < i; k += 1) bad[k] = 1;
+        run = 0;
+      }
+      const pre = new Int32Array(frames + 1);
+      for (let i = 0; i < frames; i += 1) pre[i + 1] = pre[i] + bad[i];
+      const half = windowFrames >> 1;
+      const marks = new Uint8Array(frames);
+      for (let i = 0; i < frames; i += 1) {
+        const from = i - half;
+        const to = from + windowFrames - 1;
+        if (from < 0 || to >= frames) continue;
+        if (pre[to + 1] - pre[from] > 0) continue;
+        marks[i] = 1;
+      }
+      return marks;
+    };
+    // 眼目が出る 3 本だけ。全 38 本を並べても読みどころは同じところにある。
+    for (const name of ['speech-sparse-thump-loud.wav', 'music-thump-break.wav', 'music-flute.wav']) {
+      const m = measured.find((x) => x.fixture.name === name);
+      if (!m) continue;
+      const cells = [1, 3, 5, 8].map((g) => {
+        const r = readOf(m, runReadable(m.features.lowLevel, m.thresholdDb, modulationWindowFrames(m.track.hop), g), m.features.lowModulationDepth);
+        return pad(`${r.judged.toFixed(2)}s / ${r.max.toFixed(2)}`, 16);
+      });
+      console.log(`${pad('※ ' + name.replace('.wav', ''), 30)}${cells.join('')}`);
+    }
+    console.log('\n**駄目だった。逃がした先で、縁が丸ごと入る。**');
+    console.log('直したい素材が届くのは 8 コマ（0.16 秒）以上で、そこでは `music-thump-break` の深さが');
+    console.log('1.79 → **15.64dB**、`music-flute` が 0.10 → **14.74dB** になる（縁の段差そのもの）。');
+    console.log('**曲の切れ目は「低い側が無音になる」形ではない。** 伴奏は鳴り続けていて、');
+    console.log('低い段のまま時々へこむだけなので、へこみの続きは短い。長さでは切れ目と打点が割れない。');
+    console.log('**縁を外せているのは「1 コマでも線を割ったら窓ごと捨てる」厳しさのおかげだった。**');
+
+  console.log('\n\n読めるコマが直ったので、コマ単位の -6dB の門を測り直す（前回は測れなかった）\n');
+  console.log(`${pad('線', 10)}${pad('声を残せた率', 16)}${pad('残したうち声', 16)}落とした背景のコマ`);
+  console.log('-'.repeat(62));
+  {
+    // 前の段とまったく同じ形の表。違うのは**基準（その素材の深さの最大）を、
+    // 直した線で読めるコマから取っている**ところだけ。
+    const forSweep = measured.filter((m) => m.fixture.speech);
+    const maxOf = (m, which) => {
+      let max = -Infinity;
+      for (let i = 0; i < m.marks[which].length; i += 1) if (m.marks[which][i] && m.energy[i] > max) max = m.energy[i];
+      return max;
+    };
+    const sweep = (pick, which) => {
+      let tp = 0;
+      let fn = 0;
+      let fp = 0;
+      let tn = 0;
+      for (const m of forSweep) {
+        const base = maxOf(m, which);
+        if (!Number.isFinite(base)) continue;
+        for (let i = 0; i < m.track.db.length; i += 1) {
+          if (!(m.track.db[i] > m.thresholdDb)) continue;
+          const speech = isSpeechAt(m.fixture, i * m.track.hop);
+          const keep = pick(m, i, base);
+          if (speech) keep ? (tp += 1) : (fn += 1);
+          else keep ? (fp += 1) : (tn += 1);
+        }
+      }
+      const rate = (a, b) => (a + b > 0 ? `${((100 * a) / (a + b)).toFixed(1)}%` : '—');
+      return { recall: rate(tp, fn), precision: rate(tp, fp), rejected: rate(tn, fp) };
+    };
+    for (const x of [3, 4, 6, 8, 12]) {
+      const r = sweep((m, i, base) => m.energy[i] - base >= -x, 3);
+      console.log(`${pad(`-${x}dB`, 10)}${pad(r.recall, 16)}${pad(r.precision, 16)}${r.rejected}`);
+    }
+    const now = sweep((m, i) => m.features.speechScore[i] >= DEFAULT_JET_CUT.speechThreshold, 3);
+    console.log(`\n${pad(`いまの声らしさ ${DEFAULT_JET_CUT.speechThreshold}`, 22)}${now.recall} / ${now.precision} / ${now.rejected}`);
+    const old = sweep((m, i, base) => m.energy[i] - base >= -6, 0);
+    console.log(`${pad('-6dB（直す前の線で）', 22)}${old.recall} / ${old.precision} / ${old.rejected}`);
+    console.log('\n基準を取り直しても -6dB は今の判定を上回るが、**前回の数字とは違う。**');
+    console.log('読めるコマが増えたぶん基準（最大）が上がるので、同じ -6dB でも線は下がる。');
+    console.log('**「門の形は同じでも、上流が変われば線は引き直し」**ということ。');
+  }
+  }
 }
