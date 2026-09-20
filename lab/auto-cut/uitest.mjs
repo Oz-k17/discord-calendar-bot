@@ -30,6 +30,8 @@ if (!fs.existsSync(path.join(fixtures, 'speech.wav'))) {
   process.exit(1);
 }
 
+// **「停止」ボタンは段ごとにある。** 文字で掴むと段を足しただけで別の段を押すので、
+// ここでは必ず id で指す（実際に 2026-09-20・2 回目に「4.」を足して踏んだ）。
 let failed = 0;
 const ok = (label, condition, detail = '') => {
   if (!condition) failed += 1;
@@ -232,7 +234,7 @@ try {
 
   await page.getByRole('button', { name: '揃えたあとを再生' }).click();
   await page.waitForTimeout(300);
-  await page.getByRole('button', { name: '停止' }).last().click();
+  await page.locator('#stop-loud').click();
 
   // 以降の段は声の入った素材を前提にしているので、読み直しておく。
   await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech.wav'));
@@ -248,10 +250,95 @@ try {
   ok('下げているところがある', duckPoints.some((p) => p.gain < 0.5), `最小 ${Math.min(...duckPoints.map((p) => p.gain)).toFixed(3)}`);
   ok('BGM の波形とカーブが描かれている', await hasInk(page, 'bgm-canvas'), '');
 
+  // --- クリップごとの音量合わせ（2026-09-20・2 回目） ---
+  //
+  // 5 本並べる: ふつうの声 3 本 ＋ 録音レベルの小さい声 ＋ 部屋の音だけ。
+  // **最後の 1 本が上限に当たること**まで見ないと、配線したうちに入らない
+  // （素直に揃えにいくと 30dB 持ち上げる相手）。
+  //
+  // **ふつうの声を 3 本にしてあるのは意味がある。** 中央値が守ってくれるのは
+  // 「まともなクリップが過半数」のときだけで、3 本中 2 本が外れ値だと
+  // **中央値そのものが外れ値に乗る**（最初に 3 本で書いて踏んだ。基準が
+  // `speech-quiet` になり、ふつうの声のほうが 18dB 下げられた）。
+  await page
+    .locator('#clip-files')
+    .setInputFiles([
+      path.join(fixtures, 'speech.wav'),
+      path.join(fixtures, 'speech-dry.wav'),
+      path.join(fixtures, 'speech-noisy.wav'),
+      path.join(fixtures, 'speech-quiet.wav'),
+      path.join(fixtures, 'room-tone.wav'),
+    ]);
+  await page.waitForFunction(() => window.__lab.state().clipPlan !== null, { timeout: 30000 });
+  await page.waitForTimeout(300);
+  const clipState = await page.evaluate(() => window.__lab.state());
+  ok('5 本ぶんの倍率が出る', clipState.clipPlan.gains.length === 5, `${clipState.clipPlan.gains.length} 本`);
+  ok(
+    'ふつうの声 3 本は、ほとんど動かない（基準がそちらに乗っている）',
+    ['speech.wav', 'speech-dry.wav', 'speech-noisy.wav'].every(
+      (id) => Math.abs(clipState.clipPlan.gains.find((g) => g.id === id).gainDb) < 1,
+    ),
+    ['speech.wav', 'speech-dry.wav', 'speech-noisy.wav']
+      .map((id) => `${clipState.clipPlan.gains.find((g) => g.id === id).gainDb.toFixed(2)}`)
+      .join(' / '),
+  );
+  ok(
+    'クリップどうしの開きが縮む',
+    clipState.clipPlan.spreadAfter < clipState.clipPlan.spreadBefore,
+    `${clipState.clipPlan.spreadBefore.toFixed(2)} → ${clipState.clipPlan.spreadAfter.toFixed(2)} LU`,
+  );
+  ok(
+    '部屋の音だけのクリップは上限で止まり、画面で知らせる',
+    clipState.clipPlan.gains.find((g) => g.id === 'room-tone.wav')?.limitedBy === 'cap' &&
+      (await page.locator('#clip-warning').isVisible()),
+    `欲しかった ${clipState.clipPlan.gains.find((g) => g.id === 'room-tone.wav')?.wantedDb.toFixed(1)} dB`,
+  );
+
+  // **ここが `edits.ts` との継ぎ目の確認。** 1 本の素材から出たかけらは全部同じ倍率のはず。
+  ok(
+    'タイムラインが出る（カットを通したかけらの並び）',
+    clipState.clipTimeline.length > 3,
+    `${clipState.clipTimeline.length} 本`,
+  );
+  const perGroup = new Map();
+  for (const edit of clipState.clipTimeline) {
+    if (!perGroup.has(edit.group)) perGroup.set(edit.group, new Set());
+    perGroup.get(edit.group).add(edit.gainDb);
+  }
+  ok(
+    '同じ素材から出たかけらは、全部が同じ倍率',
+    [...perGroup.values()].every((set) => set.size === 1),
+    [...perGroup].map(([g, set]) => `${g}: ${[...set].map((v) => v.toFixed(2)).join('/')}`).join(' , '),
+  );
+
+  // 上限を広げると、止まっていたクリップが動く（つまみが効いているか）。
+  await setRange(page, '#clip-boost', '36');
+  await page.waitForTimeout(200);
+  const widened = (await page.evaluate(() => window.__lab.state())).clipPlan;
+  ok(
+    '上限を広げると、止まっていたクリップが動く',
+    widened.gains.find((g) => g.id === 'room-tone.wav').gainDb > 20,
+    `${widened.gains.find((g) => g.id === 'room-tone.wav').gainDb.toFixed(1)} dB`,
+  );
+  await setRange(page, '#clip-boost', '12');
+  await page.waitForTimeout(200);
+
+  // カットを外すと、かけらが素材の本数まで減る（「4.」から「1.」を呼べているか）。
+  await page.locator('#clip-use-cut').uncheck();
+  await page.waitForTimeout(200);
+  const whole = (await page.evaluate(() => window.__lab.state())).clipTimeline;
+  ok('カットを外すと、かけらが素材の本数と同じになる', whole.length === 5, `${whole.length} 本`);
+  await page.locator('#clip-use-cut').check();
+  await page.waitForTimeout(200);
+
+  await page.getByRole('button', { name: '揃えてから通しで再生' }).click();
+  await page.waitForTimeout(300);
+  await page.locator('#stop-clips').click();
+
   // --- 再生の口が塞がっていないか（音そのものは確かめられないので、例外が出ないことだけ） ---
   await page.getByRole('button', { name: 'カット後を再生' }).click();
   await page.waitForTimeout(400);
-  await page.getByRole('button', { name: '停止' }).first().click();
+  await page.locator('#stop-voice').click();
 
   const shot = path.join(fixtures, 'uitest.png');
   await page.screenshot({ path: shot, fullPage: true });

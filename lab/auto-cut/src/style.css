@@ -192,6 +192,18 @@ input[type='range'] {
   accent-color: var(--accent);
 }
 
+/* 既定の見た目のままだと、暗い背景に白い箱が 1 つだけ浮いて見える。 */
+select {
+  width: 100%;
+  padding: 5px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  background: #14161a;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

@@ -11,6 +11,15 @@ import { planJetCut, type JetCutPlan } from './silence.ts';
 import { applyDucking, gainAt, planDucking, type GainPoint } from './ducking.ts';
 import { summarize, toClipEdits } from './edits.ts';
 import {
+  attachClipGains,
+  clipLoudnessFrom,
+  DEFAULT_CLIP_MATCH,
+  planClipMatch,
+  type ClipMatchOptions,
+  type ClipMatchPlan,
+  type MatchedClipEdit,
+} from './clip-match.ts';
+import {
   applyGain,
   measureLoudness,
   planLoudnessNormalization,
@@ -63,6 +72,12 @@ let duckPoints: GainPoint[] = [];
 let loudnessPlan: NormalizationPlan | null = null;
 /** リミッタを通した音。**通さないときは null** で、そのときは倍率だけを当てて鳴らす。 */
 let limited: { buffer: AudioLike; report: LimiterReport } | null = null;
+
+/** 「4. クリップごとの音量を揃える」で並べている素材。1 本 1 クリップ。 */
+let clips: Loaded[] = [];
+let clipPlan: ClipMatchPlan | null = null;
+/** 揃えたあとのタイムライン。かけらごとに「どの素材のどこを、どの倍率で」鳴らすか。 */
+let clipTimeline: { clip: Loaded; edit: MatchedClipEdit }[] = [];
 
 // ---------- 読み込み ----------
 
@@ -229,17 +244,17 @@ function currentMode(): 'level' | 'speech' {
   return checked?.value === 'speech' ? 'speech' : 'level';
 }
 
-function refreshCut() {
-  const mode = currentMode();
-  document.body.classList.toggle('mode-speech', mode === 'speech');
-  $<HTMLOutputElement>('out-speech').textContent = Number($<HTMLInputElement>('speech-threshold').value).toFixed(2);
-  $<HTMLOutputElement>('out-envelope-hold').textContent = `${Number($<HTMLInputElement>('envelope-hold').value).toFixed(2)} 秒`;
-  $<HTMLOutputElement>('out-speech-lead-in').textContent = `${Number($<HTMLInputElement>('speech-lead-in').value).toFixed(2)} 秒`;
-  if (!voice) return;
-  plan = planJetCut(
-    voice.track,
+/**
+ * いまの画面の設定で 1 本ぶんのカットを計画する。
+ *
+ * **「4.」で並べた素材にも同じものを掛ける**ので、呼び出しをここに 1 本化してある。
+ * 2 か所に書くと、片方にだけ列を渡し忘れて**画面の中で判定が食い違う**（実際に危なかった）。
+ */
+function cutOf(loaded: Loaded): JetCutPlan {
+  return planJetCut(
+    loaded.track,
     {
-      mode,
+      mode: currentMode(),
       speechThreshold: Number($<HTMLInputElement>('speech-threshold').value),
       sensitivity: Number($<HTMLInputElement>('sensitivity').value),
       minSilence: Number($<HTMLInputElement>('min-silence').value),
@@ -247,20 +262,32 @@ function refreshCut() {
       envelopeHold: Number($<HTMLInputElement>('envelope-hold').value),
       speechLeadIn: Number($<HTMLInputElement>('speech-lead-in').value),
     },
-    voice.features.speechScore,
-    voice.features.shapeChange,
-    voice.features.envelopeChange,
+    loaded.features.speechScore,
+    loaded.features.shapeChange,
+    loaded.features.envelopeChange,
     // 均す前の列。「この素材に声があるか」を決めるときだけ使う（silence.ts の注を参照）。
-    voice.features.envelopeFlux,
+    loaded.features.envelopeFlux,
     // 低い帯域の揺れの深さ。これも素材単位の判定だけで使う。
-    voice.features.lowLevel,
-    voice.features.lowModulationDepth,
+    loaded.features.lowLevel,
+    loaded.features.lowModulationDepth,
     // 低い帯域の音量の向き。こちらはコマ単位の門で、声の帯域に居座る打点を落とす。
-    voice.features.lowLevelSkew,
+    loaded.features.lowLevelSkew,
     // 対数を外した深さ。コマ単位の門（既定で入っている。silence.ts の `minEnergyDepthDrop`）。
     // **渡し忘れると画面だけ門の無い判定になる**ので、列はここでも必ず渡す。
-    voice.features.lowEnergyDepth,
+    loaded.features.lowEnergyDepth,
   );
+}
+
+function refreshCut() {
+  const mode = currentMode();
+  document.body.classList.toggle('mode-speech', mode === 'speech');
+  $<HTMLOutputElement>('out-speech').textContent = Number($<HTMLInputElement>('speech-threshold').value).toFixed(2);
+  $<HTMLOutputElement>('out-envelope-hold').textContent = `${Number($<HTMLInputElement>('envelope-hold').value).toFixed(2)} 秒`;
+  $<HTMLOutputElement>('out-speech-lead-in').textContent = `${Number($<HTMLInputElement>('speech-lead-in').value).toFixed(2)} 秒`;
+  // **「4.」はここより先に返さない。** 声の素材が無くても、並べたクリップだけで揃えられる。
+  refreshClips();
+  if (!voice) return;
+  plan = cutOf(voice);
 
   $<HTMLOutputElement>('out-sensitivity').textContent = Number($<HTMLInputElement>('sensitivity').value).toFixed(2);
   $<HTMLOutputElement>('out-min-silence').textContent = `${Number($<HTMLInputElement>('min-silence').value).toFixed(2)} 秒`;
@@ -473,6 +500,147 @@ function playLoudness(normalized: boolean) {
   playing.push(node);
 }
 
+// ---------- クリップごとの音量合わせ ----------
+
+/**
+ * 並べたクリップの倍率を決め直して、画面へ出す。
+ *
+ * **測り直さない**のは「3.」と同じ理由で、ラウドネスは基準にも上限にも依らない
+ * （読み込んだときの 1 回で足りる。13 秒で 1 秒近くかかるので、つまみのたびに測ると固まる）。
+ * つまみが動かすのは「測った値をどう使うか」だけ。
+ */
+function refreshClips() {
+  const boost = Number($<HTMLInputElement>('clip-boost').value);
+  const cut = Number($<HTMLInputElement>('clip-cut').value);
+  const useCut = $<HTMLInputElement>('clip-use-cut').checked;
+  $<HTMLOutputElement>('out-clip-boost').textContent = `${boost} dB`;
+  $<HTMLOutputElement>('out-clip-cut').textContent = `${cut} dB`;
+
+  const stats = $<HTMLDListElement>('clip-stats');
+  const warning = $<HTMLParagraphElement>('clip-warning');
+  const list = $<HTMLPreElement>('clip-list');
+  const ready = clips.length >= 1;
+  $<HTMLButtonElement>('play-clips-before').disabled = !ready;
+  $<HTMLButtonElement>('play-clips-after').disabled = !ready;
+  $<HTMLButtonElement>('stop-clips').disabled = !ready;
+
+  if (!ready) {
+    clipPlan = null;
+    clipTimeline = [];
+    stats.innerHTML = '';
+    warning.hidden = true;
+    list.textContent = '—';
+    return;
+  }
+
+  clipPlan = planClipMatch(
+    // **読み込んだときの測定を使い回す。** 同じ素材を 2 回測らない。
+    clips.map((c) => clipLoudnessFrom(c.name, c.loudness)),
+    {
+      reference: $<HTMLSelectElement>('clip-reference').value as ClipMatchOptions['reference'],
+      maxBoostDb: boost,
+      maxCutDb: cut,
+    },
+  );
+
+  // **ここが `edits.ts` との継ぎ目。** カットした「かけら」に、その素材ぶんの倍率を配る。
+  // かけらごとに測り直さないので、同じ素材から出たかけらは必ず同じ倍率になる。
+  clipTimeline = [];
+  let at = 0;
+  for (const clip of clips) {
+    const keep = useCut ? cutOf(clip).keep : [{ start: 0, end: clip.buffer.duration }];
+    const edits = toClipEdits(keep, { start: at, duration: clip.buffer.duration, sourceIn: 0 });
+    for (const edit of attachClipGains(edits, clip.name, clipPlan)) clipTimeline.push({ clip, edit });
+    at += edits.reduce((sum, e) => sum + e.duration, 0);
+  }
+
+  const lufs = (v: number | null) => (v === null ? '測れません' : `${v.toFixed(1)} LUFS`);
+  const capped = clipPlan.gains.filter((g) => g.limitedBy === 'cap');
+  const skipped = clipPlan.gains.filter((g) => g.limitedBy === 'tooShort' || g.limitedBy === 'unmeasurable');
+  stats.innerHTML = [
+    ['クリップ', `${clips.length} 本`],
+    ['合わせにいった値', lufs(clipPlan.referenceLufs)],
+    // **開きは「揃える前 → 揃えたあと」で並べる。** 片方だけでは良くなったと言えない。
+    ['クリップの開き', `${clipPlan.spreadBefore.toFixed(1)} → ${clipPlan.spreadAfter.toFixed(1)} LU`],
+    ['タイムライン', `${clipTimeline.length} 本 / ${at.toFixed(2)} 秒`],
+    ['上限に当たった', `${capped.length} 本`],
+    ['触らなかった', `${skipped.length} 本`],
+  ]
+    .map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`)
+    .join('');
+
+  // 上限に当たったクリップは**そこだけ揃っていない**ので、黙って出さない。
+  // 「声の入っていないクリップか」を機械で分ける手は無いので、材料を出して人に決めてもらう。
+  if (capped.length * 2 >= clipPlan.gains.length && capped.length > 0) {
+    // **半分以上が上限に当たったら、疑うのは個々のクリップではなく基準のほう。**
+    // 中央値が守ってくれるのは「まともなクリップが過半数」のときだけで、
+    // 外れ値が過半数を占めると**中央値そのものが外れ値に乗る**（画面の検算で踏んだ）。
+    warning.textContent =
+      `並べた ${clipPlan.gains.length} 本のうち ${capped.length} 本が上限で止まりました。` +
+      '**合わせにいった値のほうがずれている可能性があります。**' +
+      '声の入っていないクリップや、録音の失敗した 1 本が過半数を占めていませんか？' +
+      'そういう並びでは、中央値も平均もそちらに乗ります。';
+    warning.hidden = false;
+  } else if (capped.length > 0) {
+    warning.textContent =
+      `${capped.map((g) => `${g.id}（${g.wantedDb > 0 ? '+' : ''}${g.wantedDb.toFixed(1)} dB 欲しかったところを ${g.gainDb > 0 ? '+' : ''}${g.gainDb.toFixed(1)} dB）`).join(' / ')}` +
+      ' が上限で止まりました。ほかと 1 桁違う大きさなので、' +
+      '**声の入っていないクリップ（部屋の音だけ・b-roll）ではないか**を確かめてください。' +
+      '上限を緩めれば揃いますが、声の入っていないクリップも同じだけ持ち上がります。';
+    warning.hidden = false;
+  } else if (skipped.length > 0) {
+    warning.textContent =
+      `${skipped.map((g) => `${g.id}（${g.limitedBy === 'tooShort' ? '短すぎる' : '測れない'}）`).join(' / ')}` +
+      ' には触っていません（倍率は 1 倍）。短いクリップの値は素材の大きさを表さないためです。';
+    warning.hidden = false;
+  } else {
+    warning.hidden = true;
+  }
+
+  list.textContent = [
+    ...clipPlan.gains.map(
+      (g) =>
+        `${g.id}　${lufs(g.lufs)}　→　${g.gainDb >= 0 ? '+' : ''}${g.gainDb.toFixed(2)} dB` +
+        `${g.limitedBy === 'none' ? '' : `　［${g.limitedBy}］`}`,
+    ),
+    '',
+    `タイムライン（${useCut ? '自動カットを通した' : 'カットせず並べた'}）`,
+    ...clipTimeline.map(
+      ({ edit }, i) =>
+        `${String(i + 1).padStart(2, ' ')}. ${edit.start.toFixed(2)}〜${(edit.start + edit.duration).toFixed(2)} 秒` +
+        `　←　${edit.group} の ${edit.from.start.toFixed(2)}〜${edit.from.end.toFixed(2)} 秒` +
+        `　${edit.gainDb >= 0 ? '+' : ''}${edit.gainDb.toFixed(2)} dB`,
+    ),
+  ].join('\n');
+}
+
+/**
+ * 並べたクリップを通しで鳴らす。
+ *
+ * 倍率は `GainNode` で当てる（配列を作り直すと待たされる。「3.」と同じ理由）。
+ * **鳴らしているのはタイムラインそのもの**なので、切れ目で段になっていれば耳で分かる。
+ */
+function playClips(matched: boolean) {
+  stopAll();
+  const ctx = ensureAudio();
+  let at = ctx.currentTime + 0.05;
+  for (const { clip, edit } of clipTimeline) {
+    if (edit.duration <= 0.01) continue;
+    const node = ctx.createBufferSource();
+    node.buffer = clip.buffer;
+    if (matched && edit.gain !== 1) {
+      const gain = ctx.createGain();
+      gain.gain.value = edit.gain;
+      node.connect(gain).connect(ctx.destination);
+    } else {
+      node.connect(ctx.destination);
+    }
+    node.start(at, edit.from.start, edit.from.end - edit.from.start);
+    playing.push(node);
+    at += edit.duration;
+  }
+}
+
 // ---------- ダッキング ----------
 
 function refreshDuck() {
@@ -544,8 +712,41 @@ bindFile('bgm-file', 'bgm-status', $<HTMLCanvasElement>('bgm-canvas'), (loaded) 
   refreshDuck();
 });
 
+/**
+ * 「4.」は**複数まとめて**読み込む。1 本 1 クリップとして並べる。
+ *
+ * 1 本ずつ読むので、途中で読めないものがあっても残りは並ぶ
+ * （まとめて失敗させると、どれが悪いのか分からなくなる）。
+ */
+$<HTMLInputElement>('clip-files').addEventListener('change', async (event) => {
+  const files = Array.from((event.target as HTMLInputElement).files ?? []);
+  if (files.length === 0) return;
+  const status = $<HTMLParagraphElement>('clip-status');
+  status.className = 'status';
+  status.textContent = `${files.length} 本を読み込んでいます…`;
+  const loaded: Loaded[] = [];
+  const failed: string[] = [];
+  for (const file of files) {
+    try {
+      loaded.push(await load(file, $<HTMLCanvasElement>('voice-canvas')));
+    } catch {
+      failed.push(file.name);
+    }
+  }
+  clips = loaded;
+  status.className = failed.length > 0 ? 'status error' : 'status';
+  status.textContent =
+    `${loaded.length} 本を読み込みました（合計 ${loaded.reduce((sum, c) => sum + c.buffer.duration, 0).toFixed(2)} 秒）` +
+    (failed.length > 0 ? ` ／ 読めなかった: ${failed.join(' / ')}` : '');
+  refreshClips();
+});
+
 for (const id of ['sensitivity', 'min-silence', 'padding', 'speech-threshold', 'envelope-hold', 'speech-lead-in']) {
   $<HTMLInputElement>(id).addEventListener('input', refreshCut);
+}
+// 「4.」のつまみは、カットには関係しないので `refreshClips` だけを呼ぶ。
+for (const id of ['clip-boost', 'clip-cut', 'clip-use-cut', 'clip-reference']) {
+  $<HTMLElement>(id).addEventListener(id === 'clip-reference' ? 'change' : 'input', refreshClips);
 }
 for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="mode"]')) {
   radio.addEventListener('change', refreshCut);
@@ -573,6 +774,9 @@ $<HTMLButtonElement>('play-flat').addEventListener('click', () => playMix(false)
 $<HTMLButtonElement>('play-loud-before').addEventListener('click', () => playLoudness(false));
 $<HTMLButtonElement>('play-loud-after').addEventListener('click', () => playLoudness(true));
 $<HTMLButtonElement>('stop-loud').addEventListener('click', stopAll);
+$<HTMLButtonElement>('play-clips-before').addEventListener('click', () => playClips(false));
+$<HTMLButtonElement>('play-clips-after').addEventListener('click', () => playClips(true));
+$<HTMLButtonElement>('stop-clips').addEventListener('click', stopAll);
 
 $<HTMLButtonElement>('run-tests').addEventListener('click', () => {
   const results = runSelfTest();
@@ -586,9 +790,18 @@ window.addEventListener('resize', () => {
   drawBgm();
 });
 
+// 「4.」の既定は `clip-match.ts` が持っている。**画面に直書きしたままにすると黙って食い違う**ので、
+// 起動時にそちらから写す（HTML に書いてある値は、この行が動く前の見た目のため）。
+$<HTMLInputElement>('clip-boost').value = String(DEFAULT_CLIP_MATCH.maxBoostDb);
+$<HTMLInputElement>('clip-cut').value = String(DEFAULT_CLIP_MATCH.maxCutDb);
+if (typeof DEFAULT_CLIP_MATCH.reference === 'string') {
+  $<HTMLSelectElement>('clip-reference').value = DEFAULT_CLIP_MATCH.reference;
+}
+
 refreshCut();
 refreshDuck();
 refreshLoudness();
+refreshClips();
 
 // Playwright から呼べるようにしておく（画面を触らずに中身を確かめるため）。
 declare global {
@@ -603,6 +816,8 @@ declare global {
         loudness: LoudnessMeasurement | null;
         loudnessPlan: NormalizationPlan | null;
         limiter: LimiterReport | null;
+        clipPlan: ClipMatchPlan | null;
+        clipTimeline: MatchedClipEdit[];
       };
     };
   }
@@ -617,5 +832,8 @@ window.__lab = {
     loudness: voice?.loudness ?? null,
     loudnessPlan,
     limiter: limited?.report ?? null,
+    clipPlan,
+    // `Loaded`（AudioBuffer 込み）は JSON にできないので、かけらだけを出す。
+    clipTimeline: clipTimeline.map(({ edit }) => edit),
   }),
 };

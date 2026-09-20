@@ -44,6 +44,8 @@ import {
 import { DEFAULT_LIMITER, limitTruePeak } from './limiter.ts';
 import {
   applyClipGains,
+  attachClipGains,
+  clipLoudnessFrom,
   concatRanges,
   DEFAULT_CLIP_MATCH,
   groupClips,
@@ -3076,7 +3078,102 @@ export function runSelfTest(): TestResult[] {
       );
     }
 
-    // ⑩ 素材が無いとき・全部測れないときでも落ちない（画面から空のまま押されることがある）。
+    // ⑩ **中央値が守ってくれるのは「まともなクリップが過半数」のときだけ。**
+    //    外れ値が過半数を占めると中央値そのものが外れ値に乗る（画面の検算で踏んだ）。
+    //    直せる手が無いので、**そうなることを固定して、画面から人へ知らせる**形にしてある。
+    {
+      const normal = steady(4, 0.5);
+      const faint = steady(4, 0.02);
+      const fainter = steady(4, 0.005);
+      // ふつう 1 本 ＋ 外れ値 2 本 → 中央値は外れ値の側へ乗り、**ふつうのほうが下げられる。**
+      const outnumbered = match([
+        { id: 'normal', buffer: normal },
+        { id: 'faint', buffer: faint },
+        { id: 'fainter', buffer: fainter },
+      ], { maxCutDb: 48, maxBoostDb: 48 });
+      // ふつう 3 本 ＋ 外れ値 2 本 → 中央値はふつうの側に乗る。
+      const majority = match([
+        { id: 'n1', buffer: normal },
+        { id: 'n2', buffer: normal },
+        { id: 'n3', buffer: normal },
+        { id: 'faint', buffer: faint },
+        { id: 'fainter', buffer: fainter },
+      ], { maxCutDb: 48, maxBoostDb: 48 });
+      const cutNormal = outnumbered.gains.find((g) => g.id === 'normal') as (typeof outnumbered.gains)[number];
+      const keptNormal = majority.gains.find((g) => g.id === 'n1') as (typeof majority.gains)[number];
+      check(
+        '外れ値が過半数を占めると、中央値もそちらへ乗る（直せないので固定しておく）',
+        cutNormal.gainDb < -20 && near(keptNormal.gainDb, 0, 1e-9),
+        `外れ値が過半数: ふつうの声が ${cutNormal.gainDb.toFixed(1)}dB ／ 過半数がふつう: ${keptNormal.gainDb.toFixed(1)}dB`,
+      );
+      // 画面が知らせるのに使っている手がかり（「半分以上が上限に当たった」）が立つことも見ておく。
+      const capped = match(
+        [
+          { id: 'normal', buffer: normal },
+          { id: 'faint', buffer: faint },
+          { id: 'fainter', buffer: fainter },
+        ],
+        { maxCutDb: 6, maxBoostDb: 6 },
+      ).gains.filter((g) => g.limitedBy === 'cap');
+      check(
+        '基準がずれた並びでは、半分以上が上限に当たる（画面はこれを手がかりに知らせる）',
+        capped.length * 2 >= 3,
+        `3 本中 ${capped.length} 本`,
+      );
+    }
+
+    // ⑪ `edits.ts` との継ぎ目。**1 本の素材から出たかけらは、全部が同じ倍率を受け取る。**
+    //    ここが崩れると切れ目のたびに部屋の音が段になるので、通しで押さえておく。
+    {
+      const quiet = steady(6, 0.1);
+      const loud = steady(6, 0.4);
+      const clips: ClipSource[] = [
+        { id: 'take-a', buffer: quiet },
+        { id: 'take-b', buffer: loud },
+      ];
+      const plan = match(clips);
+      // 1 本の素材を 3 つに割った体で `toClipEdits` に通す（カットの結果に相当）。
+      const keep = [
+        { start: 0.5, end: 2 },
+        { start: 2.5, end: 4 },
+        { start: 4.5, end: 5.5 },
+      ];
+      const edits = toClipEdits(keep, { start: 0, duration: 6, sourceIn: 0 });
+      // **倍率が 0 でない側で確かめる。** 静かなほうは 0dB になるので、
+      // 配れていなくても通ってしまい、検算にならない。
+      const matched = attachClipGains(edits, 'take-b', plan);
+      const want = plan.gains.find((g) => g.id === 'take-b') as (typeof plan.gains)[number];
+      check(
+        'かけらは全部、その素材ぶんの同じ倍率を受け取る（edits.ts との継ぎ目）',
+        matched.length === 3 &&
+          want.gainDb < -1 &&
+          matched.every((m) => m.gainDb === want.gainDb && m.group === 'take-b') &&
+          matched[0].from.start === 0.5,
+        `${matched.length} 本とも ${matched[0].gainDb.toFixed(2)}dB`,
+      );
+      // **知らない群を渡されたら 1 倍にする。** 黙って別の群の倍率を当てると、
+      // 画面では揃ったように見えて音だけが違う、という壊れ方をする。
+      const unknown = attachClipGains(edits, 'take-z', plan);
+      check(
+        '計画に無い群を渡されたら、黙って他人の倍率を当てない',
+        unknown.every((m) => m.gain === 1 && m.gainDb === 0 && m.limitedBy === 'unmeasurable'),
+        `${unknown[0].gainDb.toFixed(2)}dB / ${unknown[0].limitedBy}`,
+      );
+    }
+
+    // ⑫ 測り直さずに計画できる（画面は読み込んだときの 1 回しか測らない）。
+    {
+      const buffer = steady(4, 0.25);
+      const direct = planClipMatch(measureClips([{ id: 'a', buffer }], opts), { reference: -20 });
+      const reused = planClipMatch([clipLoudnessFrom('a', measureLoudness(buffer, opts))], { reference: -20 });
+      check(
+        '測ってある結果を渡しても、測り直したときと同じ倍率になる',
+        near(direct.gains[0].gainDb, reused.gains[0].gainDb, 1e-9),
+        `${direct.gains[0].gainDb.toFixed(3)} / ${reused.gains[0].gainDb.toFixed(3)} dB`,
+      );
+    }
+
+    // ⑬ 素材が無いとき・全部測れないときでも落ちない（画面から空のまま押されることがある）。
     {
       const emptyPlan = planClipMatch([], {});
       const allSilent = match([

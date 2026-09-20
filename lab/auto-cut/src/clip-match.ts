@@ -23,6 +23,7 @@
  */
 
 import type { AudioLike } from './loudness.ts';
+import type { ClipEdit } from './edits.ts';
 import { measureLoudness, type LoudnessMeasurement, type LoudnessOptions } from './lufs.ts';
 
 /** 揃える対象 1 本。`group` が同じものは**ひとまとめに測って、同じ倍率を当てる**。 */
@@ -76,6 +77,13 @@ export interface ClipMatchOptions {
    * パワーで平均する以上、**30dB 下の 1 本は和にほとんど足されない**（0.1% 未満）。
    * 一方で 15dB 上の 1 本は和の 3 割を持っていく。
    * 「声の無いクリップが混じると平均が下がる」は、**dB の見かけから来る思い込み**だった。
+   *
+   * **ただし中央値が守ってくれるのは「まともなクリップが過半数」のときだけ。**
+   * 3 本のうち 2 本が外れ値だと、**中央値そのものが外れ値に乗る**
+   * （画面の検算で踏んだ。ふつうの声 1 本・小さい声 1 本・部屋の音 1 本を並べたら、
+   * 基準が小さい声になってふつうの声が 18dB 下げられた）。
+   * **どの基準を選んでも同じで、直す手は無い。** 見分けが要るので、凍結した壁と同じ。
+   * 代わりに「半分以上が上限に当たったら基準のほうを疑う」を画面から知らせている。
    */
   reference?: 'median' | 'mean' | 'loudest' | number;
   /**
@@ -197,6 +205,28 @@ export function measureClips(clips: ClipSource[], options: LoudnessOptions = {})
       measurement: m,
     };
   });
+}
+
+/**
+ * すでに測ってある結果から `ClipLoudness` を組む。
+ *
+ * 画面のように**読み込んだときに 1 回だけ測る**作りだと、揃えるたびに測り直すのは無駄
+ * （13 秒で 1 秒近くかかる）。ラウドネスも真のピークも基準には依らないので、
+ * 測り直す必要があるのは素材そのものが変わったときだけ。
+ */
+export function clipLoudnessFrom(
+  id: string,
+  measurement: LoudnessMeasurement,
+  group = id,
+): ClipLoudness {
+  return {
+    id,
+    group,
+    lufs: measurement.integratedLufs,
+    duration: measurement.duration,
+    gatedBlocks: measurement.gatedBlocks,
+    measurement,
+  };
 }
 
 /**
@@ -373,4 +403,39 @@ export function applyClipGains(clips: ClipSource[], plan: ClipMatchPlan): AudioL
       getChannelData: (c: number) => planes[c],
     };
   });
+}
+
+/**
+ * 自動カットが刻んだかけら 1 つと、そこへ当てる倍率。
+ *
+ * `ClipEdit`（`edits.ts`）に倍率を足しただけのもの。本体のタイムラインへ置くとき、
+ * **分割したかけらそれぞれに、その素材ぶんの倍率を 1 つ持たせる**のがここの形。
+ */
+export interface MatchedClipEdit extends ClipEdit {
+  group: string;
+  gain: number;
+  gainDb: number;
+  limitedBy: ClipGain['limitedBy'];
+}
+
+/**
+ * 群ごとに決めた倍率を、`toClipEdits` が返したかけらへ配る。
+ *
+ * **ここが `clip-match` と `edits`（＝本体への継ぎ目）を繋ぐ 1 本**です。
+ * 1 本の素材から出たかけらは**全部が同じ群**なので、受け取る倍率も 1 つになります。
+ * かけらごとに測り直さないのがこの形の肝で、そうしないと切れ目のたびに
+ * 部屋の音が段になります（README の「かけらごとに揃えてはいけません」）。
+ *
+ * **その群が計画に無ければ 1 倍にして `unmeasurable` を立てます。**
+ * 黙って別の群の倍率を当てると、画面では揃ったように見えて音だけが違う、という壊れ方をします。
+ */
+export function attachClipGains(edits: ClipEdit[], group: string, plan: ClipMatchPlan): MatchedClipEdit[] {
+  const decided = plan.gains.find((g) => g.group === group);
+  return edits.map((edit) => ({
+    ...edit,
+    group,
+    gain: decided?.gain ?? 1,
+    gainDb: decided?.gainDb ?? 0,
+    limitedBy: decided?.limitedBy ?? 'unmeasurable',
+  }));
 }
