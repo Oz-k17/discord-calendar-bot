@@ -42,6 +42,15 @@ import {
   truePeakOf,
 } from './lufs.ts';
 import { DEFAULT_LIMITER, limitTruePeak } from './limiter.ts';
+import {
+  applyClipGains,
+  concatRanges,
+  DEFAULT_CLIP_MATCH,
+  groupClips,
+  measureClips,
+  planClipMatch,
+  type ClipSource,
+} from './clip-match.ts';
 
 export interface TestResult {
   name: string;
@@ -2838,6 +2847,249 @@ export function runSelfTest(): TestResult[] {
         '既定ではリミッタを前提にしない（従来どおりピークで止まる）',
         DEFAULT_NORMALIZATION.limiterHeadroomDb === 0 && plan.limitedBy === 'peak' && plan.neededReductionDb === 0,
         `${plan.limitedBy}`,
+      );
+    }
+  }
+
+  // --- クリップごとの音量合わせ（2026-09-20・2 回目）---
+  //
+  // ここで確かめたいのは「倍率が正しく出るか」だけではない。
+  // **触らないと決めたクリップ（短い・無音）が、基準の計算にまで混ざっていないか**が肝で、
+  // そこが漏れると「1 本足しただけで全体の倍率が動く」という形で静かに壊れる。
+  {
+    const sr = 8000;
+    /** 指定した振幅で鳴りっぱなしの 1ch。クリップ 1 本ぶんの代わり。 */
+    const steady = (seconds: number, amp: number): AudioLike =>
+      makeTone(seconds, sr, [{ from: 0, to: seconds, amp }]);
+    /** 無音（雑音も入れない）。「測れない」側の代表。 */
+    const silent = (seconds: number): AudioLike => makeTone(seconds, sr, []);
+    const joined = (buffers: AudioLike[]): AudioLike => {
+      const total = buffers.reduce((sum, b) => sum + b.length, 0);
+      const out = new Float32Array(total);
+      let k = 0;
+      for (const b of buffers) {
+        const src = b.getChannelData(0);
+        for (let i = 0; i < b.length; i += 1) out[k++] = src[i];
+      }
+      return { sampleRate: sr, numberOfChannels: 1, length: total, getChannelData: () => out };
+    };
+    const opts = { skipTruePeak: true };
+    const match = (clips: ClipSource[], options = {}) => planClipMatch(measureClips(clips, opts), options);
+
+    // ① `concatRanges` の端。範囲外・逆順・長さ 0 を渡しても落ちず、
+    //    拾えるものが無ければ null を返す（呼ぶ側が「測らない」を選べるように）。
+    {
+      const buffer = steady(2, 0.5);
+      const clipped = concatRanges(buffer, [{ start: -5, end: 1 }, { start: 1.5, end: 99 }]);
+      const empty = concatRanges(buffer, [{ start: 1, end: 1 }, { start: 2, end: 0.5 }]);
+      const none = concatRanges(buffer, []);
+      check(
+        '区間を繋ぐとき、範囲外は切り詰め、拾えなければ null を返す',
+        clipped !== null && near(clipped.length, 1.5 * sr, 2) && empty === null && none === null,
+        `${clipped ? (clipped.length / sr).toFixed(2) : '—'}s / 長さ0は ${empty === null ? 'null' : '値'}`,
+      );
+    }
+
+    // ② 6dB 違う 2 本を揃えると、**当てたあとに測り直した値**が一致する。
+    //    計画の値どうしを比べても意味が無い（それは引き算をやり直しただけ）。
+    {
+      const clips: ClipSource[] = [
+        { id: 'loud', buffer: steady(2, 0.5) },
+        { id: 'quiet', buffer: steady(2, 0.25) },
+      ];
+      const plan = match(clips);
+      const after = applyClipGains(clips, plan).map((b) => measureLoudness(b, opts).integratedLufs as number);
+      check(
+        '6dB 違う 2 本を揃えると、当てたあとの実測が一致する',
+        near(after[0], after[1], 0.05) && near(plan.spreadAfter, 0, 0.05),
+        `${after[0].toFixed(2)} / ${after[1].toFixed(2)} LUFS`,
+      );
+      // 偶数本のときは**静かなほうの真ん中**へ寄せる。上げる側にだけ副作用があるので、
+      // 迷ったら下げる向きへ倒す（`maxBoostDb` < `maxCutDb` と同じ考え方）。
+      check(
+        '偶数本のときは静かなほうへ寄せる（上げずに下げる）',
+        plan.gains[0].gainDb < 0 && near(plan.gains[1].gainDb, 0, 1e-9),
+        `${plan.gains[0].gainDb.toFixed(2)} / ${plan.gains[1].gainDb.toFixed(2)} dB`,
+      );
+    }
+
+    // ③ 同じ群のクリップには同じ倍率が当たる。
+    //    **自動カットが刻んだかけらを、切れ目ごとに段にしないための肝。**
+    {
+      const clips: ClipSource[] = [
+        { id: 'a#0', buffer: steady(2, 0.5), group: 'a' },
+        { id: 'a#1', buffer: steady(2, 0.125), group: 'a' },
+        { id: 'b', buffer: steady(4, 0.25) },
+      ];
+      const plan = match(clips);
+      check(
+        '同じ群のかけらには、同じ倍率が当たる',
+        plan.gains[0].gainDb === plan.gains[1].gainDb && plan.gains[0].group === 'a',
+        `a: ${plan.gains[0].gainDb.toFixed(2)}dB（2 本とも）／ b: ${plan.gains[2].gainDb.toFixed(2)}dB`,
+      );
+    }
+
+    // ④ 群をまとめた値が、**繋いで測り直した値**とどれだけ一致するか。
+    //    パワーへ戻して窓の数で重み付けしているので理屈では一致するが、
+    //    2 段目のゲートが群ぜんたいから引き直されるぶんだけずれる。**その幅を固定しておく。**
+    {
+      const parts = [steady(2, 0.5), steady(2, 0.125)];
+      const grouped = groupClips(
+        measureClips(
+          parts.map((buffer, i) => ({ id: `p${i}`, buffer, group: 'g' })),
+          opts,
+        ),
+      );
+      const direct = measureLoudness(joined(parts), opts).integratedLufs as number;
+      const diff = Math.abs((grouped[0].lufs as number) - direct);
+      check(
+        '群をまとめた値は、繋いで測り直した値と一致する',
+        grouped.length === 1 && diff < 0.5,
+        `まとめて ${(grouped[0].lufs as number).toFixed(2)} / 繋いで ${direct.toFixed(2)} LUFS（差 ${diff.toFixed(3)}）`,
+      );
+    }
+
+    // ⑤ 上限。要求が上限を超えたら `cap` で止まり、**本当に欲しかった値は残る**
+    //    （ここが消えると「どれくらい外れたクリップなのか」が外から見えなくなる）。
+    {
+      const clips: ClipSource[] = [
+        { id: 'normal-a', buffer: steady(4, 0.5) },
+        { id: 'normal-b', buffer: steady(4, 0.5) },
+        { id: 'far', buffer: steady(4, 0.002) },
+      ];
+      const plan = match(clips, { maxBoostDb: 12 });
+      const far = plan.gains.find((g) => g.id === 'far') as (typeof plan.gains)[number];
+      check(
+        '上限を超える要求は cap で止まり、欲しかった値は残る',
+        far.limitedBy === 'cap' && near(far.gainDb, 12, 1e-9) && far.wantedDb > 30,
+        `欲しかった ${far.wantedDb.toFixed(2)}dB → 当てた ${far.gainDb.toFixed(2)}dB`,
+      );
+      check(
+        '上限は上げる側のほうが狭い（持ち上げにだけ代価がある）',
+        DEFAULT_CLIP_MATCH.maxBoostDb < DEFAULT_CLIP_MATCH.maxCutDb,
+        `上げ ${DEFAULT_CLIP_MATCH.maxBoostDb}dB / 下げ ${DEFAULT_CLIP_MATCH.maxCutDb}dB`,
+      );
+    }
+
+    // ⑥ 短いクリップ・無音のクリップは触らない。**しかも基準を動かさない。**
+    //    相づち 1 つぶんのクリップに基準を決めさせると、全体が静かに傾く。
+    {
+      const base: ClipSource[] = [
+        { id: 'a', buffer: steady(4, 0.5) },
+        { id: 'b', buffer: steady(4, 0.4) },
+        { id: 'c', buffer: steady(4, 0.3) },
+      ];
+      const before = match(base).referenceLufs as number;
+      const withOddments = match([
+        ...base,
+        { id: 'tiny', buffer: steady(0.2, 0.001) },
+        { id: 'silence', buffer: silent(4) },
+      ]);
+      const tiny = withOddments.gains.find((g) => g.id === 'tiny') as (typeof withOddments.gains)[number];
+      const silence = withOddments.gains.find((g) => g.id === 'silence') as (typeof withOddments.gains)[number];
+      check(
+        '短いクリップと無音のクリップは触らない（理由も取り違えない）',
+        tiny.limitedBy === 'tooShort' &&
+          tiny.gainDb === 0 &&
+          silence.limitedBy === 'unmeasurable' &&
+          silence.gainDb === 0,
+        `${tiny.limitedBy} / ${silence.limitedBy}`,
+      );
+      check(
+        '触らないクリップは、基準の計算にも入らない',
+        near(withOddments.referenceLufs as number, before, 1e-9),
+        `${before.toFixed(3)} → ${(withOddments.referenceLufs as number).toFixed(3)} LUFS`,
+      );
+    }
+
+    // ⑦ 基準を数値で直に渡したときは、そこへ合わせる（絶対の目標を使いたい呼び出し向け）。
+    {
+      const clips: ClipSource[] = [{ id: 'a', buffer: steady(4, 0.5) }];
+      const plan = match(clips, { reference: -20, maxBoostDb: 48, maxCutDb: 48 });
+      const after = measureLoudness(applyClipGains(clips, plan)[0], opts).integratedLufs as number;
+      check(
+        '基準を数値で渡すと、その LUFS へ合う',
+        near(after, -20, 0.05),
+        `${after.toFixed(2)} LUFS`,
+      );
+    }
+
+    // ⑧ 中央値は**尺で重みを付ける**。短いクリップが 2 本あっても、長い 1 本に負けない。
+    {
+      const clips: ClipSource[] = [
+        { id: 'short-a', buffer: steady(1, 0.5) },
+        { id: 'short-b', buffer: steady(1, 0.5) },
+        { id: 'long', buffer: steady(20, 0.05) },
+      ];
+      const plan = match(clips, { maxCutDb: 48 });
+      const long = plan.gains.find((g) => g.id === 'long') as (typeof plan.gains)[number];
+      check(
+        '中央値は尺で重みを付ける（短い 2 本より長い 1 本）',
+        near(long.gainDb, 0, 1e-9) && plan.gains[0].gainDb < -15,
+        `長い 1 本 ${long.gainDb.toFixed(2)}dB ／ 短いほう ${plan.gains[0].gainDb.toFixed(2)}dB`,
+      );
+    }
+
+    // ⑨ 外れ値への強さ。**引きずられるのは静かな外れ値ではなく、大きいほう**
+    //    （2026-09-20・2 回目に素材で測って、書く前の見込みが外れた。ここに固定しておく）。
+    {
+      const plain: ClipSource[] = [0, 1, 2, 3, 4].map((i) => ({ id: `n${i}`, buffer: steady(4, 0.1) }));
+      const refOf = (clips: ClipSource[], mode: 'median' | 'mean') =>
+        match(clips, { reference: mode }).referenceLufs as number;
+      const quiet = [...plain, { id: 'quiet', buffer: steady(4, 0.003) }];
+      const loud = [...plain, { id: 'loud', buffer: steady(4, 0.9) }];
+      // もっと静かな 1 本。**どれだけ静かでも動く幅は同じ**はず（下の検算）。
+      const quieter = [...plain, { id: 'quieter', buffer: steady(4, 0.001) }];
+      // ゲート（-70 LUFS）より下の 1 本。ここまで来ると数から外れるので、薄めることすらしない。
+      const belowGate = [...plain, { id: 'below', buffer: steady(4, 0.00003) }];
+      const dMedianQuiet = Math.abs(refOf(quiet, 'median') - refOf(plain, 'median'));
+      const dMeanQuiet = Math.abs(refOf(quiet, 'mean') - refOf(plain, 'mean'));
+      const dMeanQuieter = Math.abs(refOf(quieter, 'mean') - refOf(plain, 'mean'));
+      const dMeanLoud = Math.abs(refOf(loud, 'mean') - refOf(plain, 'mean'));
+      check(
+        '静かな外れ値は平均をほとんど動かさない（動かすのは大きいほう）',
+        dMeanQuiet < 1 && dMeanLoud > 5,
+        `平均が動いた幅: 静かな 1 本 ${dMeanQuiet.toFixed(3)} LU / 大きい 1 本 ${dMeanLoud.toFixed(2)} LU`,
+      );
+      // **静かな 1 本が平均を動かすのは、その音の大きさのせいではない。**
+      // パワーをほとんど足さずに重みの合計だけを増やすので、下がる幅は 10log₁₀((n+1)/n) ちょうど。
+      // 本数だけで決まるので、**素材を 43 本並べたときの 0.10 LU も、これで説明がつく。**
+      // 「声の無いクリップが混じると平均が下がる」を**大きさの話だと読んでいたのが間違い**だった。
+      const dilution = 10 * Math.log10(6 / 5);
+      check(
+        '静かな外れ値が平均を下げる幅は、音の大きさではなく本数で決まる',
+        near(dMeanQuiet, dilution, 0.01) && near(dMeanQuieter, dilution, 0.01),
+        `-30dB で ${dMeanQuiet.toFixed(3)} / -40dB で ${dMeanQuieter.toFixed(3)} / 10log₁₀(6/5) = ${dilution.toFixed(3)} LU`,
+      );
+      // ゲートより下へ落ちると、その 1 本は**数からも外れる**ので薄めない。
+      // つまり平均が動く幅は「静かさ」に対して単調ではなく、**ゲートで切れて 0 に戻る。**
+      const dMeanBelow = Math.abs(refOf(belowGate, 'mean') - refOf(plain, 'mean'));
+      check(
+        'ゲートより下の 1 本は、平均を薄めることすらしない',
+        dMeanBelow < 1e-9,
+        `${dMeanBelow.toFixed(3)} LU（-70 LUFS の線より下）`,
+      );
+      check(
+        '中央値はどちらの外れ値にも動かない',
+        dMedianQuiet < 1e-9 && Math.abs(refOf(loud, 'median') - refOf(plain, 'median')) < 1e-9,
+        `${dMedianQuiet.toFixed(3)} LU`,
+      );
+    }
+
+    // ⑩ 素材が無いとき・全部測れないときでも落ちない（画面から空のまま押されることがある）。
+    {
+      const emptyPlan = planClipMatch([], {});
+      const allSilent = match([
+        { id: 'a', buffer: silent(4) },
+        { id: 'b', buffer: silent(4) },
+      ]);
+      check(
+        '空のとき・全部測れないときでも落ちず、倍率は 1 倍',
+        emptyPlan.referenceLufs === null &&
+          emptyPlan.gains.length === 0 &&
+          allSilent.referenceLufs === null &&
+          allSilent.gains.every((g) => g.gain === 1 && g.limitedBy === 'unmeasurable'),
+        `空 ${emptyPlan.gains.length} 本 / 無音だけ ${allSilent.gains.length} 本`,
       );
     }
   }
