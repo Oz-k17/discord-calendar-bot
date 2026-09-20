@@ -667,6 +667,44 @@ function oneShot(data, at, level, random) {
 }
 
 /**
+ * ごく低い重低音のキック（**リミッタを潰しにいくための素材**。2026-09-20）。
+ *
+ * リミッタは「山の手前から倍率をなめらかに下げる」ことで歪みを避けている。
+ * その先読みの長さより**半周期が長い音**——つまり十分に低い音——で山ができると、
+ * **倍率がその音の 1 周期の中で動く**ことになり、下げているのは山ではなく波形そのものになる
+ * （既定の先読み 10ms が守れるのは 50Hz まで。表は `limiter.ts` にある）。
+ *
+ * **鳴りっぱなしの低音では、この形にならない。** 最初そう作って測ったら外れた:
+ * ピークを支配するほど大きい低音は、同時にラウドネスも支配する（LUFS の K 特性は
+ * 45Hz をそこまで捨てない）。すると正規化は**下げる側**に回り、リミッタに触れもしない。
+ * 歪ませたければ、**ピークだけ高くてラウドネスに効かないもの**——つまり
+ * 「低くて・深くて・まばら」でなければならない。だからキックにしてある。
+ *
+ * 45Hz を選んだのは、既定の先読み 10ms では半周期（11.1ms）にわずかに足りない位置だから。
+ * ぴったり守れる 50Hz では「守れている」ことしか分からず、20Hz まで下げると
+ * 現実には入っていない音の話になる。**境目のすぐ外**に置くのがいちばん情報が出る。
+ * 打ち込みの 808 キックも映画の効果音も、この辺りを平気で鳴らす。
+ *
+ * 乱数を引かないので、**足してもほかの音は 1 ビットも変わらない**
+ * （`speech.wav` と声をそのまま突き合わせられる）。
+ */
+function subKicks(data, from, to, level, hitsPerSecond, hz) {
+  const step = SR / hitsPerSecond;
+  const decay = 0.09 * SR;
+  for (let at = Math.round(from * SR); at < Math.round(to * SR); at += step) {
+    const start = Math.round(at);
+    for (let k = 0; k < decay * 4 && start + k < data.length; k += 1) {
+      // 頭を 1ms かけて立ち上げる。段差のまま入れると、そこが真のピークになってしまい
+      // 「低い音の山」ではなく「段差の山」を測ることになる。
+      const attack = Math.min(1, k / (0.001 * SR));
+      // 打点らしく音程が少し落ちる（キックは頭が高い）。ここも乱数は使わない。
+      const f = hz * (1 + 0.6 * Math.exp(-k / (0.012 * SR)));
+      data[start + k] += level * attack * Math.exp(-k / decay) * Math.sin((2 * Math.PI * f * k) / SR);
+    }
+  }
+}
+
+/**
  * 全体を持ち上げてから ±1 で叩き切る（すでに詰めて仕上げられた素材のつもり）。
  *
  * **真のピークを潰しにいくための素材**（2026-09-19・3 回目）。
@@ -980,6 +1018,13 @@ export function renderShort(
     /** 和音の長さ（秒）。遡りの既定（0.32 秒）よりずっと長くしておく。 */
     chordIntoLength = 1.0,
     /**
+     * ごく低い重低音のキックを鳴らす回数（1 秒あたり）。0 で鳴らさない。
+     * リミッタの先読みを潰しにいくための形。詳しくは `subKicks` を参照。
+     */
+    subKick = 0,
+    subKickLevel = 0.5,
+    subKickHz = 45,
+    /**
      * 1 発だけ鳴る大きな打撃音の位置（秒）。0 で鳴らさない。
      * ラウドネス正規化（`lufs.ts`）を潰しにいくための形。詳しくは `oneShot` を参照。
      */
@@ -1029,6 +1074,8 @@ export function renderShort(
   // 打撃と叩き切りは、ほかを全部置き終わってから当てる。
   // **乱数はここでしか引かない位置に置いてある**ので、`click` を足しても
   // 声・伴奏・刻みは 1 ビットも変わらない（`speech-dry.wav` と突き合わせられる）。
+  // 重低音のキックも乱数を引かないので、ここへ置いてもほかの音は 1 ビットも変わらない。
+  if (subKick) subKicks(data, 0, SHORT_LENGTH, subKickLevel, subKick, subKickHz);
   if (click) oneShot(data, click, clickLevel, random);
   if (hardClipBoostDb) hardClip(data, hardClipBoostDb);
   return data;

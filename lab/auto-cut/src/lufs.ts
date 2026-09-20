@@ -352,6 +352,44 @@ function truePeakFilter(): Float64Array[] {
 
 const TP_FILTER = truePeakFilter();
 
+/** 48 タップの中心は 24 なので、群遅延はちょうど入力 6 標本ぶん。ここが整数になるように中心を選んである。 */
+const TP_DELAY = TP_TAPS / 2;
+
+/**
+ * **標本ごと**の真のピーク（線形。dB ではない）を返す。長さは元と同じ。
+ *
+ * `truePeakOf` が素材ぜんたいの 1 つの数を返すのに対して、こちらは列を返す。
+ * リミッタが要るのはこちら側で、**どこが天井を超えているか**が分からないと
+ * そこだけ下げるということができない。
+ *
+ * 位相 p の出力が表しているのは時刻 `i + 6 + p/4`（位相 0 は δ なので元の標本そのもの）。
+ * それをいちばん近い標本の位置へ入れているので、**この列の j 番目は
+ * 「標本 j の前後半分のあいだに起きる最大の高さ」**になる。
+ * リミッタはこの列を見て倍率を決めるが、倍率は 1 標本では動かない（なめらかに動かす）ので、
+ * 半標本のずれは倍率にほとんど効かない。
+ *
+ * 先頭 6 標本と末尾 11 標本は窓が収まらないので、標本の値そのものを入れている
+ * （`truePeakOf` と同じ割り切り。素材の端 0.2ms ほどだけ標本の粗さで見ていることになる）。
+ */
+export function truePeakEnvelope(data: Float32Array): Float64Array {
+  const env = new Float64Array(data.length);
+  for (let i = 0; i < data.length; i += 1) env[i] = Math.abs(data[i]);
+  if (data.length < TP_TAPS) return env;
+  for (let p = 1; p < TP_PHASES; p += 1) {
+    const taps = TP_FILTER[p];
+    // 時刻 i+6+p/4 をいちばん近い標本へ丸める（p=1 は手前、p=2,3 は 1 つ先）。
+    const at = TP_DELAY + Math.round(p / TP_PHASES);
+    for (let i = 0; i + TP_TAPS <= data.length; i += 1) {
+      let acc = 0;
+      for (let k = 0; k < TP_TAPS; k += 1) acc += taps[k] * data[i + k];
+      const a = Math.abs(acc);
+      const j = i + at;
+      if (j < env.length && a > env[j]) env[j] = a;
+    }
+  }
+  return env;
+}
+
 /**
  * 標本の間も含めた最大の絶対値を返す（線形。dB ではない）。
  *
@@ -360,6 +398,9 @@ const TP_FILTER = truePeakFilter();
  * 末尾の 11 標本は窓が収まらないので、位相を当てずに標本の値だけで見ている
  * （最初に標本の最大を取ってあるので、そこが抜け落ちることはない）。
  * 素材の終わりぎわ 0.2ms ほどだけ、標本の粗さで見ていることになる。
+ *
+ * **`truePeakEnvelope` の最大と必ず一致する**（同じ位相・同じタップを見ているため）。
+ * 列を作らずに済むぶんこちらのほうが軽いので、1 つの数で足りる場面はこちらを使う。
  */
 export function truePeakOf(data: Float32Array): number {
   let peak = 0;
@@ -387,6 +428,15 @@ export interface NormalizationOptions {
   targetLufs?: number;
   /** 真のピークの上限（dBTP）。0 ちょうどにしないのは、変換先の符号化で少し膨らむため。 */
   truePeakCeilingDb?: number;
+  /**
+   * このあとリミッタ（`limiter.ts`）に通す前提で、**天井をこれだけ超える倍率まで許す**（dB）。
+   *
+   * 既定は 0 ＝ リミッタを通さない前提（倍率ひとつで、ピークの天井を素直に守る）。
+   * 値を入れると、超えたぶんはリミッタが均す前提で倍率を伸ばせる。
+   * **ここに入れてよいのはリミッタが実際に下げられる深さ**（`maxReductionDb`）までで、
+   * 大きくしても均しきれず天井を超えたまま出る。
+   */
+  limiterHeadroomDb?: number;
 }
 
 /**
@@ -406,6 +456,7 @@ export interface NormalizationOptions {
 export const DEFAULT_NORMALIZATION: Required<NormalizationOptions> = {
   targetLufs: -14,
   truePeakCeilingDb: -1,
+  limiterHeadroomDb: 0,
 };
 
 export interface NormalizationPlan {
@@ -421,9 +472,15 @@ export interface NormalizationPlan {
    * 何に止められたか。
    * - `none`  目標ちょうどに揃った
    * - `peak`  ピークの上限が先に来た（これ以上上げると歪む）
+   * - `limiter` リミッタが均せる深さが足りなかった（`limiterHeadroomDb` を入れたときだけ出る）
    * - `unmeasurable` ゲートを通る窓が無く、測れなかった（倍率は 1 倍）
    */
-  limitedBy: 'none' | 'peak' | 'unmeasurable';
+  limitedBy: 'none' | 'peak' | 'limiter' | 'unmeasurable';
+  /**
+   * リミッタに要求する深さ（dB）。0 なら通す必要が無い。
+   * **`limiterHeadroomDb` を超えることはない**（超える前に倍率のほうを抑える）。
+   */
+  neededReductionDb: number;
   /** 目標に届かなかったぶん（dB）。届いていれば 0。 */
   shortfallDb: number;
   targetLufs: number;
@@ -442,7 +499,7 @@ export function planLoudnessNormalization(
   measurement: LoudnessMeasurement,
   options: NormalizationOptions = {},
 ): NormalizationPlan {
-  const { targetLufs, truePeakCeilingDb } = { ...DEFAULT_NORMALIZATION, ...options };
+  const { targetLufs, truePeakCeilingDb, limiterHeadroomDb } = { ...DEFAULT_NORMALIZATION, ...options };
 
   if (measurement.integratedLufs === null) {
     return {
@@ -452,6 +509,7 @@ export function planLoudnessNormalization(
       resultTruePeakDb: measurement.truePeakDb,
       limitedBy: 'unmeasurable',
       shortfallDb: 0,
+      neededReductionDb: 0,
       targetLufs,
     };
   }
@@ -459,12 +517,15 @@ export function planLoudnessNormalization(
   const wanted = targetLufs - measurement.integratedLufs;
   // ピークの余地。素材がすでに天井を超えているなら負（＝下げる向き）になる。
   const peakRoom = truePeakCeilingDb - measurement.truePeakDb;
+  // リミッタに通す前提なら、その深さだけ天井を超える倍率まで許せる。
+  const headroom = Math.max(0, limiterHeadroomDb);
   let gainDb = wanted;
   let limitedBy: NormalizationPlan['limitedBy'] = 'none';
 
-  if (gainDb > peakRoom) {
-    gainDb = peakRoom;
-    limitedBy = 'peak';
+  if (gainDb > peakRoom + headroom) {
+    gainDb = peakRoom + headroom;
+    // 均す前提が無いなら従来どおり「ピークで止まった」。あるなら「均しきれなかった」。
+    limitedBy = headroom > 0 ? 'limiter' : 'peak';
   }
 
   const gain = Math.pow(10, gainDb / 20);
@@ -472,10 +533,12 @@ export function planLoudnessNormalization(
     gain,
     gainDb,
     resultLufs: measurement.integratedLufs + gainDb,
+    // **リミッタに通す前**の値。通したあとは天井まで下がる（そちらは `LimiterReport` に出る）。
     resultTruePeakDb: measurement.truePeakDb + gainDb,
     limitedBy,
     // 下げる側で天井に当たることもあるので、絶対値ではなく「目標との差」を素直に出す。
     shortfallDb: Math.abs(wanted - gainDb) < 1e-9 ? 0 : wanted - gainDb,
+    neededReductionDb: Math.max(0, measurement.truePeakDb + gainDb - truePeakCeilingDb),
     targetLufs,
   };
 }

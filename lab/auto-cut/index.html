@@ -156,6 +156,15 @@
             <input type="range" id="ceiling-db" min="-3" max="0" step="0.1" value="-1" />
             <small>0 にしないのは、変換先の符号化で標本の間が少し膨らむため</small>
           </label>
+          <label>
+            <span><input type="checkbox" id="use-limiter" checked /> リミッタで山を均す</span>
+            <small>倍率ひとつでは、声の入った素材の 3 分の 1 が天井に当たって目標へ届かない</small>
+          </label>
+          <label>
+            リミッタの先読み <output id="out-lookahead"></output>
+            <input type="range" id="lookahead-ms" min="1" max="20" step="1" value="10" />
+            <small>この半分より周期の長い音（＝低い音）は歪む。10ms で 50Hz まで守れる</small>
+          </label>
         </div>
 
         <dl class="stats" id="loudness-stats"></dl>

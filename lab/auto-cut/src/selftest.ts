@@ -38,8 +38,10 @@ import {
   kWeighting,
   measureLoudness,
   planLoudnessNormalization,
+  truePeakEnvelope,
   truePeakOf,
 } from './lufs.ts';
+import { DEFAULT_LIMITER, limitTruePeak } from './limiter.ts';
 
 export interface TestResult {
   name: string;
@@ -2588,6 +2590,256 @@ export function runSelfTest(): TestResult[] {
     // ⑯ すでに大きい素材は素直に下げる（`speech-loud-clipped.wav` と同じ向き）。
     const loud = planLoudnessNormalization(measureLoudness(sine([{ seconds: 20, db: -3 }])));
     check('大きすぎる素材は下げる', loud.gainDb < -5 && loud.limitedBy === 'none', `${loud.gainDb.toFixed(2)}dB`);
+  }
+
+  // --- リミッタ（山を均す処理）---
+  //
+  // ここも外に正解がある側に近い。**天井を守れているかは測れば分かる**ので、
+  // 「それらしく動いている」ではなく「超えていない」を毎回確かめる。
+  // 逆に「歪んでいないか」は自分で線を引くしかないので、
+  // **倍率がどれだけ速く動いたか**という、目に見える量に置き換えて確かめている。
+  {
+    const sr = 48000;
+    const ceiling = -1;
+
+    /** f Hz の正弦波（振幅は dBFS で指定）。 */
+    const sine = (f: number, seconds: number, db: number, rate = sr) => {
+      const length = Math.round(seconds * rate);
+      const data = new Float32Array(length);
+      const amp = Math.pow(10, db / 20);
+      for (let i = 0; i < length; i += 1) data[i] = amp * Math.sin((2 * Math.PI * f * i) / rate);
+      return { sampleRate: rate, numberOfChannels: 1, length, getChannelData: () => data } as AudioLike;
+    };
+    /** 一定の音の途中に、1 発だけ天井を超える打撃を置く。 */
+    const withSpike = (at: number, spike: number, baseDb = -20) => {
+      const base = sine(400, 1, baseDb);
+      const data = Float32Array.from(base.getChannelData(0));
+      const start = Math.round(at * sr);
+      for (let k = 0; k < Math.round(0.002 * sr); k += 1) {
+        data[start + k] += spike * Math.exp(-k / (0.0003 * sr));
+      }
+      return { sampleRate: sr, numberOfChannels: 1, length: data.length, getChannelData: () => data } as AudioLike;
+    };
+    const peakDbOf = (buffer: AudioLike) => 20 * Math.log10(truePeakOf(buffer.getChannelData(0)));
+
+    // ① 標本ごとの真のピークは、全体の最大と必ず一致する。
+    //    **この 2 つがずれていたら、リミッタは見当違いの場所を下げている。**
+    {
+      const data = sine(997, 0.5, -3).getChannelData(0);
+      const env = truePeakEnvelope(data);
+      let max = 0;
+      for (let i = 0; i < env.length; i += 1) if (env[i] > max) max = env[i];
+      check('標本ごとの真のピークの最大が、全体の真のピークと一致する', near(max, truePeakOf(data), 1e-12), `${max.toFixed(9)}`);
+    }
+
+    // ② 天井の下しか鳴っていない素材は、1 ビットも触らない。
+    //    **触らないことを確かめるのがいちばん大事**で、ここが崩れると全編が痩せる。
+    {
+      const quiet = sine(200, 0.5, -10);
+      const r = limitTruePeak(quiet, { ceilingDb: ceiling });
+      let same = true;
+      for (let i = 0; i < quiet.length; i += 1) if (r.buffer.getChannelData(0)[i] !== quiet.getChannelData(0)[i]) same = false;
+      check('天井の下の素材には手を出さない', same && r.report.maxReductionDb === 0, `作動 ${r.report.activeSeconds.toFixed(3)} 秒`);
+    }
+
+    // ③ 天井を超えていれば、通したあとは天井以下になる。
+    {
+      const loud = sine(200, 0.5, 0);
+      const r = limitTruePeak(loud, { ceilingDb: ceiling, maxReductionDb: 12 });
+      check(
+        '天井を超える素材は天井以下まで下がる',
+        r.report.truePeakDb <= ceiling + 0.01 && near(peakDbOf(r.buffer), ceiling, 0.05),
+        `${peakDbOf(r.buffer).toFixed(2)} dBTP`,
+      );
+    }
+
+    // ④ 見ているのは標本ではなく**真の**ピーク。叩き切った波形は標本 0dBFS のまま
+    //    標本の間が 0 を超えるので、標本だけを見て下げると天井を守れない。
+    {
+      const length = sr / 2;
+      const data = new Float32Array(length);
+      for (let i = 0; i < length; i += 1) data[i] = Math.max(-1, Math.min(1, 3 * Math.sin((2 * Math.PI * 997 * i) / sr)));
+      const clipped = { sampleRate: sr, numberOfChannels: 1, length, getChannelData: () => data } as AudioLike;
+      const before = peakDbOf(clipped);
+      const r = limitTruePeak(clipped, { ceilingDb: ceiling, maxReductionDb: 12 });
+      check(
+        '叩き切った波形でも、標本の間まで天井の下に入る',
+        before > 0 && r.report.truePeakDb <= ceiling + 0.01,
+        `${before.toFixed(2)} → ${r.report.truePeakDb.toFixed(2)} dBTP`,
+      );
+    }
+
+    // ⑤ 山の手前から下がり始める（先読み）。山の瞬間に落とすと角を削ることになる。
+    {
+      const at = 0.5;
+      const src = withSpike(at, 1.2).getChannelData(0);
+      const out = limitTruePeak(withSpike(at, 1.2), { ceilingDb: ceiling, lookAheadMs: 10, maxReductionDb: 12 })
+        .buffer.getChannelData(0);
+      // **1 標本を見て割ってはいけない。** 土台は正弦波なので、その標本がたまたま
+      // 零交差なら 0 ÷ 0 になる（最初そう書いて、倍率が動いていないように見えた）。
+      // 前後 1ms の山どうしで比べる。
+      const gainAround = (seconds: number) => {
+        const i = Math.round(seconds * sr);
+        let a = 0;
+        let b = 0;
+        for (let k = -48; k <= 48; k += 1) {
+          a = Math.max(a, Math.abs(src[i + k]));
+          b = Math.max(b, Math.abs(out[i + k]));
+        }
+        return a > 0 ? b / a : 1;
+      };
+      check(
+        '山の手前から倍率が下がり始める（先読み）',
+        gainAround(at - 0.005) < 0.999 && gainAround(at - 0.04) > 0.9999,
+        `5ms 前 ${gainAround(at - 0.005).toFixed(3)} / 40ms 前 ${gainAround(at - 0.04).toFixed(3)}`,
+      );
+    }
+
+    // ⑥ 倍率が 1 標本で飛ばない。**段差はそのまま歪みになる**ので、
+    //    移動平均が効いていることを「隣どうしの差の最大」で押さえる。
+    {
+      const look = Math.round((DEFAULT_LIMITER.lookAheadMs / 1000) * sr);
+      const src = withSpike(0.5, 1.2);
+      const r = limitTruePeak(src, { ceilingDb: ceiling, maxReductionDb: 12 });
+      const a = src.getChannelData(0);
+      const b = r.buffer.getChannelData(0);
+      let worst = 0;
+      for (let i = 1; i < a.length; i += 1) {
+        if (Math.abs(a[i]) < 1e-6 || Math.abs(a[i - 1]) < 1e-6) continue;
+        worst = Math.max(worst, Math.abs(b[i] / a[i] - b[i - 1] / a[i - 1]));
+      }
+      // 長さ L の移動平均なので、1 標本あたりの動きは (1 − いちばん深い倍率) / L を超えない。
+      check('倍率が 1 標本で飛ばない（移動平均が効いている）', worst <= 1 / look + 1e-9, `最大の段差 ${worst.toExponential(2)}（上限 ${(1 / look).toExponential(2)}）`);
+    }
+
+    // ⑦ 深さの上限を守る。**守るかわりに天井は超える**ので、そこを黙って呑まない。
+    {
+      // 天井を -6dB に取ると 6dB ぶん下げる必要があるので、上限 1dB では足りない。
+      const r = limitTruePeak(sine(200, 0.5, 0), { ceilingDb: -6, maxReductionDb: 1 });
+      check(
+        '深さの上限より深くは下げない（かわりに天井を超えたと申告する）',
+        r.report.maxReductionDb <= 1.0001 && r.report.clamped && r.report.truePeakDb > -6 + 0.01,
+        `${r.report.maxReductionDb.toFixed(2)}dB 下げて ${r.report.truePeakDb.toFixed(2)} dBTP（天井 -6）`,
+      );
+    }
+
+    // ⑧ 1 発の打撃のために、素材ぜんたいを小さくしない。
+    //    **これが崩れると「均した」ではなく「小さくした」**になる。
+    {
+      const r = limitTruePeak(withSpike(0.5, 1.2), { ceilingDb: ceiling, maxReductionDb: 12 });
+      check(
+        '1 発の打撃で素材ぜんたいが小さくならない',
+        r.report.activeSeconds < 0.05 && r.report.maxReductionDb > 3,
+        `${r.report.maxReductionDb.toFixed(2)}dB を ${(r.report.activeSeconds * 1000).toFixed(1)}ms だけ`,
+      );
+    }
+
+    // ⑨ 先読みが半周期より長ければ、低い音は歪まない。**ここが設計の要**なので、
+    //    「歪まない側」と「歪む側」の両方を押さえる（片方だけだと、たまたま通ったのか分からない）。
+    {
+      const thd = (f: number, lookAheadMs: number) => {
+        const out = limitTruePeak(sine(f, 1, 0), { ceilingDb: -6, lookAheadMs, maxReductionDb: 24 }).buffer.getChannelData(0);
+        const period = sr / f;
+        const total = Math.round(Math.floor((0.5 * sr) / period) * period);
+        const start = Math.round((out.length - total) / 2);
+        const mag = (h: number) => {
+          let re = 0;
+          let im = 0;
+          for (let i = 0; i < total; i += 1) {
+            const t = (2 * Math.PI * h * f * (i + start)) / sr;
+            re += out[start + i] * Math.cos(t);
+            im += out[start + i] * Math.sin(t);
+          }
+          return (2 * Math.hypot(re, im)) / total;
+        };
+        let acc = 0;
+        for (let h = 2; h <= 6; h += 1) acc += mag(h) ** 2;
+        return 20 * Math.log10(Math.max(Math.sqrt(acc) / mag(1), 1e-20));
+      };
+      // 50Hz の半周期は 10ms。既定（10ms）はそこに合わせてある。
+      const clean = thd(50, 10);
+      const dirty = thd(50, 2);
+      check('半周期より長い先読みなら、低い音は歪まない（50Hz・10ms）', clean < -100, `${clean.toFixed(0)}dB`);
+      check('先読みを半周期より短くすると歪む（50Hz・2ms）', dirty > -40, `${dirty.toFixed(0)}dB`);
+    }
+
+    // ⑩ 左右で同じ倍率を当てる。片側だけ下げると**音が左右にふらつく**。
+    {
+      const length = sr / 2;
+      const left = new Float32Array(length);
+      const right = new Float32Array(length);
+      for (let i = 0; i < length; i += 1) {
+        left[i] = Math.sin((2 * Math.PI * 200 * i) / sr); // 天井を超える
+        right[i] = 0.1 * Math.sin((2 * Math.PI * 200 * i) / sr); // 超えない
+      }
+      const stereo = {
+        sampleRate: sr,
+        numberOfChannels: 2,
+        length,
+        getChannelData: (c: number) => (c === 0 ? left : right),
+      } as AudioLike;
+      const r = limitTruePeak(stereo, { ceilingDb: ceiling, maxReductionDb: 12 });
+      const i = Math.round(length / 2);
+      const gl = r.buffer.getChannelData(0)[i] / left[i];
+      const gr = r.buffer.getChannelData(1)[i] / right[i];
+      check('左右に同じ倍率を当てる（定位を動かさない）', near(gl, gr, 1e-6) && gl < 0.95, `${gl.toFixed(4)} / ${gr.toFixed(4)}`);
+    }
+
+    // ⑪ 端の素材で落ちない。**空・1 標本・先読みより短い**の 3 つ。
+    {
+      const empty = { sampleRate: sr, numberOfChannels: 1, length: 0, getChannelData: () => new Float32Array(0) } as AudioLike;
+      const one = { sampleRate: sr, numberOfChannels: 1, length: 1, getChannelData: () => Float32Array.of(1) } as AudioLike;
+      const shortOne = sine(200, 0.001, 0); // 先読み 10ms より短い
+      const a = limitTruePeak(empty, { ceilingDb: ceiling });
+      const b = limitTruePeak(one, { ceilingDb: ceiling, maxReductionDb: 12 });
+      const c = limitTruePeak(shortOne, { ceilingDb: ceiling, maxReductionDb: 12 });
+      check(
+        '空・1 標本・先読みより短い素材でも落ちない',
+        a.buffer.length === 0 && b.report.maxReductionDb > 0 && c.report.truePeakDb <= ceiling + 0.01,
+        `1 標本 ${b.report.maxReductionDb.toFixed(2)}dB / 短い素材 ${c.report.truePeakDb.toFixed(2)} dBTP`,
+      );
+    }
+
+    // ⑫ 計画の側と噛み合っていること。リミッタに通す前提を渡すと、
+    //    **ピークで止まっていた素材が目標へ届く。** ここが今回の狙いそのもの。
+    {
+      // 土台 -14dBFS ＋ 打撃 0.9 で、足りないぶんが 4.60dB（上限 6dB の内側）になる。
+      const buffer = withSpike(0.5, 0.9, -14);
+      const m = measureLoudness(buffer);
+      const plain = planLoudnessNormalization(m, { targetLufs: -14, truePeakCeilingDb: ceiling });
+      const withLimiter = planLoudnessNormalization(m, {
+        targetLufs: -14,
+        truePeakCeilingDb: ceiling,
+        limiterHeadroomDb: 6,
+      });
+      const out = limitTruePeak(applyGain(buffer, withLimiter.gain), {
+        ceilingDb: ceiling,
+        maxReductionDb: 6,
+      });
+      const after = measureLoudness(out.buffer);
+      check(
+        'リミッタに通す前提なら、ピークで止まっていた素材が目標へ届く',
+        plain.limitedBy === 'peak' && withLimiter.limitedBy === 'none' && near(after.integratedLufs as number, -14, 0.2),
+        `${plain.shortfallDb.toFixed(2)}dB 足りなかったものが ${(after.integratedLufs as number).toFixed(2)} LUFS へ`,
+      );
+      check(
+        '通したあとも天井は守られている',
+        after.truePeakDb <= ceiling + 0.01,
+        `${after.truePeakDb.toFixed(2)} dBTP`,
+      );
+    }
+
+    // ⑬ 既定は**リミッタを前提にしない**（`limiterHeadroomDb` は 0）。
+    //    ここが勝手に変わると、`lufs.ts` だけを使っている呼び出しが黙って歪む。
+    {
+      const m = measureLoudness(withSpike(0.5, 0.9, -14));
+      const plan = planLoudnessNormalization(m, { targetLufs: -14, truePeakCeilingDb: ceiling });
+      check(
+        '既定ではリミッタを前提にしない（従来どおりピークで止まる）',
+        DEFAULT_NORMALIZATION.limiterHeadroomDb === 0 && plan.limitedBy === 'peak' && plan.neededReductionDb === 0,
+        `${plan.limitedBy}`,
+      );
+    }
   }
 
   return results;

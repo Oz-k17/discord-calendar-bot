@@ -4,18 +4,20 @@
  * 本体へ持っていくときに要るのはそちらだけで、このファイルは捨ててよい。
  */
 
-import { analyzeLoudness, type LoudnessTrack } from './loudness.ts';
+import { analyzeLoudness, type AudioLike, type LoudnessTrack } from './loudness.ts';
 import { buildPeaks, type Peaks } from './peaks.ts';
 import { analyzeFeatures, type FeatureTrack } from './features.ts';
 import { planJetCut, type JetCutPlan } from './silence.ts';
 import { applyDucking, gainAt, planDucking, type GainPoint } from './ducking.ts';
 import { summarize, toClipEdits } from './edits.ts';
 import {
+  applyGain,
   measureLoudness,
   planLoudnessNormalization,
   type LoudnessMeasurement,
   type NormalizationPlan,
 } from './lufs.ts';
+import { DEFAULT_LIMITER, limitTruePeak, type LimiterReport } from './limiter.ts';
 import { runSelfTest } from './selftest.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -59,6 +61,8 @@ let bgm: Loaded | null = null;
 let plan: JetCutPlan | null = null;
 let duckPoints: GainPoint[] = [];
 let loudnessPlan: NormalizationPlan | null = null;
+/** リミッタを通した音。**通さないときは null** で、そのときは倍率だけを当てて鳴らす。 */
+let limited: { buffer: AudioLike; report: LimiterReport } | null = null;
 
 // ---------- 読み込み ----------
 
@@ -352,8 +356,13 @@ function playRanges(loaded: Loaded, ranges: { start: number; end: number }[]) {
 function refreshLoudness() {
   const target = Number($<HTMLInputElement>('target-lufs').value);
   const ceiling = Number($<HTMLInputElement>('ceiling-db').value);
+  const useLimiter = $<HTMLInputElement>('use-limiter').checked;
+  const lookAheadMs = Number($<HTMLInputElement>('lookahead-ms').value);
   $<HTMLOutputElement>('out-target').textContent = `${target.toFixed(1)} LUFS`;
   $<HTMLOutputElement>('out-ceiling').textContent = `${ceiling.toFixed(1)} dBTP`;
+  // 守れる下限の周波数も併せて出す。**つまみの意味が「何 Hz まで歪まないか」**なので、
+  // ミリ秒だけ見せても何を選んでいるのか分からない。
+  $<HTMLOutputElement>('out-lookahead').textContent = `${lookAheadMs} ms（${Math.round(500 / lookAheadMs)} Hz まで）`;
 
   const stats = $<HTMLDListElement>('loudness-stats');
   const warning = $<HTMLParagraphElement>('loudness-warning');
@@ -361,11 +370,27 @@ function refreshLoudness() {
     stats.innerHTML = '';
     warning.hidden = true;
     loudnessPlan = null;
+    limited = null;
     return;
   }
 
   const m = voice.loudness;
-  loudnessPlan = planLoudnessNormalization(m, { targetLufs: target, truePeakCeilingDb: ceiling });
+  loudnessPlan = planLoudnessNormalization(m, {
+    targetLufs: target,
+    truePeakCeilingDb: ceiling,
+    limiterHeadroomDb: useLimiter ? DEFAULT_LIMITER.maxReductionDb : 0,
+  });
+
+  // 倍率を当ててからリミッタに通す。13 秒で 150ms ほどかかるので、
+  // **通す必要があるときだけ**作る（天井を超えないなら倍率だけで済む）。
+  limited =
+    useLimiter && loudnessPlan.neededReductionDb > 0
+      ? limitTruePeak(applyGain(voice.buffer, loudnessPlan.gain), {
+          ceilingDb: ceiling,
+          lookAheadMs,
+        })
+      : null;
+
   const lufs = (v: number | null) => (v === null ? '測れません' : `${v.toFixed(1)} LUFS`);
   stats.innerHTML = [
     ['いまの大きさ', lufs(m.integratedLufs)],
@@ -376,7 +401,17 @@ function refreshLoudness() {
     // 標本と真の差は「叩き切ってあるか」の目安になるので、並べて出す。
     ['真のピーク', `${m.truePeakDb.toFixed(1)} dBTP`],
     ['当てる倍率', `${loudnessPlan.gainDb >= 0 ? '+' : ''}${loudnessPlan.gainDb.toFixed(1)} dB`],
-    ['揃えたあと', `${lufs(loudnessPlan.resultLufs)} / ${loudnessPlan.resultTruePeakDb.toFixed(1)} dBTP`],
+    ['揃えたあと', `${lufs(loudnessPlan.resultLufs)} / ${(limited ? limited.report.truePeakDb : loudnessPlan.resultTruePeakDb).toFixed(1)} dBTP`],
+    // **均した深さと時間を並べて出す。** 深さだけ見せると「効いた」としか読めないが、
+    // 長く働いているなら、それは揃えたのではなく潰しただけかもしれない。
+    [
+      '均した量',
+      limited
+        ? `${limited.report.maxReductionDb.toFixed(1)} dB を ${(limited.report.activeSeconds * 1000).toFixed(0)} ms（${(limited.report.activeRatio * 100).toFixed(2)}%）`
+        : useLimiter
+          ? '均す必要なし'
+          : '使っていません',
+    ],
   ]
     .map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`)
     .join('');
@@ -387,7 +422,13 @@ function refreshLoudness() {
     warning.textContent =
       `目標まで上げるとピークが天井（${ceiling.toFixed(1)} dBTP）を超えるので、` +
       `${Math.abs(loudnessPlan.shortfallDb).toFixed(1)} dB 手前で止めました。` +
-      '一瞬の大きな音が倍率を決めています。そこを均さない限り、倍率ひとつでは届きません。';
+      '一瞬の大きな音が倍率を決めています。「リミッタで山を均す」を入れると届きます。';
+    warning.hidden = false;
+  } else if (loudnessPlan.limitedBy === 'limiter') {
+    warning.textContent =
+      `均してよい深さ（${DEFAULT_LIMITER.maxReductionDb} dB）では足りないので、` +
+      `${Math.abs(loudnessPlan.shortfallDb).toFixed(1)} dB 手前で止めました。` +
+      'ここから先は均したのではなく、その音を消したことになります。';
     warning.hidden = false;
   } else if (loudnessPlan.limitedBy === 'unmeasurable') {
     warning.textContent =
@@ -406,18 +447,28 @@ function refreshLoudness() {
 /**
  * 揃える前と後を聴き比べる。
  *
- * 倍率は `GainNode` で当てる。配列を作り直して当てても同じだが、
+ * 倍率だけなら `GainNode` で当てる。配列を作り直して当てても同じだが、
  * **耳で比べるのに「押した瞬間に鳴る」ほうが大事**で、13 秒ぶんを作り直すと待たされる。
+ * リミッタを通したときだけは、倍率が標本ごとに動くので作り直したものを鳴らす
+ * （そちらは `refreshLoudness` の時点で作ってある）。
  */
 function playLoudness(normalized: boolean) {
   if (!voice) return;
   stopAll();
   const ctx = ensureAudio();
   const node = ctx.createBufferSource();
-  node.buffer = voice.buffer;
-  const gain = ctx.createGain();
-  gain.gain.value = normalized && loudnessPlan ? loudnessPlan.gain : 1;
-  node.connect(gain).connect(ctx.destination);
+  if (normalized && limited) {
+    const rendered = ctx.createBuffer(voice.buffer.numberOfChannels, voice.buffer.length, voice.buffer.sampleRate);
+    // `copyToChannel` ではなく `set` を使う（Float32Array の裏の型が合わないため）。
+    for (let c = 0; c < rendered.numberOfChannels; c += 1) rendered.getChannelData(c).set(limited.buffer.getChannelData(c));
+    node.buffer = rendered;
+    node.connect(ctx.destination);
+  } else {
+    node.buffer = voice.buffer;
+    const gain = ctx.createGain();
+    gain.gain.value = normalized && loudnessPlan ? loudnessPlan.gain : 1;
+    node.connect(gain).connect(ctx.destination);
+  }
   node.start(ctx.currentTime + 0.05);
   playing.push(node);
 }
@@ -502,7 +553,7 @@ for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="mod
 for (const id of ['duck-db', 'hold', 'release']) {
   $<HTMLInputElement>(id).addEventListener('input', refreshDuck);
 }
-for (const id of ['target-lufs', 'ceiling-db']) {
+for (const id of ['target-lufs', 'ceiling-db', 'use-limiter', 'lookahead-ms']) {
   $<HTMLInputElement>(id).addEventListener('input', refreshLoudness);
 }
 
@@ -551,6 +602,7 @@ declare global {
         duckPoints: GainPoint[];
         loudness: LoudnessMeasurement | null;
         loudnessPlan: NormalizationPlan | null;
+        limiter: LimiterReport | null;
       };
     };
   }
@@ -564,5 +616,6 @@ window.__lab = {
     duckPoints,
     loudness: voice?.loudness ?? null,
     loudnessPlan,
+    limiter: limited?.report ?? null,
   }),
 };

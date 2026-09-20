@@ -174,7 +174,8 @@ try {
     `${loud.loudness.integratedLufs.toFixed(1)} LUFS（1ch のまま測ると -22.6 付近になる）`);
   ok('倍率が出る', loud.loudnessPlan && Math.abs(loud.loudnessPlan.gainDb) > 0.1,
     `${loud.loudnessPlan.gainDb.toFixed(2)} dB`);
-  ok('大きさの統計が画面に出る', (await page.locator('#loudness-stats div').count()) === 7,
+  // 7 つの測定値＋「均した量」で 8 つ（2026-09-20 にリミッタを足した）。
+  ok('大きさの統計が画面に出る', (await page.locator('#loudness-stats div').count()) === 8,
     `${await page.locator('#loudness-stats div').count()} 項目`);
 
   // 目標を下げれば倍率も下がる（つまみが計算まで届いているか）。
@@ -195,12 +196,38 @@ try {
   ok('叩き切った素材は真のピークが標本を超える', clipped.truePeakDb > clipped.samplePeakDb + 1,
     `標本 ${clipped.samplePeakDb.toFixed(2)} dBFS / 真 ${clipped.truePeakDb.toFixed(2)} dBTP`);
 
-  // 一瞬の大きな音に倍率を人質に取られる素材では、届かなかったことを画面で知らせる。
+  // --- リミッタ（山を均す）---
+  // ピークで止まっていた素材が、均すことで目標へ届くこと。
+  // **画面まで通して確かめる意味があるのはここ**で、計算は合っているのに
+  // 配線が切れていて「均していない音が鳴る」ということが起こりうる。
+  await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech-bgm.wav'));
+  await page.waitForFunction(() => window.__lab.state().limiter !== null, { timeout: 30000 });
+  await page.waitForTimeout(300);
+  const limited = await page.evaluate(() => window.__lab.state());
+  ok('ピークで止まっていた素材が、均すと目標へ届く', limited.loudnessPlan.limitedBy === 'none',
+    `${limited.loudnessPlan.gainDb.toFixed(2)} dB まで上げられた`);
+  ok('均した深さと時間が画面に出る', limited.limiter.maxReductionDb > 0 && limited.limiter.activeRatio > 0,
+    `${limited.limiter.maxReductionDb.toFixed(2)} dB を ${(limited.limiter.activeRatio * 100).toFixed(2)}%`);
+  ok('均したあとも天井を超えていない', limited.limiter.truePeakDb <= -1 + 0.01,
+    `${limited.limiter.truePeakDb.toFixed(2)} dBTP`);
+
+  // 切ると、同じ素材が天井で止まる側へ戻ること（つまみが効いている確認でもある）。
+  await page.locator('#use-limiter').uncheck();
+  await page.waitForTimeout(400);
+  const noLimiter = (await page.evaluate(() => window.__lab.state()));
+  ok('リミッタを切るとピークで止まる側へ戻る',
+    noLimiter.loudnessPlan.limitedBy === 'peak' && noLimiter.limiter === null,
+    `届かなかったぶん ${noLimiter.loudnessPlan.shortfallDb.toFixed(2)} dB`);
+  await page.locator('#use-limiter').check();
+  await page.waitForTimeout(400);
+
+  // 一瞬の大きな音に倍率を人質に取られる素材は、**均してもなお届かない。**
+  // そこは「均した」ではなく「消した」になるので、届かせないのが正しい振る舞い。
   await page.locator('#voice-file').setInputFiles(path.join(fixtures, 'speech-click.wav'));
-  await page.waitForFunction(() => window.__lab.state().loudnessPlan?.limitedBy === 'peak', { timeout: 30000 });
+  await page.waitForFunction(() => window.__lab.state().loudnessPlan?.limitedBy === 'limiter', { timeout: 30000 });
   await page.waitForTimeout(300);
   const clickPlan = (await page.evaluate(() => window.__lab.state())).loudnessPlan;
-  ok('届かなかったときは理由を画面で知らせる', await page.locator('#loudness-warning').isVisible(),
+  ok('均せる深さを超える素材では、届かなかったことを画面で知らせる', await page.locator('#loudness-warning').isVisible(),
     `届かなかったぶん ${clickPlan.shortfallDb.toFixed(2)} dB`);
 
   await page.getByRole('button', { name: '揃えたあとを再生' }).click();
