@@ -55,3 +55,35 @@ export function readWav(file) {
     getChannelData: (c) => planes[c],
   };
 }
+
+/**
+ * 16bit PCM・1ch の WAV を組み立てて返す（ファイルには書かない）。
+ *
+ * 書き出し先を持たせていないのは、**使う側が 2 通りあるから**。
+ * `make-audio.mjs` はディスクへ置くが、`beat/uitest.mjs` は
+ * その場で作った素材をそのままブラウザの `<input type=file>` へ渡す
+ * （`lab/fixtures/out/` に無い素材を画面で試したいのに、確かめるためだけに
+ * 生成物を増やしたくない）。読む側（`readWav`）とここが対になっているので、
+ * 形式が食い違ったら両方が一度に落ちる。
+ */
+export function encodeWav(samples, sampleRate) {
+  const bytes = Buffer.alloc(44 + samples.length * 2);
+  bytes.write('RIFF', 0);
+  bytes.writeUInt32LE(36 + samples.length * 2, 4);
+  bytes.write('WAVE', 8);
+  bytes.write('fmt ', 12);
+  bytes.writeUInt32LE(16, 16);
+  bytes.writeUInt16LE(1, 20);
+  bytes.writeUInt16LE(1, 22);
+  bytes.writeUInt32LE(sampleRate, 24);
+  bytes.writeUInt32LE(sampleRate * 2, 28);
+  bytes.writeUInt16LE(2, 32);
+  bytes.writeUInt16LE(16, 34);
+  bytes.write('data', 36);
+  bytes.writeUInt32LE(samples.length * 2, 40);
+  for (let i = 0; i < samples.length; i += 1) {
+    const v = Math.max(-1, Math.min(1, samples[i]));
+    bytes.writeInt16LE(Math.round(v * 32767), 44 + i * 2);
+  }
+  return bytes;
+}

@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SHORT_FIXTURES, SHORT_LENGTH, SPARSE_UTTERANCES, UTTERANCES } from './spec.mjs';
+import { encodeWav } from './wav.mjs';
 
 const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'out');
 const SR = 44100;
@@ -32,24 +33,9 @@ function rng(seed) {
 }
 
 function writeWav(name, samples) {
-  const bytes = Buffer.alloc(44 + samples.length * 2);
-  bytes.write('RIFF', 0);
-  bytes.writeUInt32LE(36 + samples.length * 2, 4);
-  bytes.write('WAVE', 8);
-  bytes.write('fmt ', 12);
-  bytes.writeUInt32LE(16, 16);
-  bytes.writeUInt16LE(1, 20);
-  bytes.writeUInt16LE(1, 22);
-  bytes.writeUInt32LE(SR, 24);
-  bytes.writeUInt32LE(SR * 2, 28);
-  bytes.writeUInt16LE(2, 32);
-  bytes.writeUInt16LE(16, 34);
-  bytes.write('data', 36);
-  bytes.writeUInt32LE(samples.length * 2, 40);
-  for (let i = 0; i < samples.length; i += 1) {
-    const v = Math.max(-1, Math.min(1, samples[i]));
-    bytes.writeInt16LE(Math.round(v * 32767), 44 + i * 2);
-  }
+  // 形式そのものは wav.mjs が持っている（読む側と対にしてある）。
+  // ここが受け持つのは置き場所と、作ったことを画面に出すところだけ。
+  const bytes = encodeWav(samples, SR);
   const file = path.join(OUT, name);
   fs.writeFileSync(file, bytes);
   const seconds = samples.length / SR;

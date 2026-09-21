@@ -24,6 +24,8 @@
 
 import { BEAT_FIXTURES, truthBpm } from '../fixtures/beats.mjs';
 import { renderBeatFixture } from '../fixtures/make-beats.mjs';
+// 物差しは画面の確認（`uitest.mjs`）と分け合っている。理由は score.mjs の頭に書いた。
+import { scoreBeats, TOLERANCE } from './score.mjs';
 
 const { DEFAULT_TEMPO, DEFAULT_TEMPO_CURVE } = await import('./src/tempo.ts');
 const { detectBeats, DEFAULT_BEATS } = await import('./src/beats.ts');
@@ -43,54 +45,11 @@ const options = {
   ...(process.env.LAB_SMOOTH != null ? { smoothWindows: Number(process.env.LAB_SMOOTH) } : {}),
 };
 
-/** 正解と突き合わせる許容幅（秒）。音楽の研究でよく使われる ±70ms。 */
-const TOLERANCE = 0.07;
 /** BPM が当たったと見なす幅。 */
 const BPM_TOLERANCE = 0.04;
 
 const pad = (s, n) => String(s).padEnd(n, ' ');
 const right = (s, n) => String(s).padStart(n, ' ');
-
-/**
- * 正解の拍と突き合わせる。1 つの正解には 1 本だけ当てる
- * （同じ所に 2 本出して 2 点取る、を防ぐ）。
- */
-function scoreBeats(got, truth, tolerance = TOLERANCE) {
-  if (truth.length === 0) {
-    // 拍の無い素材では「何も出さない」が満点。出した本数がそのまま空振り。
-    return { f: got.length === 0 ? 1 : 0, hit: 0, precision: null, recall: null, offset: null };
-  }
-  const taken = new Set();
-  const gaps = [];
-  let hit = 0;
-  for (const b of got) {
-    let best = -1;
-    let bestGap = Infinity;
-    for (let i = 0; i < truth.length; i += 1) {
-      if (taken.has(i)) continue;
-      const gap = Math.abs(truth[i] - b);
-      if (gap <= tolerance && gap < bestGap) {
-        best = i;
-        bestGap = gap;
-      }
-    }
-    if (best >= 0) {
-      taken.add(best);
-      hit += 1;
-      gaps.push(bestGap);
-    }
-  }
-  const precision = got.length > 0 ? hit / got.length : 0;
-  const recall = hit / truth.length;
-  const f = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
-  return {
-    f,
-    hit,
-    precision,
-    recall,
-    offset: gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : null,
-  };
-}
 
 /**
  * BPM の当たり方。倍・半分に取っていたらそこまで分かるようにする。
