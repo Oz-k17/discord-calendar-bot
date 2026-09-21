@@ -11,14 +11,16 @@
  *   2. テンポの選び方（倍・半分に取られないか）と、列の取り替え
  *   3. 拍を近くの山へ寄せる幅（寄せすぎると打点へ吸われる）
  *   4. 「拍は無い」と言うための線
- *   5. **テンポに使う列と位相に使う列を、別々に選ぶ**（ここが 2026-09-21 の収穫）
+ *   5. **テンポに使う列と位相に使う列を、別々に選ぶ**（2026-09-21 の収穫）
+ *   6. **途中で変わるテンポを追う**（2026-09-21・2 回目。測って**既定にしなかった**）
  */
 
 import { BEAT_FIXTURES, BEAT_LENGTH, truthBpm } from '../fixtures/beats.mjs';
 import { renderBeatFixture } from '../fixtures/make-beats.mjs';
 
 const { analyzeOnset, DEFAULT_ONSET } = await import('./src/onset.ts');
-const { estimateTempo, DEFAULT_TEMPO, placeBeats, clarityLine } = await import('./src/tempo.ts');
+const { estimateTempo, DEFAULT_TEMPO, placeBeats, clarityLine, estimateTempoCurve, sliceTrack } =
+  await import('./src/tempo.ts');
 const { detectBeats, DEFAULT_BEATS } = await import('./src/beats.ts');
 
 const pad = (s, n) => String(s).padEnd(n, ' ');
@@ -345,4 +347,132 @@ console.log(
   '\n**テンポと位相は、欲しい列が違う。** テンポに要るのは列が周期的であることで、' +
     '\n位相に要るのは打点どうしの大きさの釣り合いが正しいこと。' +
     '\n音量を dB（比）で見ると、長く響く音の後ろに来た打点が前の音の尾に埋もれる。',
+);
+
+
+// ---------------------------------------------------------------------------
+// 6 段目: 途中で変わるテンポを追う（2026-09-21・2 回目）
+//
+// **1〜5 段目は「素材の中でテンポは一定」を前提にしていた。** その前提を外す。
+//
+// 段は 2 つに分かれる。**別々に見ないと読み違える**:
+//   (a) 窓ごとのテンポが、局所の正解にどれだけ合うか（＝追えているか）
+//   (b) その周期で拍を並べたとき、拍がどれだけ当たるか（＝使えるか）
+// (a) が良くても (b) が悪いことがある。実際そうなった。
+// ---------------------------------------------------------------------------
+
+/** 窓の中の正解 BPM（間隔の中央値）。拍が 3 つ未満なら測らない。 */
+function localTruthBpm(beats, from, to) {
+  const inWin = beats.filter((b) => b >= from && b < to);
+  if (inWin.length < 3) return null;
+  const gaps = [];
+  for (let i = 1; i < inWin.length; i += 1) gaps.push(inWin[i] - inWin[i - 1]);
+  gaps.sort((a, b) => a - b);
+  return 60 / gaps[Math.floor(gaps.length / 2)];
+}
+
+console.log('\n\n6 段目(a): 窓ごとのテンポは、局所の正解にどれだけ合うか');
+console.log('（窓を 1 秒刻みで動かしたときの、ずれの中央値 %。括弧は最大 %）\n');
+
+const WINDOWS = [4, 5, 6, 8];
+console.log(`${pad('素材', 22)}${WINDOWS.map((w) => right(`${w}s`, 14)).join('')}`);
+console.log('-'.repeat(22 + 14 * WINDOWS.length));
+
+for (const clip of clips) {
+  if (clip.beats.length === 0) continue;
+  const track = onsetOf(clip, DEFAULT_BEATS.tempoMethod);
+  const cells = [];
+  for (const W of WINDOWS) {
+    const errs = [];
+    for (let from = 0; from + W <= track.duration + 1e-9; from += 1) {
+      const want = localTruthBpm(clip.beats, from, from + W);
+      const got = estimateTempo(sliceTrack(track, from, from + W));
+      if (want == null || got.bpm == null) continue;
+      errs.push(Math.abs(got.bpm / want - 1) * 100);
+    }
+    errs.sort((a, b) => a - b);
+    cells.push(
+      right(errs.length ? `${errs[Math.floor(errs.length / 2)].toFixed(1)}(${errs[errs.length - 1].toFixed(0)})` : '—', 14),
+    );
+  }
+  console.log(`${pad((clip.fixture.hard ? '※ ' : '') + clip.name, 22)}${cells.join('')}`);
+}
+
+console.log(
+  '\n**窓ごとのテンポは、よく合っている。** 一定の素材ではずれの中央値が 0.0〜0.6%、' +
+    '\n坂の素材（`tempo-ramp-100-130`）でも 0.6% で追えている。' +
+    '\n**それでも下の (b) では負ける。追えることと、使えることは別だった。**',
+);
+
+// --- (b) 実際に拍を並べたとき ---
+
+console.log('\n\n6 段目(b): その周期で拍を並べると、拍はどれだけ当たるか（F 値・±70ms）\n');
+
+const FOLLOW_COLUMNS = [
+  { label: '追わない', options: { followTempo: false } },
+  ...WINDOWS.map((w) => ({ label: `窓 ${w}s`, options: { followTempo: true, windowSeconds: w } })),
+];
+
+console.log(`${pad('素材', 22)}${FOLLOW_COLUMNS.map((c) => right(c.label, 11)).join('')}`);
+console.log('-'.repeat(22 + 11 * FOLLOW_COLUMNS.length));
+
+const followTotals = FOLLOW_COLUMNS.map(() => []);
+for (const clip of clips) {
+  if (clip.beats.length === 0) continue;
+  const cells = [];
+  for (let c = 0; c < FOLLOW_COLUMNS.length; c += 1) {
+    const result = detectBeats(clip.audio, FOLLOW_COLUMNS[c].options);
+    const f = scoreBeats(result.beats, clip.beats).f;
+    followTotals[c].push(f);
+    cells.push(right(f.toFixed(3), 11));
+  }
+  console.log(`${pad((clip.fixture.hard ? '※ ' : '') + clip.name, 22)}${cells.join('')}`);
+}
+console.log('-'.repeat(22 + 11 * FOLLOW_COLUMNS.length));
+console.log(
+  `${pad('平均', 22)}${followTotals.map((fs) => right((fs.reduce((a, b) => a + b, 0) / fs.length).toFixed(3), 11)).join('')}`,
+);
+
+console.log(
+  '\n**窓の長さを 1 つ変えるだけで平均が跳ねる。** こういう並び方は' +
+    '\n「その長さに効いた」ではなく「その長さで 1 本が裏返った」を疑うこと。' +
+    '\n実際 5s とほかの長さの差はほぼ `tempo-change-90-120` 1 本（5s だけ裏返る）で、' +
+    '\n**鏡にした `tempo-change-120-90` はどの長さでも追わない側を下回ったまま**。' +
+    '\n鏡の素材を足していなければ、5s を「効いた」と読み違えていた。',
+);
+
+// --- (c) 変わり目はどこに見えるか ---
+//
+// (b) の非対称は「たまたま」ではない。**変わり目の場所そのものが偏っている。**
+
+console.log('\n\n6 段目(c): テンポの変わり目は、どこに見えるか（正解は 8.00 秒）\n');
+console.log(`${pad('素材', 22)}${WINDOWS.map((w) => right(`${w}s`, 12)).join('')}`);
+console.log('-'.repeat(22 + 12 * WINDOWS.length));
+
+for (const name of ['tempo-change-90-120', 'tempo-change-120-90']) {
+  const clip = clips.find((c) => c.name === name);
+  const cells = [];
+  for (const W of WINDOWS) {
+    const { tempoCurve } = detectBeats(clip.audio, { followTempo: true, windowSeconds: W });
+    let at = null;
+    for (let i = 1; i < tempoCurve.periods.length; i += 1) {
+      // 隣り合う窓で 5% 以上動いた所を「変わり目」と読む。
+      if (Math.abs(tempoCurve.periods[i] / tempoCurve.periods[i - 1] - 1) > 0.05) {
+        at = (tempoCurve.times[i - 1] + tempoCurve.times[i]) / 2;
+        break;
+      }
+    }
+    cells.push(right(at == null ? '—' : `${at.toFixed(2)}s`, 12));
+  }
+  console.log(`${pad('※ ' + name, 22)}${cells.join('')}`);
+}
+
+console.log(
+  '\n**速くなる素材では変わり目が早く見え、遅くなる素材では遅れて見える。**' +
+    '\n窓を縮めても遅れは残る（`tempo-change-120-90` は 3 秒の窓でも 1 秒遅れる）。' +
+    '\n理由は素材の側にある。**窓が変わり目をまたぐと、その窓は「秒で多いほう」ではなく' +
+    '\n「打点の数で多いほう」を答える。** 速いテンポは同じ秒数でより多くの打点を出すので、' +
+    '\n変わり目はどちら向きでも速い側へ寄る。' +
+    '\nテンポの重み（`priorOctaves` を 0.9 → 2.0）でも自己相関の割り方（`acfNorm`）でも動かない。' +
+    '\n**つまみの問題ではなく、窓で測ることそのものの性質。**',
 );

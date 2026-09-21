@@ -314,3 +314,353 @@ function snap(values: Float64Array, at: number, window: number): number {
   }
   return best;
 }
+
+// ---------------------------------------------------------------------------
+// 窓ごとのテンポ（2026-09-21・2 回目）
+//
+// 上の `estimateTempo` は**素材まるごとで 1 つの BPM**を出す。
+// テンポが途中で変わる素材では、どちらか片方に合って残り半分を落とす
+// （`tempo-change-90-120` の F 値 0.667 がそれ）。
+//
+// **実装する前に、窓ごとのテンポがそもそも測れるのかを測った**（`lab:beat:probe` の 6 段目）。
+// 窓・1 秒刻みで局所の正解と突き合わせると、ずれの中央値は
+// 一定の素材で 0.0〜0.6%、坂の素材（`tempo-ramp-100-130`）でも 0.6% だった。
+// **窓ごとのテンポはよく当たる。**
+//
+// **それでも既定にしていない**（`beats.ts` の `followTempo` の注に表がある）。
+// 当たった周期で拍を並べると、平均の F 値は 0.922（追わない）に対して 0.882〜0.941。
+// **追えることと、使えることは別だった。** 理由は 2 つ測れた:
+//
+//   1. **周期の誤差は足し算で溜まる。** 窓ごとの周期は 0.1〜0.5% しか外していないが、
+//      30 拍ぶん足すとその 30 倍がそのまま秒のずれになる。引き戻し（`trackGain`）で
+//      溜まりは止まるが、**一度半拍ずれると引き戻しの幅（拍の 1/8）では戻れない。**
+//   2. **変わり目の場所そのものが偏る。** 窓が変わり目をまたぐと、その窓は
+//      「秒で多いほう」ではなく**「打点の数で多いほう」**を答える。速いテンポは
+//      同じ秒数でより多くの打点を出すので、変わり目はどちら向きでも速い側へ寄る。
+//      実測では 90 → 120 が 0.0〜0.5 秒**早く**、120 → 90 が 0.5〜1.5 秒**遅れて**見える。
+//      テンポの重み（`priorOctaves`）でも自己相関の割り方（`acfNorm`）でも動かない。
+//      **つまみの問題ではなく、窓で測ることそのものの性質。**
+// ---------------------------------------------------------------------------
+
+export interface TempoCurveOptions extends TempoOptions {
+  /**
+   * 窓の長さ（秒）と刻み（秒）。
+   *
+   * **窓は「短いほど追える」ではない。** 4 秒まで縮めると `break-116`
+   * （6〜10 秒は打点が止まる素材）で、ブレイクに丸ごと入る窓ができ、
+   * はっきりさが 17 から 3.5 へ落ちて 140BPM と答える。
+   * 逆に 8 秒まで伸ばすと坂（`tempo-ramp-100-130`）のずれが 0.6% → 1.9% に増える。
+   *
+   * **5 秒にしてあるが、余裕は 1 秒しか無い**（ブレイクが 4 秒なので、
+   * 窓の端が 1 秒ぶんだけ打点に掛かる）。5 秒より長いブレイクのある素材では破れる。
+   * 数字は `lab:beat:probe` の 6 段目にある。
+   */
+  windowSeconds: number;
+  windowHop: number;
+  /**
+   * 窓のテンポを、素材ぜんたいのテンポのオクターブへ畳むか。
+   *
+   * 窓を短くすると**その窓だけ倍・半分に取る**ことがある。曲の途中でテンポが
+   * 2 倍になることは稀なので、素材ぜんたいの答えに近いオクターブへ寄せておく。
+   * 畳む幅を 1.4 倍にしてあるのは、90 → 120（1.33 倍）を**畳まずに通す**ため。
+   */
+  foldToGlobal: boolean;
+  /**
+   * 「この窓は当てにならない」と見なす、素材ぜんたいのはっきりさに対する割合。
+   *
+   * **絶対値では線を引けない**（2026-09-21・2 回目に測った）。はっきりさは
+   * 素材によって 2.2（声が乗る）から 24.6（キックだけ）まで 10 倍以上開くので、
+   * 固定値を置くと簡単な素材にしか当たらない。**同じ素材の中では比べられる**ので、
+   * 素材ぜんたいの値に対する割合で見る。
+   *
+   * 当てにならない窓は**捨てて前後から補う**（下の `fillGaps`）。
+   * 0 にすると線を外す（全部の窓を信じる）。
+   */
+  minWindowClarityRatio: number;
+  /**
+   * 1 歩ごとに、近くの立ち上がりへどれだけ引き戻すか（0〜1）。0 なら引き戻さない。
+   *
+   * **周期を足し合わせるだけでは位相が流れる**（2026-09-21・2 回目に測って分かった）。
+   * 窓ごとの周期は 0.1〜0.5% しか外していないのに、30 拍ぶん足すと
+   * その 30 倍がそのまま秒のずれになる。`tempo-ramp-100-130` は全拍が外れ（F 値 0.000）、
+   * `tempo-change-90-120` は段をまたいだ所から 123ms ずれたまま**戻ってこなかった**。
+   *
+   * 9/21（1 回目）に「寄せる手は損しかない」と書いて捨てたが、
+   * **あれは格子が流れない前提での話だった**（直したい揺れ ±18ms が許容幅 ±70ms の
+   * 中に収まっていたので、寄せる得が無かった）。流れる格子では相手が許容幅の外にいる。
+   * **同じ手でも、土台が変われば釣り合いが逆を向く。**
+   */
+  trackGain: number;
+  /** 引き戻し先を探す幅（拍の何分の 1 まで）。広げると隣の打点まで届く。 */
+  trackWindow: number;
+  /**
+   * 窓ごとのテンポを、いくつ並べた中央値で均すか（0 か 1 なら均さない）。
+   *
+   * 手がかりの薄い素材では**1 つの窓だけが大きく外れる**ことがある
+   * （`speech-over-110` の窓の列は 146 / 136 / 128 / 128 / 114 / 113 …… / 80）。
+   * 平均ではなく中央値にしてあるのは、**平均はその 1 つに引っぱられる**から。
+   *
+   * **測って、既定では切った**（2026-09-21・2 回目）。F 値の平均は窓の長さごとに
+   * 4s 0.895 → 0.893 / 5s 0.941 → 0.939 / 6s 0.882 → 0.903 / 8s 0.915 → 0.915 で、
+   * **良くなる長さと悪くなる長さが混ざる**。効いたり効かなかったりする均しは、
+   * 効いていないのと同じ（どちらに転ぶかを決める根拠が手元に無い）。
+   */
+  smoothWindows: number;
+}
+
+export const DEFAULT_TEMPO_CURVE: TempoCurveOptions = {
+  ...DEFAULT_TEMPO,
+  windowSeconds: 5,
+  windowHop: 1,
+  foldToGlobal: true,
+  minWindowClarityRatio: 0.35,
+  trackGain: 0.5,
+  trackWindow: 8,
+  smoothWindows: 0,
+};
+
+export interface TempoCurve {
+  /** 窓の中心の秒。 */
+  times: Float64Array;
+  /** その窓の拍 1 つの秒数。 */
+  periods: Float64Array;
+  /** その窓のはっきりさ（捨てた窓は 0）。 */
+  clarities: Float64Array;
+  /** 捨てて前後から補った窓の数。 */
+  filled: number;
+  /** 素材ぜんたいの答え（窓が 1 つも立たないときの落とし所）。 */
+  global: TempoResult;
+}
+
+/**
+ * 立ち上がりの列の一部を、同じ形のまま切り出す。
+ *
+ * `duration` を切り出した長さにしてあるのが肝で、そうしないと
+ * 「拍は無い」の線（尺で動く）が**素材ぜんたいの尺で計算されてしまう**。
+ * 6 秒の窓に 16 秒ぶんの甘い線を当てると、雑音だけの窓まで拍があることになる。
+ */
+export function sliceTrack(track: OnsetTrack, from: number, to: number): OnsetTrack {
+  const i0 = Math.max(0, Math.min(track.detrended.length, Math.round(from / track.hop)));
+  const i1 = Math.max(i0, Math.min(track.detrended.length, Math.round(to / track.hop)));
+  const detrended = track.detrended.slice(i0, i1);
+  const strength = track.strength.slice(i0, i1);
+  const times = new Float64Array(i1 - i0);
+  for (let i = 0; i < times.length; i += 1) times[i] = (i0 + i) * track.hop;
+  return { hop: track.hop, duration: (i1 - i0) * track.hop, strength, detrended, times };
+}
+
+/** `bpm` を、`target` に近いオクターブへ畳む。`tolerance` 倍までは畳まない。 */
+export function foldOctave(bpm: number, target: number, tolerance = 1.4): number {
+  if (!(bpm > 0) || !(target > 0)) return bpm;
+  let out = bpm;
+  // 上限・下限は付けない。2 のべきで寄せるだけなので、何回か掛ければ必ず止まる。
+  for (let i = 0; i < 8 && out > target * tolerance; i += 1) out /= 2;
+  for (let i = 0; i < 8 && out < target / tolerance; i += 1) out *= 2;
+  return out;
+}
+
+/**
+ * 窓ごとにテンポを出して並べる。
+ *
+ * 当てにならない窓（はっきりさが素材ぜんたいの `minWindowClarityRatio` 倍に届かない・
+ * そもそも拍が見つからない）は**その場を埋めずに空けておき、あとで前後から補う**。
+ * 前の値をそのまま伸ばす形にしなかったのは、**ブレイクが素材の途中にあるとき、
+ * 前後の両方から挟めるほうが素直**だから（`break-116` の 6〜10 秒がその形）。
+ */
+export function estimateTempoCurve(track: OnsetTrack, options: Partial<TempoCurveOptions> = {}): TempoCurve {
+  const o = { ...DEFAULT_TEMPO_CURVE, ...options };
+  const global = estimateTempo(track, o);
+  const empty: TempoCurve = {
+    times: new Float64Array(0),
+    periods: new Float64Array(0),
+    clarities: new Float64Array(0),
+    filled: 0,
+    global,
+  };
+  if (global.period == null || !(o.windowSeconds > 0) || !(o.windowHop > 0)) return empty;
+
+  // 窓が素材に入りきらないときは、素材まるごとを 1 つの窓として扱う（追う意味が無い）。
+  const span = Math.min(o.windowSeconds, track.duration);
+  const starts: number[] = [];
+  for (let from = 0; from + span <= track.duration + 1e-9; from += o.windowHop) starts.push(from);
+  if (starts.length === 0) starts.push(0);
+
+  const times = new Float64Array(starts.length);
+  const periods = new Float64Array(starts.length);
+  const clarities = new Float64Array(starts.length);
+  const line = global.clarity * o.minWindowClarityRatio;
+
+  for (let i = 0; i < starts.length; i += 1) {
+    times[i] = starts[i] + span / 2;
+    const local = estimateTempo(sliceTrack(track, starts[i], starts[i] + span), o);
+    if (local.bpm == null || local.period == null || local.clarity < line) {
+      periods[i] = 0; // 0 は「この窓は空き」の印。下で補う。
+      clarities[i] = 0;
+      continue;
+    }
+    const bpm = o.foldToGlobal ? foldOctave(local.bpm, global.bpm ?? local.bpm) : local.bpm;
+    periods[i] = 60 / bpm;
+    clarities[i] = local.clarity;
+  }
+
+  const filled = fillGaps(periods, global.period);
+  medianSmooth(periods, o.smoothWindows);
+  return { times, periods, clarities, filled, global };
+}
+
+/**
+ * 空いた所（0）を前後から補う。返すのは補った個数。
+ *
+ * 前後の両方に値があれば線で結び、片側しか無ければその値を伸ばし、
+ * どこにも無ければ素材ぜんたいの答えで埋める。
+ */
+export function fillGaps(periods: Float64Array, fallback: number): number {
+  let filled = 0;
+  let any = false;
+  for (let i = 0; i < periods.length; i += 1) if (periods[i] > 0) any = true;
+  if (!any) {
+    for (let i = 0; i < periods.length; i += 1) periods[i] = fallback;
+    return periods.length;
+  }
+  for (let i = 0; i < periods.length; i += 1) {
+    if (periods[i] > 0) continue;
+    let left = -1;
+    for (let k = i - 1; k >= 0; k -= 1) if (periods[k] > 0) { left = k; break; }
+    let right = -1;
+    for (let k = i + 1; k < periods.length; k += 1) if (periods[k] > 0) { right = k; break; }
+    if (left >= 0 && right >= 0) {
+      const u = (i - left) / (right - left);
+      periods[i] = periods[left] * (1 - u) + periods[right] * u;
+    } else {
+      periods[i] = periods[left >= 0 ? left : right];
+    }
+    filled += 1;
+  }
+  return filled;
+}
+
+/**
+ * 並びを、いくつ並べた中央値で均す（その場で書き換える）。
+ *
+ * 端は幅が足りないぶんだけ縮めて取る。端だけ均さない形にすると、
+ * **素材の頭と尻でだけ暴れ窓が生き残る**（そこは拍の列がいちばん当てにならない所でもある）。
+ */
+export function medianSmooth(values: Float64Array, width: number): void {
+  if (!(width >= 2) || values.length === 0) return;
+  const half = Math.floor(width / 2);
+  const source = values.slice();
+  const buf: number[] = [];
+  for (let i = 0; i < values.length; i += 1) {
+    buf.length = 0;
+    for (let k = Math.max(0, i - half); k <= Math.min(source.length - 1, i + half); k += 1) buf.push(source[k]);
+    buf.sort((a, b) => a - b);
+    values[i] = buf[Math.floor(buf.length / 2)];
+  }
+}
+
+/** その秒での拍 1 つの秒数を、窓の並びから線で読む（窓の外は端の値）。 */
+export function periodAt(curve: TempoCurve, time: number): number {
+  const { times, periods } = curve;
+  if (periods.length === 0) return curve.global.period ?? 0;
+  if (periods.length === 1 || time <= times[0]) return periods[0];
+  if (time >= times[times.length - 1]) return periods[periods.length - 1];
+  let i = 1;
+  while (i < times.length && times[i] < time) i += 1;
+  const u = (time - times[i - 1]) / (times[i] - times[i - 1]);
+  return periods[i - 1] * (1 - u) + periods[i] * u;
+}
+
+/**
+ * 拍の位置を、**間隔が動くことを許して**決める。
+ *
+ * `placeBeats` と同じく「1 周期ぶんの始まりを総当たりして、拍の上に乗る立ち上がりの
+ * 合計がいちばん大きい所を選ぶ」形だが、違いが 2 つある。
+ *
+ *   1. **1 歩ごとにその時刻の周期を読み直す**（窓ごとのテンポに追いつくため）。
+ *   2. **1 歩ごとに近くの立ち上がりへ少し引き戻す**（`trackGain` の注。
+ *      これが無いと、周期の小さな誤差が足し算で溜まって位相が流れる）。
+ *
+ * **`snapToPeak` はここでは見ない。** あれは並べ終えた格子を後から動かす手で、
+ * 2. と役目が重なるうえ、引き戻しの効いた列をもう一度動かすと二重に寄せることになる。
+ * 追う側で寄せ幅を変えたいときは `trackWindow` のほう。
+ *
+ * 総当たりの幅は**いちばん短い周期**にしてある。いちばん長い周期で回すと、
+ * テンポが上がる素材で「同じ位相を 2 度試す」ことになり、遅いほうが先に当たって止まる。
+ */
+export function placeBeatsVarying(
+  track: OnsetTrack,
+  curve: TempoCurve,
+  options: Partial<TempoCurveOptions> = {},
+): { phase: number; beats: number[] } {
+  const o = { ...DEFAULT_TEMPO_CURVE, ...options };
+  const values = track.detrended;
+  const hop = track.hop;
+  if (values.length === 0 || hop <= 0) return { phase: 0, beats: [] };
+
+  let shortest = Infinity;
+  for (let i = 0; i < curve.periods.length; i += 1) {
+    if (curve.periods[i] > 0) shortest = Math.min(shortest, curve.periods[i]);
+  }
+  if (!Number.isFinite(shortest)) shortest = curve.global.period ?? 0;
+  if (!(shortest > 0)) return { phase: 0, beats: [] };
+
+  const steps = Math.max(1, Math.round(shortest / hop));
+  let best: number[] = [];
+  let bestSum = -Infinity;
+  for (let offset = 0; offset < steps; offset += 1) {
+    const beats = walkBeats(track, curve, offset * hop, o);
+    let sum = 0;
+    for (const t of beats) sum += sample(values, t / hop);
+    if (sum > bestSum) {
+      bestSum = sum;
+      best = beats;
+    }
+  }
+
+  const beats = best.map((t) => Math.round(t * 1e6) / 1e6);
+  return { phase: beats.length > 0 ? beats[0] : 0, beats };
+}
+
+/**
+ * 始まりの秒から、その時刻の周期ぶんずつ歩く。歩きながら近くの山へ少し引き戻す。
+ *
+ * **周期は「いまいる所」で読む。** 次の拍の所で読むと自分を参照することになる。
+ * 引き戻しは**次の拍に対してだけ**掛ける（いま置いた拍は動かさない）。
+ * こうしておくと、引き戻した結果がそのまま次の歩幅の起点になるので、
+ * ずれが溜まらずに 1 歩ぶんで打ち消される。
+ */
+function walkBeats(track: OnsetTrack, curve: TempoCurve, from: number, o: TempoCurveOptions): number[] {
+  const values = track.detrended;
+  const hop = track.hop;
+  const out: number[] = [];
+  let t = from;
+  // 進まなくなったら止める（周期が 0 に潰れた場合の保険）。
+  for (let guard = 0; t <= track.duration + 1e-9 && guard < 100000; guard += 1) {
+    out.push(t);
+    const step = periodAt(curve, t);
+    if (!(step > 0)) break;
+    let next = t + step;
+    if (o.trackGain > 0 && o.trackWindow > 0 && next <= track.duration) {
+      const peak = peakNear(values, hop, next, step / o.trackWindow);
+      // **引き戻しすぎない。** 1 歩で全部合わせにいくと、偽の打点 1 つで格子ごと持っていかれる。
+      if (peak != null) next += (peak - next) * o.trackGain;
+    }
+    t = next;
+  }
+  return out;
+}
+
+/** `at` の前後 `window` 秒でいちばん高い立ち上がりの秒。何も無ければ null。 */
+function peakNear(values: Float64Array, hop: number, at: number, window: number): number | null {
+  const from = Math.max(0, Math.round((at - window) / hop));
+  const to = Math.min(values.length - 1, Math.round((at + window) / hop));
+  let best = -1;
+  let bestValue = 0;
+  for (let i = from; i <= to; i += 1) {
+    if (values[i] > bestValue) {
+      bestValue = values[i];
+      best = i;
+    }
+  }
+  return best >= 0 ? best * hop : null;
+}

@@ -95,6 +95,20 @@ function hat(data, at, level, rnd) {
 const VOICES = { kick, snare, hat };
 
 /**
+ * その秒が「打点を止めてある区間」に入っているか。
+ *
+ * 和音と声は止めない。**曲は鳴り続けたまま刻みだけが落ちる**形にしたいので
+ * （`break-116`）、止めるのは `voices` だけにしてある。
+ * 2026-09-17（3 回目）に `music-thump-drop` で書いた「伴奏は続いたまま
+ * 刻みだけが落ちるのは曲としてありふれた形」と同じ作り方。
+ */
+function muted(ranges, time) {
+  if (!ranges) return false;
+  for (const [from, to] of ranges) if (time >= from && time < to) return true;
+  return false;
+}
+
+/**
  * 和音。`changes` の秒で鳴っている和音が変わる。
  *
  * `attack` を持たせてあるのは、**立ち上がりの鋭さだけを変えた素材**を作るため。
@@ -181,6 +195,7 @@ export function renderBeatFixture(name) {
         if (Math.floor(at) !== k % meter) continue;
         const time = beats[k] + (at - Math.floor(at)) * period;
         if (time >= BEAT_LENGTH) continue;
+        if (muted(o.mute, time)) continue;
         make(data, time, voice.level, rnd);
       }
     }

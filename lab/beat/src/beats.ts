@@ -34,10 +34,20 @@
  */
 
 import { analyzeOnset, DEFAULT_ONSET, type OnsetOptions, type OnsetTrack } from './onset.ts';
-import { DEFAULT_TEMPO, estimateTempo, placeBeats, type TempoOptions, type TempoResult } from './tempo.ts';
+import {
+  DEFAULT_TEMPO,
+  DEFAULT_TEMPO_CURVE,
+  estimateTempo,
+  estimateTempoCurve,
+  placeBeats,
+  placeBeatsVarying,
+  type TempoCurve,
+  type TempoCurveOptions,
+  type TempoResult,
+} from './tempo.ts';
 import type { AudioLike } from '../../auto-cut/src/loudness.ts';
 
-export interface BeatOptions extends Partial<TempoOptions> {
+export interface BeatOptions extends Partial<TempoCurveOptions> {
   /** 立ち上がりの列の作り方（刻み・窓など）。`method` は下の 2 つで上書きする。 */
   onset?: Partial<OnsetOptions>;
   /** テンポを出すのに使う列。既定は `energy`。 */
@@ -47,6 +57,28 @@ export interface BeatOptions extends Partial<TempoOptions> {
    * `tempoMethod` と同じにすれば、列は 1 本しか作らない。
    */
   phaseMethod?: OnsetOptions['method'];
+  /**
+   * 途中で変わるテンポを追うか（2026-09-21・2 回目に足した。**既定は追わない**）。
+   *
+   * **作って、測って、既定にしなかった。** 窓ごとのテンポ自体はよく当たる
+   * （局所の正解からのずれは中央値 0.0〜0.6%）のに、**その周期で拍を並べると平均で負ける**。
+   *
+   * | | 追わない | 窓 4s | 窓 5s | 窓 6s | 窓 8s |
+   * | --- | --- | --- | --- | --- | --- |
+   * | 拍の F 値（16 本） | **0.922** | 0.895 | 0.941 | 0.882 | 0.915 |
+   *
+   * 5s だけが勝つが、その得は `tempo-change-90-120` が 0.667 → 1.000 に裏返ったぶんで、
+   * **鏡にした `tempo-change-120-90` は 0.607 のまま**。理由は下に書いた。
+   * 窓の長さを 1 つ変えるだけで跳ねる並びは、「効いた」ではなく「1 本が裏返った」。
+   *
+   * 失うほうは `pad-only-96`（1.000 → 0.840）と `speech-over-110`（0.966 → 0.690）で、
+   * どちらも**窓ごとのテンポが暴れる素材**。得るほうは `tempo-ramp-100-130`
+   * （0.508 → 1.000）。**追えるようになる素材と、迷子になる素材が同じ数だけいる。**
+   *
+   * 残してあるのは、**窓ごとのテンポそのものは使える**から
+   * （テンポの表示や、テンポが動いたことを知らせる用途ならこのままで足りる）。
+   */
+  followTempo?: boolean;
 }
 
 export interface BeatResult extends TempoResult {
@@ -54,11 +86,23 @@ export interface BeatResult extends TempoResult {
   tempoTrack: OnsetTrack;
   /** 拍の位置を出すのに使った列（同じ手なら `tempoTrack` と同じもの）。 */
   phaseTrack: OnsetTrack;
+  /**
+   * 窓ごとのテンポ（追っていないときは null）。
+   *
+   * **`bpm` はこのとき「素材ぜんたいの見出し」でしかない。** テンポが動く素材で
+   * 1 つの数字を表示したいときのためだけに残してあり、拍の位置はこちらから出ている。
+   * 名前を `tempoCurve` にしてあるのは、`TempoResult.curve`
+   * （BPM ごとの点数）と別物だから。**同じ「curve」で 2 つを指さない。**
+   */
+  tempoCurve: TempoCurve | null;
+  /** 拍の間隔が素材の中でどれだけ動いたか（いちばん速い BPM ÷ いちばん遅い BPM）。1.0 なら一定。 */
+  tempoSpread: number;
 }
 
-export const DEFAULT_BEATS: Required<Pick<BeatOptions, 'tempoMethod' | 'phaseMethod'>> = {
+export const DEFAULT_BEATS: Required<Pick<BeatOptions, 'tempoMethod' | 'phaseMethod' | 'followTempo'>> = {
   tempoMethod: 'energy',
   phaseMethod: 'flux',
+  followTempo: false,
 };
 
 /**
@@ -68,21 +112,45 @@ export const DEFAULT_BEATS: Required<Pick<BeatOptions, 'tempoMethod' | 'phaseMet
  * 空の音・雑音だけ・尺が短すぎる、のいずれでも同じ。
  */
 export function detectBeats(buffer: AudioLike, options: BeatOptions = {}): BeatResult {
-  const { onset, tempoMethod, phaseMethod, ...tempoOptions } = options;
+  const { onset, tempoMethod, phaseMethod, followTempo, ...tempoOptions } = options;
   const tempoWith = tempoMethod ?? DEFAULT_BEATS.tempoMethod;
   const phaseWith = phaseMethod ?? DEFAULT_BEATS.phaseMethod;
+  const follow = followTempo ?? DEFAULT_BEATS.followTempo;
 
   const shared: Partial<OnsetOptions> = { ...DEFAULT_ONSET, ...onset };
   const tempoTrack = analyzeOnset(buffer, { ...shared, method: tempoWith });
   // 同じ手なら作り直さない（FFT を 2 度回す意味が無い）。
   const phaseTrack = phaseWith === tempoWith ? tempoTrack : analyzeOnset(buffer, { ...shared, method: phaseWith });
 
-  const result = estimateTempo(tempoTrack, tempoOptions);
-  if (result.period == null) return { ...result, tempoTrack, phaseTrack };
+  if (!follow) {
+    const result = estimateTempo(tempoTrack, tempoOptions);
+    if (result.period == null) return { ...result, tempoTrack, phaseTrack, tempoCurve: null, tempoSpread: 1 };
+    // 周期はテンポの列から、位置は位相の列から。
+    const { phase, beats } = placeBeats(phaseTrack, result.period, { ...DEFAULT_TEMPO, ...tempoOptions });
+    return { ...result, phase, beats, tempoTrack, phaseTrack, tempoCurve: null, tempoSpread: 1 };
+  }
 
-  // 周期はテンポの列から、位置は位相の列から。
-  const { phase, beats } = placeBeats(phaseTrack, result.period, { ...DEFAULT_TEMPO, ...tempoOptions });
-  return { ...result, phase, beats, tempoTrack, phaseTrack };
+  // **窓ごとのテンポはテンポの列から、拍の位置は位相の列から。**
+  // 追う側でも 2 本に分ける形は変えていない（9/21・1 回目に測って決めた既定）。
+  const tempoCurve = estimateTempoCurve(tempoTrack, { ...DEFAULT_TEMPO_CURVE, ...tempoOptions });
+  const result = tempoCurve.global;
+  if (result.period == null) return { ...result, tempoTrack, phaseTrack, tempoCurve: null, tempoSpread: 1 };
+
+  const { phase, beats } = placeBeatsVarying(phaseTrack, tempoCurve, { ...DEFAULT_TEMPO, ...tempoOptions });
+  return { ...result, phase, beats, tempoTrack, phaseTrack, tempoCurve, tempoSpread: spreadOf(tempoCurve) };
+}
+
+/** 拍の間隔が素材の中でどれだけ動いたか。1.0 なら一定。 */
+function spreadOf(curve: TempoCurve): number {
+  let min = Infinity;
+  let max = 0;
+  for (let i = 0; i < curve.periods.length; i += 1) {
+    const p = curve.periods[i];
+    if (!(p > 0)) continue;
+    min = Math.min(min, p);
+    max = Math.max(max, p);
+  }
+  return Number.isFinite(min) && max > 0 ? max / min : 1;
 }
 
 /**

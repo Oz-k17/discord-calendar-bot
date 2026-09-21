@@ -59,6 +59,24 @@ function changingBeats(bpmA, bpmB, changeAt, phase, length = BEAT_LENGTH) {
   return out;
 }
 
+/**
+ * だんだんテンポが変わる拍の並び（段ではなく坂）。
+ *
+ * **段で変わる素材だけで試さない**ために置いてある。窓ごとにテンポを出す手は
+ * 「窓の中では一定」を仮定するので、段には強く、坂には弱いはず——
+ * その見立てが当たっているかは測らないと分からない。
+ */
+function rampingBeats(bpmA, bpmB, phase, length = BEAT_LENGTH) {
+  const out = [];
+  let t = phase;
+  while (t < length - 1e-9) {
+    out.push(Math.round(t * 1e6) / 1e6);
+    const u = Math.min(1, Math.max(0, (t - phase) / (length - phase)));
+    t += beatPeriod(bpmA + (bpmB - bpmA) * u);
+  }
+  return out;
+}
+
 /** 種を固定した擬似乱数（mulberry32）。ほかの素材と同じもの。 */
 function rng(seed) {
   let a = seed >>> 0;
@@ -89,9 +107,17 @@ function jitteredBeats(bpm, phase, spread, seed, length = BEAT_LENGTH) {
  *   - **テンポを取り違えさせる**（8 分のハットで倍に引く・遅い曲）
  *   - **拍の位置をずらさせる**（ウラだけ鳴る・ハネる・人が叩いた揺れ）
  *   - **そもそも拍が無い / 見えない**（打点の無い和音・雑音だけ・ほぼ無音）
+ *   - **テンポが一定でない**（段で変わる・坂で変わる。2026-09-21・2 回目に増やした）
  *
  * `voices` の `at` は**小節の中の拍の位置**（拍単位、0 が小節頭）。
  * 0.5 なら裏拍、0.667 ならハネた 3 連の 2 つ目。
+ *
+ * `varying: true` は**素材まるごとで 1 つの BPM を答えようが無い素材**の印。
+ * こういう素材で「BPM が当たったか」を数えると、正解の中央値をたまたま踏んだだけの
+ * 手が当たりに見えてしまうので、`lab:beat` は BPM の勘定から外す（拍の F 値では数える）。
+ *
+ * `mute: [[from, to]]` はその秒の間だけ**打点を鳴らさない**（和音と声は鳴り続ける）。
+ * 窓ごとにテンポを出す手に「手がかりの無い窓」を食わせるために足した。
  */
 export const BEAT_FIXTURES = [
   {
@@ -250,6 +276,7 @@ export const BEAT_FIXTURES = [
     name: 'tempo-change-90-120',
     note: '8 秒でテンポが 90 → 120 に変わる（一定を仮定する手の限界を見る）',
     hard: true,
+    varying: true,
     bpm: null,
     beats: changingBeats(90, 120, 8, 0.4),
     options: {
@@ -259,6 +286,74 @@ export const BEAT_FIXTURES = [
         { kind: 'kick', at: [0, 2], level: 0.5 },
         { kind: 'snare', at: [1, 3], level: 0.32 },
       ],
+    },
+  },
+  {
+    // **逆向きに変わる素材**（2026-09-21・2 回目に追加）。
+    // 段で変わる素材が 90 → 120 の 1 本しか無いと、**速くなる側でだけ効く手**を
+    // 掴んだことに気づけない。遅くなる側は打点の数が減るので、
+    // 窓ごとに測る手にとっては手がかりが薄いほうへ落ちる。
+    name: 'tempo-change-120-90',
+    note: '8 秒でテンポが 120 → 90 に変わる（速くなる側だけで試さない）',
+    hard: true,
+    varying: true,
+    bpm: null,
+    beats: changingBeats(120, 90, 8, 0.3),
+    options: {
+      seed: 216,
+      meter: 4,
+      voices: [
+        { kind: 'kick', at: [0, 2], level: 0.5 },
+        { kind: 'snare', at: [1, 3], level: 0.32 },
+      ],
+    },
+  },
+  {
+    // **段ではなく坂**（2026-09-21・2 回目に追加）。
+    // 窓ごとにテンポを出す手は「窓の中では一定」を仮定するので、
+    // **坂では窓の中でも間隔が動く**。段だけで試すと、その仮定の代価が見えない。
+    // 100 → 130 は 16 秒で 1.3 倍なので、8 秒の窓の中でも 0.9 倍ほど動く。
+    name: 'tempo-ramp-100-130',
+    note: 'だんだん速くなる 100 → 130（段ではなく坂。窓の中でも間隔が動く）',
+    hard: true,
+    varying: true,
+    bpm: null,
+    beats: rampingBeats(100, 130, 0.45),
+    options: {
+      seed: 217,
+      meter: 4,
+      voices: [
+        { kind: 'kick', at: [0, 2], level: 0.5 },
+        { kind: 'snare', at: [1, 3], level: 0.32 },
+        { kind: 'hat', at: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5], level: 0.12 },
+      ],
+    },
+  },
+  {
+    // **テンポは一定だが、途中で打点が止まる素材**（2026-09-21・2 回目に追加）。
+    // **窓ごとにテンポを出す手を潰すために置いた。** 6.0〜10.0 秒は和音だけになるので、
+    // その中に丸ごと入る窓は打点を 1 つも見ない。一定を仮定する手はここで何も失わないが、
+    // 窓ごとに測る手は**手がかりの無い窓で迷子になる**（迷子になったぶんを
+    // そのまま拍の位置へ流してしまうと、前後の合っていた所まで道連れになる）。
+    //
+    // 正解の拍は**ブレイク中も途切れずに置いてある**。和音が 4 拍ごとに変わるので、
+    // 小節の頭だけは素材の中に手がかりが残っている（`syncopated-128` で学んだ
+    // 「正解と呼ぶ根拠が素材の中にあるか」の条件を、ここでも満たしてある）。
+    name: 'break-116',
+    note: '一定の BPM 116 だが 6〜10 秒は打点が止まる（窓ごとに測る手を潰す）',
+    hard: true,
+    bpm: 116,
+    beats: steadyBeats(116, 0.35),
+    options: {
+      seed: 218,
+      meter: 4,
+      voices: [
+        { kind: 'kick', at: [0, 2], level: 0.5 },
+        { kind: 'snare', at: [1, 3], level: 0.32 },
+        { kind: 'hat', at: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5], level: 0.12 },
+      ],
+      pad: { every: 4, level: 0.12 },
+      mute: [[6.0, 10.0]],
     },
   },
   {
@@ -349,6 +444,11 @@ export function beatFixture(name) {
  *
  * テンポが変わる素材では「前半と後半のどちらか」しか当たらないので、
  * こちらは見出しとしてだけ使う。判定の当たり外れは `beats` と突き合わせて決める。
+ *
+ * **`varying` の素材では、この値を「当たり／外れ」の基準に使わないこと。**
+ * 90 → 120 の素材の中央値はたまたま 120 で、一定を仮定する手が後半に合わせると
+ * 「BPM は当たり・拍は 3 分の 1 しか合っていない」という読み方になる。
+ * 2026-09-21（1 回目）の 13/13 はその形で 1 本ぶん甘く数えていた。
  */
 export function truthBpm(fixture) {
   const beats = fixture.beats;

@@ -15,9 +15,17 @@ import {
   CLARITY_REFERENCE_SECONDS,
   clarityLine,
   DEFAULT_TEMPO,
+  DEFAULT_TEMPO_CURVE,
   estimateTempo,
+  estimateTempoCurve,
+  fillGaps,
+  foldOctave,
+  medianSmooth,
+  periodAt,
   placeBeats,
+  placeBeatsVarying,
   refineLag,
+  sliceTrack,
   tempoPrior,
 } from './tempo.ts';
 import { DEFAULT_BEATS, detectBeats, snapToBeat, subdivide } from './beats.ts';
@@ -330,6 +338,119 @@ export function runSelfTest(): TestResult[] {
     check('無音なら入口からでも拍を返さない', result.bpm === null && result.beats.length === 0, `拍 ${result.beats.length} 本`);
   }
 
+  // --- 窓ごとのテンポ（2026-09-21・2 回目） ---
+  //
+  // **既定では使わない**（測って決めた。`beats.ts` の `followTempo` の注）。
+  // それでも検算を置いてあるのは、**次の回が同じ穴を掘らずに済むように残す**と決めたから。
+  // 計算が壊れたまま残しておくと、読み返したときに数字のほうを疑ってしまう。
+
+  {
+    const track = analyzeOnset(asAudio(clicks(0.5, 8)));
+    const part = sliceTrack(track, 2, 5);
+    check('切り出した窓の尺は、切り出した長さになる', near(part.duration, 3, 0.05), `${part.duration.toFixed(3)}s`);
+    check('切り出した窓は元の列を指す', part.times.length > 0 && near(part.times[0], 2, 0.05), `${part.times[0]?.toFixed(3)}`);
+    // **尺が素材ぜんたいのままだと、「拍は無い」の線が甘くなる**（そこが切り出しの肝）。
+    check('切り出した窓の線は、元より高い', clarityLine(1.9, part.duration) > clarityLine(1.9, track.duration));
+  }
+
+  {
+    // 端の外・範囲が逆・素材の外。**どれも落ちずに空で返る**こと。
+    check('窓が範囲の外なら空で返る', sliceTrack(analyzeOnset(asAudio(clicks(0.5, 2))), 10, 12).detrended.length === 0);
+    check('窓の前後が逆でも落ちない', sliceTrack(analyzeOnset(asAudio(clicks(0.5, 2))), 1.5, 0.5).detrended.length === 0);
+  }
+
+  {
+    check('近いオクターブへ畳む', near(foldOctave(240, 120), 120, 1e-9), `${foldOctave(240, 120)}`);
+    check('遅い側も畳む', near(foldOctave(60, 120), 120, 1e-9), `${foldOctave(60, 120)}`);
+    // **1.33 倍は畳まない。** 90 → 120 の変化を「倍に取った」と間違えないため。
+    check('1.4 倍までは畳まない', near(foldOctave(90, 120), 90, 1e-9), `${foldOctave(90, 120)}`);
+    check('0 や負でも落ちない', foldOctave(0, 120) === 0 && foldOctave(120, 0) === 120);
+  }
+
+  {
+    const periods = Float64Array.from([0.5, 0, 0, 0.8, 0]);
+    const filled = fillGaps(periods, 0.6);
+    check('空きは前後から線で埋まる', filled === 3 && near(periods[1], 0.6, 1e-9) && near(periods[2], 0.7, 1e-9), periods.join(','));
+    check('端の空きは隣を伸ばす', near(periods[4], 0.8, 1e-9), `${periods[4]}`);
+  }
+
+  {
+    const empty = Float64Array.from([0, 0, 0]);
+    check('どこにも値が無ければ、素材ぜんたいの答えで埋める', fillGaps(empty, 0.5) === 3 && empty.every((v) => v === 0.5), empty.join(','));
+    check('空の並びでも落ちない', fillGaps(new Float64Array(0), 0.5) === 0);
+  }
+
+  {
+    const values = Float64Array.from([1, 1, 9, 1, 1]);
+    medianSmooth(values, 3);
+    check('中央値で均すと、飛び出た 1 つが消える', values.every((v) => v === 1), values.join(','));
+    const kept = Float64Array.from([1, 2, 3]);
+    medianSmooth(kept, 1);
+    check('幅 1 なら均さない', kept.join(',') === '1,2,3', kept.join(','));
+  }
+
+  {
+    const track = analyzeOnset(asAudio(clicks(0.5, 12)));
+    const curve = estimateTempoCurve(track, { windowSeconds: 5 });
+    check('窓ごとのテンポが並ぶ', curve.periods.length > 1 && curve.times.length === curve.periods.length, `${curve.periods.length} 窓`);
+    check(
+      '一定の素材なら、どの窓も同じテンポ',
+      Array.from(curve.periods).every((p) => near(60 / p, 120, 2)),
+      Array.from(curve.periods).map((p) => (60 / p).toFixed(1)).join(' '),
+    );
+    // 窓の中心のちょうど間でも、端の外でも、同じ値が読めること。
+    check('窓の間の秒でも周期が読める', near(periodAt(curve, 4.2), 0.5, 0.02), `${periodAt(curve, 4.2).toFixed(3)}`);
+    check('窓の外（手前）は端の値', near(periodAt(curve, -5), curve.periods[0], 1e-9));
+    check('窓の外（後ろ）は端の値', near(periodAt(curve, 999), curve.periods[curve.periods.length - 1], 1e-9));
+  }
+
+  {
+    // 拍が無ければ窓も立たない（0 で割る所が無いこと）。
+    const curve = estimateTempoCurve(analyzeOnset(asAudio(new Float32Array(4 * SR))));
+    check('拍が無ければ窓は立たない', curve.periods.length === 0 && curve.global.bpm === null);
+    check('窓が無くても周期は読める（素材ぜんたいの答え）', Number.isFinite(periodAt(curve, 1)));
+  }
+
+  {
+    // **素材より窓が長いときは、素材まるごとを 1 つの窓にする。** 追う意味が無いため。
+    const track = analyzeOnset(asAudio(clicks(0.5, 3)));
+    const curve = estimateTempoCurve(track, { windowSeconds: 10 });
+    check('窓が素材より長ければ、窓は 1 つ', curve.periods.length === 1, `${curve.periods.length} 窓`);
+  }
+
+  {
+    const track = analyzeOnset(asAudio(clicks(0.5, 10, 0.25)));
+    const curve = estimateTempoCurve(track, { windowSeconds: 5 });
+    const { beats } = placeBeatsVarying(track, curve);
+    check('追う形でも拍が並ぶ', beats.length > 15, `${beats.length} 本`);
+    check('追う形でも拍は素材の外へ出ない', beats.every((b) => b >= 0 && b <= track.duration), `${beats[beats.length - 1]}`);
+    // 一定の素材では、追っても間隔が動かないこと（**追いすぎていないか**の検算）。
+    const gaps = beats.slice(1).map((b, i) => b - beats[i]);
+    check(
+      '一定の素材では、追っても間隔が動かない',
+      gaps.every((g) => near(g, 0.5, 0.03)),
+      `${Math.min(...gaps).toFixed(3)}〜${Math.max(...gaps).toFixed(3)}`,
+    );
+  }
+
+  {
+    const track = analyzeOnset(asAudio(clicks(0.5, 6)));
+    const curve = estimateTempoCurve(track, { windowSeconds: 5 });
+    // 引き戻しの幅が 0 でも、周期が 0 でも、落ちずに何かを返すこと。
+    check('引き戻しを切っても拍は並ぶ', placeBeatsVarying(track, curve, { trackGain: 0 }).beats.length > 5);
+    const broken = { ...curve, periods: Float64Array.from([0, 0]), times: Float64Array.from([1, 2]) };
+    check('周期が 0 なら拍を返さない', placeBeatsVarying(track, { ...broken, global: { ...curve.global, period: 0 } }).beats.length === 0);
+  }
+
+  {
+    // **入口からも切り替えられること。** 既定は追わない側。
+    const audio = asAudio(clicks(0.5, 8));
+    check('既定ではテンポを追わない', detectBeats(audio).tempoCurve === null);
+    const followed = detectBeats(audio, { followTempo: true, windowSeconds: 5 });
+    check('追う側にすると窓が付いてくる', followed.tempoCurve !== null && followed.beats.length > 10);
+    check('一定の素材なら振れは 1.0 のまま', near(followed.tempoSpread, 1, 0.05), `${followed.tempoSpread.toFixed(3)}`);
+  }
+
   // --- 使う側の道具 ---
 
   {
@@ -359,6 +480,18 @@ export function runSelfTest(): TestResult[] {
         DEFAULT_TEMPO.snapToPeak === false &&
         DEFAULT_TEMPO.minClarity === 1.9,
       `${JSON.stringify(DEFAULT_BEATS)} ${DEFAULT_TEMPO.method}/${DEFAULT_TEMPO.minClarity}`,
+    );
+    check(
+      '既定ではテンポを追わない（測って決めた。beats.ts の注）',
+      DEFAULT_BEATS.followTempo === false,
+      `${DEFAULT_BEATS.followTempo}`,
+    );
+    check(
+      '追う側の既定は、窓 5 秒・引き戻し 0.5・均さない',
+      DEFAULT_TEMPO_CURVE.windowSeconds === 5 &&
+        DEFAULT_TEMPO_CURVE.trackGain === 0.5 &&
+        DEFAULT_TEMPO_CURVE.smoothWindows === 0,
+      `${DEFAULT_TEMPO_CURVE.windowSeconds}s/${DEFAULT_TEMPO_CURVE.trackGain}/${DEFAULT_TEMPO_CURVE.smoothWindows}`,
     );
     check(
       '刻みは 10ms、窓は 1024',
