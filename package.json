@@ -12,8 +12,8 @@
     "bundle": "npm run build && npm run lab:build && node scripts/sync-bundles.mjs",
     "lab": "vite lab/auto-cut",
     "lab:build": "vite build lab/auto-cut",
-    "lab:typecheck": "tsc -p lab/auto-cut --pretty false && tsc -p lab/scene-cut --pretty false",
-    "lab:test": "node lab/auto-cut/selftest.mjs && node lab/scene-cut/selftest.mjs",
+    "lab:typecheck": "tsc -p lab/auto-cut --pretty false && tsc -p lab/scene-cut --pretty false && tsc -p lab/beat --pretty false",
+    "lab:test": "node lab/auto-cut/selftest.mjs && node lab/scene-cut/selftest.mjs && node lab/beat/selftest.mjs",
     "lab:fixtures": "node lab/fixtures/make-audio.mjs",
     "lab:bench": "node lab/auto-cut/bench.mjs",
     "lab:loudness": "node lab/auto-cut/loudness.mjs",
@@ -22,7 +22,10 @@
     "lab:probe": "node lab/auto-cut/probe.mjs",
     "lab:frames": "node lab/fixtures/make-frames.mjs",
     "lab:scene": "node lab/scene-cut/bench.mjs",
-    "lab:scene:probe": "node lab/scene-cut/probe.mjs"
+    "lab:scene:probe": "node lab/scene-cut/probe.mjs",
+    "lab:beats-fixtures": "node lab/fixtures/make-beats.mjs",
+    "lab:beat": "node lab/beat/bench.mjs",
+    "lab:beat:probe": "node lab/beat/probe.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",
