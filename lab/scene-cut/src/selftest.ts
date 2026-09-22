@@ -19,7 +19,14 @@ import {
   type FrameLike,
   type FrameStat,
 } from './frames.ts';
-import { DEFAULT_SCENE_CUT, planSceneCut, straddleDistance, straddleSpan } from './scene.ts';
+import {
+  DEFAULT_SCENE_CUT,
+  localRatioAt,
+  planSceneCut,
+  sceneDistances,
+  straddleDistance,
+  straddleSpan,
+} from './scene.ts';
 import { toClipEdits } from '../../auto-cut/src/edits.ts';
 
 export interface TestResult {
@@ -412,12 +419,118 @@ export function runSelfTest(): TestResult[] {
     );
   }
 
+  // --- その場と比べる線（2026-09-22・縦型で測って足した） ---
+
+  {
+    // 素直な形。周りが静かなら、1 コマだけ跳ねた所の比は大きくなる。
+    const d = [0, 0.01, 0.01, 0.5, 0.01, 0.01, 0.01, 0.01, 0.01];
+    check(
+      'その場と比べる比は、周りが静かなら大きく立つ',
+      localRatioAt(d, 3, 30, 0.002) === 50,
+      `${localRatioAt(d, 3, 30, 0.002)} 倍`,
+    );
+  }
+
+  {
+    // **この門の肝。** ずっと同じだけ動き続けていると、跳ねていなくても大きさは出る。
+    // そこを大きさで見ると通ってしまうので、比で見る。
+    const d = Array.from({ length: 40 }, (_, i) => (i === 0 ? 0 : 0.14));
+    check(
+      'ずっと動き続けている所では、大きくても比は 1 倍',
+      Math.abs(localRatioAt(d, 20, 30, 0.002) - 1) < 1e-12,
+      `${localRatioAt(d, 20, 30, 0.002)} 倍`,
+    );
+  }
+
+  {
+    // 平均ではなく中央値にした理由。0.4 秒ごとに跳ねる素材で、跳ねた側が周りを引き上げると
+    // **自分で自分を隠す**。中央値なら跳ねが少数派のあいだは動かない。
+    const d = Array.from({ length: 61 }, (_, i) => (i === 0 ? 0 : i % 6 === 0 ? 0.5 : 0.01));
+    const mean = (() => {
+      let sum = 0;
+      let n = 0;
+      for (let j = 1; j < d.length; j += 1) {
+        if (Math.abs(j - 30) <= 1) continue;
+        sum += d[j];
+        n += 1;
+      }
+      return d[30] / (sum / n);
+    })();
+    check(
+      '周りの代表値は中央値。平均だと跳ねの多い素材で自分を隠す',
+      localRatioAt(d, 30, 30, 0.002) === 50 && mean < 7,
+      `中央値 ${localRatioAt(d, 30, 30, 0.002)} 倍 / 平均 ${mean.toFixed(1)} 倍`,
+    );
+  }
+
+  {
+    // 自分の左右 1 コマを数えない理由。渡りの縁は「周り」ではなく本人の一部。
+    const d = [0, 0.01, 0.01, 0.3, 0.5, 0.3, 0.01, 0.01, 0.01];
+    check(
+      '渡りの縁は周りに数えない（左右 1 コマを外す）',
+      localRatioAt(d, 4, 2, 0.002) === 50,
+      `${localRatioAt(d, 4, 2, 0.002)} 倍`,
+    );
+  }
+
+  {
+    // 素材が数コマしか無いと周りが取れない。**分からないときに落とすのはこの門の仕事ではない。**
+    check(
+      '周りが取れないときは通す側へ倒す（落とさない）',
+      localRatioAt([0, 0.5], 1, 30, 0.002) === Infinity,
+      `${localRatioAt([0, 0.5], 1, 30, 0.002)}`,
+    );
+    // 最短シーン長のほうが先に効かないよう、そちらは下げてある（見たいのは比の側）。
+    const two = planSceneCut(statsOf([solid(10, 10, 10), solid(230, 40, 200)]), { minScene: 0.06 });
+    check(
+      '2 コマだけの素材でも、その場と比べる線で黙って消えない',
+      two.boundaries.length === 1,
+      `${two.boundaries.length} 本`,
+    );
+  }
+
+  {
+    // 先頭の 0 は測った値ではないので、周りに混ぜない。混ざると頭だけ門が甘くなる。
+    const d = [0, 0.14, 0.14, 0.14, 0.14, 0.14];
+    check(
+      '先頭の 0 は周りに数えない（素材の頭で門が甘くならない）',
+      Math.abs(localRatioAt(d, 3, 30, 0.002) - 1) < 1e-12,
+      `${localRatioAt(d, 3, 30, 0.002)} 倍`,
+    );
+  }
+
+  {
+    // 門が実際に効くこと。ずっと動き続けている列の中の 1 コマは、大きさでは通るが比で落ちる。
+    // 縞をずらす形では駄目だった。巻き戻してずらすと**分布が原理的に動かない**ので、
+    // 候補が 1 本も立たず「門が効いた」と「そもそも何も無かった」が見分けられない。
+    // 毎コマ明るさが段ぶん変わる列にすると、距離は毎コマ 1.0 まで立つのに
+    // **周りも同じだけ高い**——この門が狙っているのはまさにその形。
+    const frames = Array.from({ length: 40 }, (_, i) => solid(8 * i, 8 * i, 8 * i));
+    const stats = statsOf(frames);
+    const gated = planSceneCut(stats, { localRatio: 4 });
+    const open = planSceneCut(stats, { localRatio: null });
+    const localRejects = gated.rejected.filter((r) => r.reason === 'local').length;
+    // **見るのは境界の本数ではなく、落とした理由のほう。** この列は毎コマ動くので
+    // 候補が 1 本に繋がってしまい、最短シーン長の段でどちらにせよ 0 本になる。
+    // 「0 本だから門が効いた」と読むと、**何も起きていない場合と見分けられない。**
+    check(
+      'ずっと動き続けるだけの列は、大きさでは通って比で落ちる',
+      localRejects >= 30 &&
+        open.rejected.every((r) => r.reason !== 'local') &&
+        sceneDistances(stats, 'combined')[20] > 0.9,
+      `比で落ちた候補 ${localRejects} 本 / 隣どうしの距離 ${sceneDistances(stats, 'combined')[20].toFixed(3)}`,
+    );
+  }
+
   {
     check(
-      '既定は、組み合わせた量・線 0.10・またぐ幅 6 コマ・最短 0.4 秒',
+      '既定は、組み合わせた量・線 0.10・またぐ幅 6 コマ・その場と比べて 4 倍（窓 30 コマ）・最短 0.4 秒',
       DEFAULT_SCENE_CUT.metric === 'combined' &&
         DEFAULT_SCENE_CUT.threshold === 0.1 &&
         DEFAULT_SCENE_CUT.straddleFrames === 6 &&
+        DEFAULT_SCENE_CUT.localRatio === 4 &&
+        DEFAULT_SCENE_CUT.localWindow === 30 &&
+        DEFAULT_SCENE_CUT.localFloor === 0.002 &&
         DEFAULT_SCENE_CUT.minScene === 0.4,
       JSON.stringify(DEFAULT_SCENE_CUT),
     );

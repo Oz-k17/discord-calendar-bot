@@ -2,24 +2,32 @@
  * シーン検出が「実際どれくらい効くか」を、正解の分かっている素材で測る。
  *
  *   npm run lab:scene
+ *   npm run lab:scene:portrait          # 縦型（9:16 の切り出し）で測る
  *   LAB_NOGATE=1 npm run lab:scene   # またいだ距離の門を外す（入れる前の振る舞い）
  *   LAB_METRIC=grid npm run lab:scene
+ *   LAB_LOCAL=off npm run lab:scene   # その場と比べる線を外す（入れる前の振る舞い）
  *
  * **見つけた本数だけを見ないこと。** 全部のコマを境界にすれば正解は全部見つかるが、
  * それは素材を 1 コマずつに割っているだけ。「見つけた率」と「当てた率」を必ず併せて見る。
  */
 
-import { SCENE_FIXTURES } from '../fixtures/scenes.mjs';
+import { SCENE_FIXTURES, sceneAspect } from '../fixtures/scenes.mjs';
 import { renderFixture } from '../fixtures/make-frames.mjs';
 
 const { summarizeFrames } = await import('./src/frames.ts');
 const { DEFAULT_SCENE_CUT, planSceneCut } = await import('./src/scene.ts');
 const { toClipEdits } = await import('../auto-cut/src/edits.ts');
 
+// 向きは素材の側の話なので、判定の設定（`options`）とは分けて持つ。
+const aspect = process.env.LAB_ASPECT ?? 'landscape';
+const view = sceneAspect(aspect);
+
 const options = {
   ...(process.env.LAB_NOGATE ? { straddleThreshold: 0 } : {}),
   ...(process.env.LAB_METRIC ? { metric: process.env.LAB_METRIC } : {}),
   ...(process.env.LAB_THRESHOLD ? { threshold: Number(process.env.LAB_THRESHOLD) } : {}),
+  ...(process.env.LAB_LOCAL ? { localRatio: process.env.LAB_LOCAL === 'off' ? null : Number(process.env.LAB_LOCAL) } : {}),
+  ...(process.env.LAB_LOCAL_W ? { localWindow: Number(process.env.LAB_LOCAL_W) } : {}),
 };
 
 const pad = (s, n) => String(s).padEnd(n, ' ');
@@ -37,7 +45,7 @@ const right = (s, n) => String(s).padStart(n, ' ');
 const TOLERANCE = { dissolve: 0.5 };
 const DEFAULT_TOLERANCE = 0.2;
 
-console.log('シーン検出の効き（正解と突き合わせ）\n');
+console.log(`シーン検出の効き（正解と突き合わせ／向き ${aspect} ${view.label} ${view.width}×${view.height}）\n`);
 console.log(
   `${pad('素材', 16)}${right('正解', 5)}${right('見つけた', 9)}${right('当たり', 7)}` +
     `${right('見逃し', 7)}${right('空振り', 7)}${right('ずれ(s)', 9)}  ${'落とした候補'}`,
@@ -51,7 +59,7 @@ const offsets = [];
 const details = [];
 
 for (const fixture of SCENE_FIXTURES) {
-  const clip = renderFixture(fixture.name);
+  const clip = renderFixture(fixture.name, { aspect });
   const stats = summarizeFrames(clip.frames, clip.times);
   const plan = planSceneCut(stats, options);
 
@@ -131,7 +139,13 @@ for (const d of details) {
   if (spurious.length) {
     console.log(
       `    空振り ${spurious.length} 本: ` +
-        spurious.map((b) => `${b.time.toFixed(2)}s(距離 ${b.distance.toFixed(3)} / 門 ${b.straddle.toFixed(3)})`).join(', '),
+        spurious
+          .map(
+            (b) =>
+              `${b.time.toFixed(2)}s(距離 ${b.distance.toFixed(3)} / 門 ${b.straddle.toFixed(3)} / ` +
+              `比 ${Number.isFinite(b.local) ? b.local.toFixed(1) : '∞'})`,
+          )
+          .join(', '),
     );
   }
   if (missed.length) console.log(`    見逃し ${missed.length} 本: ${missed.map((c) => `${c.toFixed(2)}s`).join(', ')}`);
@@ -144,7 +158,7 @@ if (!printed) console.log('  ありません。');
 // 場面は隙間なく並ぶので、`toClipEdits` に渡すと尺が 1 秒も減らないはず。
 console.log('\n\n切ったあとのクリップ（auto-cut の edits.ts へそのまま渡した）\n');
 {
-  const clip = renderFixture('cuts-plain');
+  const clip = renderFixture('cuts-plain', { aspect });
   const stats = summarizeFrames(clip.frames, clip.times);
   const plan = planSceneCut(stats, options);
   const placement = { start: 10, duration: 13, sourceIn: 0 };

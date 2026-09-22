@@ -30,6 +30,43 @@ export const FRAME_WIDTH = 128;
 export const FRAME_HEIGHT = 72;
 
 /**
+ * 縦型（9:16）で測るときのコマの大きさと、切り出す窓の幅。
+ *
+ * ## なぜ「同じ絵を 72×128 に描き直す」ではないのか（2026-09-22）
+ *
+ * 素材は u（横）・v（縦）の 0〜1 で描いてあるので、**受け皿の縦横比だけ変えると
+ * 同じ絵が横に潰れて入るだけ**になる。ヒストグラムは画素をどこで数えても同じ数になるので、
+ * それでは「縦型でも 1 本も動きませんでした」という当たり前の結果しか出ない。
+ * 2026-09-20（4 回目）に `pan` で踏んだ穴——**素材の性質を手の強さと取り違える**——の、
+ * 向きを変えただけの同じ穴になる。
+ *
+ * 本体で縦型が出てくる経路は**横型の素材から 9:16 を切り出す**ほうなので、
+ * ここでもそう作る。高さはそのまま、横だけを中央から切る:
+ *   16:9 の画面の高さを H とすると、幅は H×16/9。そこから 9:16（幅 H×9/16）を切るので、
+ *   残る幅は (H×9/16) / (H×16/9) = **81/256 ≒ 0.316**、もとの 3 分の 1 弱。
+ *
+ * この置き方なら、縦型で何が変わるかが**そのまま量になる**:
+ * 画面に写る範囲が 3 分の 1 になるぶん、パンも手ぶれも横切る被写体も
+ * **画面に対しては 3.16 倍の速さ・大きさ**で効く。
+ */
+export const PORTRAIT_WIDTH = 72;
+export const PORTRAIT_HEIGHT = 128;
+export const PORTRAIT_CROP_U = 81 / 256;
+
+/** 測る向きの一覧。`renderFixture(name, { aspect })` に渡す名前。 */
+export const SCENE_ASPECTS = {
+  landscape: { width: FRAME_WIDTH, height: FRAME_HEIGHT, cropU: 1, label: '16:9' },
+  portrait: { width: PORTRAIT_WIDTH, height: PORTRAIT_HEIGHT, cropU: PORTRAIT_CROP_U, label: '9:16' },
+};
+
+/** 向きの名前から引く。知らない名前は黙って横型にせず、その場で落とす。 */
+export function sceneAspect(name = 'landscape') {
+  const found = SCENE_ASPECTS[name];
+  if (!found) throw new Error(`向き ${name} は landscape / portrait のどちらかです`);
+  return found;
+}
+
+/**
  * 素材の一覧。`hard` は「シーン検出をいじめるために足したもの」。
  *
  * 意地悪の向きは 2 つある。混ぜてあるのは、片方だけ見ていると
@@ -165,6 +202,21 @@ export const SCENE_FIXTURES = [
       cutsAt: [4.0, 4.333, 8.0, 8.333],
       shotOrder: [0, 1, 0, 2, 0],
     },
+  },
+  {
+    /**
+     * 2026-09-22 に足した、**「その場と比べる線」を潰すための素材**。
+     *
+     * その線は「周りが静かなのに 1 コマだけ跳ねたか」を見るので、
+     * **周りがずっと動いている所で本当に切り替わったら見えなくなる**はず。
+     * パンしながらカットするのは実際によくある撮り方（歩き撮りの繋ぎ）なので、
+     * 意地悪であると同時に本物の使い道でもある。
+     */
+    name: 'pan-cuts',
+    note: 'パンし続けながら 2 回カットする（その場と比べる線を潰す）',
+    hard: true,
+    cuts: [4.0, 8.6],
+    options: { seed: 116, pan: 0.9, cutsAt: [4.0, 8.6] },
   },
   {
     name: 'dark-noise',

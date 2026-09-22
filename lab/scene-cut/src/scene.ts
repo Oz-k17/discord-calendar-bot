@@ -71,6 +71,45 @@ export interface SceneCutOptions {
    */
   straddleThreshold: number | null;
   /**
+   * **その場のふだんの高さの何倍立っているか**の下限。null なら見ない。
+   *
+   * 2026-09-22 に縦型（9:16 の切り出し）で測って足した。縦型にすると画面に写る範囲が
+   * 横型の 0.316 倍になるので、**パンも手ぶれも画面に対しては 3.16 倍の速さで効く**。
+   * 実際 `pan` の隣どうしの距離は 0.006 → **0.160** まで上がり、既定の線 0.10 を超える。
+   *
+   * **線を上げる形では直らない。** 縦型は 0.160〜0.426 のあいだなら通るが、
+   * 横型のカットは最小 0.167 なので、1 本の固定線に残る余裕は **1.04 倍**しかない。
+   * 大きさそのものではなく、**周りと比べてどれだけ跳ねたか**を見る必要がある。
+   * パンは「ずっと同じくらい動き続ける」ので周りも高く、カットは「1 コマだけ跳ねる」。
+   *
+   * 音の側で `lowBandRangeDb` を「その場の低い側から 20dB 下」に取り直したのと同じ考え方で、
+   * **固定の線が外れるときは、たいてい基準をその場から取り直すほうが効く。**
+   *
+   * 既定の 4 は測って取った。**上も下も、この手を潰す素材が決めている**:
+   *   - 下は `dark-noise`（暗所のノイズ）の 2.8 倍
+   *   - 上は `pan-cuts`（パンしながらのカット）の 7.8 倍
+   *     ——周りがずっと動いている所では、本物のカットでも比は立たない
+   * 実際に 15 → 16 本で振ると **2〜7 のあいだは 1 本も動かない**（`lab:scene` の線の振り）。
+   * その台の真ん中を取っている。
+   */
+  localRatio: number | null;
+  /**
+   * 周りを何コマ見るか（前後それぞれ）。
+   *
+   * **狭いと渡りが自分で自分を隠す。** 1 秒のディゾルブ（15 コマ）を W=8 で見ると
+   * 窓の中がほとんど渡りで埋まり、中央値が上がって比が 1.1 倍まで落ちる（＝落ちてしまう）。
+   * W=15 で 43.5、W=30 で 56.9。**渡りの長さより広く取る**のは、
+   * フラッシュをまたぐ幅を「光っている長さより広く」取ったのと同じ理由。
+   */
+  localWindow: number;
+  /**
+   * 周りの中央値の下限。
+   *
+   * 素直な素材では周りが 0 に潰れるので、そのままだと割り算が無限大になる。
+   * 0.002 は「分布の距離として意味のない大きさ」の側から取った。
+   */
+  localFloor: number;
+  /**
    * これより短い場面は作らない（秒）。
    *
    * ディゾルブのように渡りが何コマも続くと候補が連なって立つので、
@@ -84,6 +123,9 @@ export const DEFAULT_SCENE_CUT: SceneCutOptions = {
   threshold: 0.1,
   straddleFrames: 6,
   straddleThreshold: null,
+  localRatio: 4,
+  localWindow: 30,
+  localFloor: 0.002,
   minScene: 0.4,
 };
 
@@ -97,11 +139,13 @@ export interface SceneBoundary {
   distance: number;
   /** またいだ距離。 */
   straddle: number;
+  /** その場のふだんの高さの何倍立っていたか。 */
+  local: number;
 }
 
 /** 落とした候補。なぜ落としたかまで残す（数字を読むときに要る）。 */
 export interface RejectedBoundary extends SceneBoundary {
-  reason: 'straddle' | 'minScene' | 'run';
+  reason: 'straddle' | 'local' | 'minScene' | 'run';
 }
 
 export interface ScenePlan {
@@ -167,15 +211,26 @@ export function planSceneCut(stats: FrameStat[], options: Partial<SceneCutOption
   const duration = endOf(stats);
 
   // --- 2 段目: 線を超えたコマを候補にする ---
+  //
+  // 線は 2 本ある。**固定の線**（`threshold`）は「小さすぎる変化を落とす」ためのもので、
+  // **その場と比べる線**（`localRatio`）は「ずっと動き続けているだけの所を落とす」ため。
+  // 前者だけだと縦型のパンが 11 本通り、後者だけだと静かな素材のノイズが通る。
   const candidates: SceneBoundary[] = [];
   for (let i = 1; i < stats.length; i += 1) {
     if (distances[i] < o.threshold) continue;
-    candidates.push({
+    const local = localRatioAt(distances, i, o.localWindow, o.localFloor);
+    const c = {
       time: stats[i].time,
       frame: i,
       distance: distances[i],
       straddle: straddleDistance(stats, i, o.straddleFrames, o.metric),
-    });
+      local,
+    };
+    if (o.localRatio !== null && local < o.localRatio) {
+      rejected.push({ ...c, reason: 'local' });
+      continue;
+    }
+    candidates.push(c);
   }
 
   // --- 3 段目: またいだ距離で門を立てる ---
@@ -261,6 +316,36 @@ export function planSceneCut(stats: FrameStat[], options: Partial<SceneCutOption
 
   rejected.sort((a, b) => a.frame - b.frame);
   return { boundaries, scenes, rejected, distances };
+}
+
+/**
+ * i 番のコマが、周り（前後 `window` コマ）のふだんの高さの何倍立っているか。
+ *
+ * 周りの代表値に**中央値**を使うのは、平均だと跳ねたコマ自身と
+ * 「カットの多い素材」で周り側が引き上げられてしまうため
+ * （`cuts-rapid` は 0.4 秒ごとに跳ねるので、平均だと自分で自分を隠す）。
+ *
+ * 自分の左右 1 コマを数えないのは、**渡りの縁が中央値へ混ざるのを避ける**ため。
+ * ディゾルブの山の隣は同じ渡りの一部なので、周りではなく本人の一部として扱う。
+ */
+export function localRatioAt(distances: ArrayLike<number>, i: number, window: number, floor: number): number {
+  const around: number[] = [];
+  // 先頭の 0 は「比べる相手がいなかった」という印で、**測った値ではない**。
+  // 周りに混ぜると中央値を下へ引いて、素材の頭だけ門が甘くなる。
+  const from = Math.max(1, i - window);
+  const to = Math.min(distances.length - 1, i + window);
+  for (let j = from; j <= to; j += 1) {
+    if (Math.abs(j - i) <= 1) continue;
+    around.push(distances[j]);
+  }
+  // 周りが 1 つも無いのは、素材が数コマしかないとき。
+  // **分からないときに落とすのは、この門の仕事ではない**ので通す側へ倒す
+  // （0 を返すと「ずっと動き続けている」と同じ扱いになり、黙って全部落ちる）。
+  if (!around.length) return Infinity;
+  around.sort((a, b) => a - b);
+  const n = around.length;
+  const mid = n % 2 ? around[(n - 1) / 2] : (around[n / 2 - 1] + around[n / 2]) / 2;
+  return distances[i] / Math.max(mid, floor);
 }
 
 /** コマとコマの間隔（秒）。時刻の列から取るので、可変フレームレートでも平均で効く。 */

@@ -1,8 +1,9 @@
 /**
  * 試し用の映像（コマの列）を作る。
  *
- *   node lab/fixtures/make-frames.mjs        # 一覧を出すだけ
- *   node lab/fixtures/make-frames.mjs pan    # 1 本だけ作って様子を出す
+ *   node lab/fixtures/make-frames.mjs             # 一覧を出すだけ
+ *   node lab/fixtures/make-frames.mjs pan         # 1 本だけ作って様子を出す
+ *   node lab/fixtures/make-frames.mjs '' portrait # 縦型（9:16）で作る
  *
  * 音の側の `make-audio.mjs` と同じで、**毎回まったく同じ絵が出る**ようにするために置いている。
  * 乱数に種を固定してあるので、「昨日は 8 本見つけた／今日は 9 本」をそのまま比べられる。
@@ -13,7 +14,7 @@
 
 import { pathToFileURL } from 'node:url';
 
-import { FRAME_HEIGHT, FRAME_WIDTH, SCENE_FIXTURES, SCENE_FPS, SCENE_LENGTH, sceneFixture } from './scenes.mjs';
+import { SCENE_ASPECTS, SCENE_FIXTURES, SCENE_FPS, SCENE_LENGTH, sceneAspect, sceneFixture } from './scenes.mjs';
 
 /** 種を固定した擬似乱数（mulberry32）。音の側と同じものを使う。 */
 function rng(seed) {
@@ -166,11 +167,15 @@ function shotPixel(shot, u, v, t, out, span = 1) {
  * `frames[i]` は RGBA の `Uint8ClampedArray`（`ImageData.data` と同じ並び）。
  * 本物の動画を縮めて渡すときと同じ形にしてある。
  */
-export function renderFixture(name) {
+export function renderFixture(name, { aspect = 'landscape' } = {}) {
   const fixture = sceneFixture(name);
   const o = fixture.options ?? {};
-  const width = FRAME_WIDTH;
-  const height = FRAME_HEIGHT;
+  const view = sceneAspect(aspect);
+  const width = view.width;
+  const height = view.height;
+  // 縦型は「同じ絵を縦長の受け皿に描き直す」のではなく、**横型の画面から横を切り出す**。
+  // 理由は `scenes.mjs` の `PORTRAIT_CROP_U` の注に書いた。
+  const cropU = view.cropU;
   const fps = SCENE_FPS;
   const total = Math.round(SCENE_LENGTH * fps);
 
@@ -271,7 +276,11 @@ export function renderFixture(name) {
       const v0 = (y + 0.5) / height;
       for (let x = 0; x < width; x += 1) {
         const u0 = (x + 0.5) / width;
-        const u = 0.5 + (u0 - 0.5) / zoom + pan + shakeU;
+        // 切り出しはカメラの前ではなく後ろ（撮れた画面を切る）なので、
+        // ズーム・パン・手ぶれより先に効かせる。こうすると縦型では
+        // 揺れもパンも**画面に対して 3.16 倍**になる——それが切り出しの代価そのもの。
+        const uFrame = 0.5 + (u0 - 0.5) * cropU;
+        const u = 0.5 + (uFrame - 0.5) / zoom + pan + shakeU;
         const v = 0.5 + (v0 - 0.5) / zoom + shakeV;
 
         shotPixel(shot, u, v, t, rgb, span);
@@ -281,7 +290,10 @@ export function renderFixture(name) {
         }
 
         if (crossing) {
-          const du = u0 - crossX;
+          // 横切る被写体は場面の一部ではなくカメラの前を通るものなので、
+          // **切り出す前の画面**の座標で置く。横型では `uFrame === u0` なので
+          // ここを切り替えても横型の絵は 1 ビットも変わらない。
+          const du = uFrame - crossX;
           const dv = v0 - 0.5;
           const d = (du / crossing.rx) * (du / crossing.rx) + (dv / crossing.ry) * (dv / crossing.ry);
           if (d < 1) {
@@ -305,15 +317,28 @@ export function renderFixture(name) {
     frames.push({ width, height, data });
   }
 
-  return { name, width, height, fps, times, frames, cuts: fixture.cuts, note: fixture.note, hard: !!fixture.hard };
+  return {
+    name,
+    aspect,
+    width,
+    height,
+    fps,
+    times,
+    frames,
+    cuts: fixture.cuts,
+    note: fixture.note,
+    hard: !!fixture.hard,
+  };
 }
 
 // --- コマンドラインから呼ばれたとき ---
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const only = process.argv[2];
+  const aspect = process.argv[3] ?? 'landscape';
   const list = only ? [sceneFixture(only)] : SCENE_FIXTURES;
+  console.log(`向き: ${aspect}（${SCENE_ASPECTS[aspect]?.label ?? '?'}）\n`);
   for (const f of list) {
-    const clip = renderFixture(f.name);
+    const clip = renderFixture(f.name, { aspect });
     const mb = (clip.frames.length * clip.width * clip.height * 4) / 1024 / 1024;
     console.log(
       `${f.name.padEnd(14)} ${clip.frames.length} コマ  ${clip.width}×${clip.height}  ` +

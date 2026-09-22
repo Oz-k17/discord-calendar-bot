@@ -2,6 +2,7 @@
  * 「どの量ならカットの切り替わりを見分けられるか」を、正解の分かっている素材で測る。
  *
  *   npm run lab:scene:probe
+ *   npm run lab:scene:probe:portrait   # 縦型（9:16 の切り出し）で測る
  *
  * **実装する前に**ここで並べて比べる。思いつきで 1 つ選んで実装すると、
  * たまたま手元の素材で効いただけのものを掴む（音の側で 9 回やった）。
@@ -12,10 +13,13 @@
  *   3. またいだ距離との比（フラッシュのような「戻ってくる」変化を見分けられるか）
  */
 
-import { SCENE_FIXTURES } from '../fixtures/scenes.mjs';
+import { SCENE_FIXTURES, sceneAspect } from '../fixtures/scenes.mjs';
 import { renderFixture } from '../fixtures/make-frames.mjs';
 
 const { DISTANCES, summarizeFrames } = await import('./src/frames.ts');
+
+const aspect = process.env.LAB_ASPECT ?? 'landscape';
+const view = sceneAspect(aspect);
 
 const NAMES = Object.keys(DISTANCES);
 /** またぎを何コマ先まで見るか。1 コマ（＝隣の隣）と 3 コマ（＝0.2 秒先）。 */
@@ -29,7 +33,7 @@ const num = (v, d = 3) => (v === null || v === undefined || Number.isNaN(v) ? '�
 
 /** 素材 1 本を測って、コマごとの距離と正解ラベルを返す。 */
 function measure(fixture) {
-  const clip = renderFixture(fixture.name);
+  const clip = renderFixture(fixture.name, { aspect });
   const stats = summarizeFrames(clip.frames, clip.times);
   const half = 0.5 / clip.fps;
 
@@ -64,6 +68,7 @@ function auc(positive, negative) {
 const measured = SCENE_FIXTURES.map((f) => ({ fixture: f, ...measure(f) }));
 
 // --- 1. 素材ごとの AUC ---
+console.log(`向き ${aspect}（${view.label} ${view.width}×${view.height}）で測る\n`);
 console.log('カットのコマとそれ以外のコマを、どれくらい分けられるか（AUC / 0.5 = 分けられない）\n');
 console.log(`${pad('素材', 18)}${NAMES.map((n) => pad(n, 12)).join('')}`);
 console.log('-'.repeat(18 + NAMES.length * 12));
@@ -185,3 +190,71 @@ for (const m of measured) {
   console.log(`${pad('', 18)}${pad('  山の位置(秒)', 12)}${where}`);
 }
 console.log('\n山が正解の秒の近くに立っていなければ、線を下げても正しい所では切れない。');
+
+// --- 5. その場の高さと比べると分かれるか（2026-09-22・縦型で測って足した） ---
+//
+// 縦型（9:16 の切り出し）にすると、パンの隣どうしの距離が 0.006 → 0.160 まで上がり、
+// **固定の線（0.10）を超える**。かといって線を上げると、横型のカット（最小 0.167）に
+// 届いてしまう——**1 本の固定線で両方は賄えない**（余裕が 1.04 倍しかない）。
+//
+// そこで見るのは大きさそのものではなく、**その場のふだんの高さと比べてどれだけ立っているか**。
+// パンは「ずっと同じくらい動き続ける」ので周りも高い。カットは「1 コマだけ跳ねる」ので周りが低い。
+// 音の側で `lowBandRangeDb` を「その場の低い側から 20dB 下」に取り直したのと同じ考え方。
+//
+// 周りの代表値は**中央値**にする。平均だと、跳ねたコマ自身とカットの多い素材で
+// 周り側が引き上げられてしまう（`cuts-rapid` は 0.4 秒ごとに跳ねる）。
+console.log('\n\nその場の高さと比べると分かれるか（d[i] ÷ 周りの中央値）\n');
+console.log('周りは前後 W コマ。跳ねたコマ自身と、その左右 1 コマは数えない。');
+console.log('中央値が 0 に潰れる素材があるので、下限 0.002 で割る。\n');
+const RATIO_WINDOWS = [8, 15, 30];
+console.log(`${pad('素材', 18)}${RATIO_WINDOWS.map((w) => pad(`W=${w}`, 18)).join('')}`);
+console.log(`${pad('', 18)}${RATIO_WINDOWS.map(() => pad('正解の最小/誤りの最大', 18)).join('')}`);
+console.log('-'.repeat(18 + RATIO_WINDOWS.length * 18));
+
+const ratioPooled = Object.fromEntries(RATIO_WINDOWS.map((w) => [w, { hit: [], miss: [] }]));
+for (const m of measured) {
+  // 渡りが瞬間でない素材は「正解のコマ」が 1 枚に決まらないので、誤りの側だけ数える。
+  const gradual = GRADUAL.has(m.fixture.name);
+  const values = m.rows.map((r) => r.values.combined);
+  const row = RATIO_WINDOWS.map((w) => {
+    const hit = [];
+    const miss = [];
+    for (let i = 0; i < m.rows.length; i += 1) {
+      const r = localRatio(values, i, w);
+      if (m.rows[i].isCut) hit.push(r);
+      else if (!gradual) miss.push(r);
+    }
+    if (!gradual) {
+      ratioPooled[w].hit.push(...hit);
+      ratioPooled[w].miss.push(...miss);
+    }
+    const lo = hit.length ? Math.min(...hit).toFixed(1) : '—';
+    const hi = miss.length ? Math.max(...miss).toFixed(1) : '—';
+    return pad(`${lo} / ${hi}`, 18);
+  }).join('');
+  console.log(`${pad((m.fixture.hard ? '※ ' : '  ') + m.fixture.name, 18)}${row}`);
+}
+console.log('-'.repeat(18 + RATIO_WINDOWS.length * 18));
+{
+  const row = RATIO_WINDOWS.map((w) => {
+    const lo = Math.min(...ratioPooled[w].hit).toFixed(1);
+    const hi = Math.max(...ratioPooled[w].miss).toFixed(1);
+    return pad(`${lo} / ${hi}`, 18);
+  }).join('');
+  console.log(`${pad('  ぜんぶ', 18)}${row}`);
+}
+console.log('\n左が右より大きければ、「その場より何倍立ったか」ひとつで線が引ける。');
+console.log('ディゾルブとフェードは正解のコマが 1 枚に決まらないので、誤りの側からも外してある。');
+
+/** i 番のコマが、周り（前後 W コマ）のふだんの高さの何倍立っているか。 */
+function localRatio(values, i, w) {
+  const around = [];
+  for (let j = Math.max(0, i - w); j <= Math.min(values.length - 1, i + w); j += 1) {
+    if (Math.abs(j - i) <= 1) continue;
+    around.push(values[j]);
+  }
+  if (!around.length) return 0;
+  around.sort((a, b) => a - b);
+  const mid = around.length % 2 ? around[(around.length - 1) / 2] : (around[around.length / 2 - 1] + around[around.length / 2]) / 2;
+  return values[i] / Math.max(mid, 0.002);
+}

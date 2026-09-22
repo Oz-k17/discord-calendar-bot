@@ -23,6 +23,8 @@
     "lab:frames": "node lab/fixtures/make-frames.mjs",
     "lab:scene": "node lab/scene-cut/bench.mjs",
     "lab:scene:probe": "node lab/scene-cut/probe.mjs",
+    "lab:scene:portrait": "LAB_ASPECT=portrait node lab/scene-cut/bench.mjs",
+    "lab:scene:probe:portrait": "LAB_ASPECT=portrait node lab/scene-cut/probe.mjs",
     "lab:beats-fixtures": "node lab/fixtures/make-beats.mjs",
     "lab:beat": "node lab/beat/bench.mjs",
     "lab:beat:demo": "vite lab/beat",
