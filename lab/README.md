@@ -14,7 +14,7 @@
 | 試作 | 中身 | 動かし方 |
 | --- | --- | --- |
 | [`auto-cut/`](./auto-cut/) | 無音カット（ジェットカット）とオートダッキング、波形表示 | `npm run lab` |
-| [`scene-cut/`](./scene-cut/) | シーン検出（カットの切り替わりを見つけて割る） | `npm run lab:scene` |
+| [`scene-cut/`](./scene-cut/) | シーン検出（カットの切り替わりを見つけて割る） | `npm run lab:scene:demo` |
 | [`beat/`](./beat/) | 拍の検出（テンポと、拍が来る秒） | `npm run lab:beat:demo` |
 
 ```
@@ -32,6 +32,8 @@ npm run lab:build      # 単体で配れる形にする（lab/auto-cut/dist）
 npm run lab:frames       # 試し用の映像（コマの列）を作って一覧を出す
 npm run lab:scene:probe  # 「どの量ならカットを見分けられるか」を正解付きで測る
 npm run lab:scene        # シーン検出が実際どれくらい効くかを測る
+npm run lab:scene:demo   # シーン検出の画面を開く（本物の動画を読み込める）
+npm run lab:scene:uitest # シーン検出の画面まで通して確かめる（lab:uitest からも走る）
 
 npm run lab:beats-fixtures  # 試し用の「拍のある音」を作って一覧を出す
 npm run lab:beat:probe      # 「どの手なら拍を見分けられるか」を正解付きで測る
@@ -41,7 +43,7 @@ npm run lab:beat:uitest     # 拍の画面まで通して確かめる（lab:uite
 ```
 
 `lab:test` は**すべての試作の検算をまとめて走らせる**（1 つだけ緑にして終わらないため）。
-`lab:uitest` も同じで、**画面を持っている試作ぜんぶ**（`auto-cut` と `beat`）を続けて通します。
+`lab:uitest` も同じで、**画面を持っている試作ぜんぶ**（`auto-cut`・`beat`・`scene-cut`）を続けて通します。
 
 確かめ方は 4 段に分けてあります。役割が違うので、どれか 1 つで済ませないでください。
 

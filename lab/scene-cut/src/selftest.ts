@@ -27,6 +27,7 @@ import {
   straddleDistance,
   straddleSpan,
 } from './scene.ts';
+import { ANALYSIS_FPS, analysisFps, analysisSize, sampleTimes } from './decode.ts';
 import { toClipEdits } from '../../auto-cut/src/edits.ts';
 
 export interface TestResult {
@@ -519,6 +520,71 @@ export function runSelfTest(): TestResult[] {
         open.rejected.every((r) => r.reason !== 'local') &&
         sceneDistances(stats, 'combined')[20] > 0.9,
       `比で落ちた候補 ${localRejects} 本 / 隣どうしの距離 ${sceneDistances(stats, 'combined')[20].toFixed(3)}`,
+    );
+  }
+
+  // --- decode.ts のうち、ブラウザが要らない部分（2026-09-22・2 回目） ---
+  //
+  // 本物の動画を読む所そのもの（WebCodecs / canvas）はここでは確かめられないが、
+  // **何秒のコマを何枚読むか**を決める所は素の計算なので、ここで押さえておく。
+  // ここが狂うと、画面だけがコマンドラインと別の速さで測ることになる。
+  {
+    check(
+      '解析の速さは、既定のつまみを決めた素材と同じ 15fps',
+      ANALYSIS_FPS === 15,
+      `${ANALYSIS_FPS}fps`,
+    );
+
+    const t = sampleTimes(2, 15, 3000);
+    check(
+      '2 秒を 15fps で読むと 30 コマ・0 秒から始まる',
+      t.length === 30 && t[0] === 0 && Math.abs(t[29] - 29 / 15) < 1e-12,
+      `${t.length} コマ / 最後 ${t[t.length - 1].toFixed(3)}s`,
+    );
+    // **尺ちょうどのコマは読まない。** そこには絵が無いので、
+    // `canvasesAtTimestamps` はその手前のコマを返し、同じ絵が 2 枚並ぶ。
+    check(
+      '尺ちょうどのコマは読まない（同じ絵が 2 枚並ばない）',
+      sampleTimes(1, 15, 3000).length === 15 && sampleTimes(1, 15, 3000)[14] < 1,
+      `${sampleTimes(1, 15, 3000).length} コマ`,
+    );
+    check(
+      '上限に当たったらそこで止める',
+      sampleTimes(600, 15, 3000).length === 3000,
+      `${sampleTimes(600, 15, 3000).length} コマ`,
+    );
+    // 尺 0・速さ 0 で呼ばれても落ちない（読み込みに失敗した素材でここまで来られる）。
+    check(
+      '尺 0・速さ 0 でも落ちずに空を返す',
+      sampleTimes(0, 15, 3000).length === 0 && sampleTimes(10, 0, 3000).length === 0 && sampleTimes(10, 15, 0).length === 0,
+      '空',
+    );
+
+    // 長辺を揃える（幅ではない）。縦型で横型の 2.4 倍のコマを作らないため。
+    const land = analysisSize(1920, 1080, 128);
+    const port = analysisSize(1080, 1920, 128);
+    check(
+      '長辺を 128 に揃える（縦型でも横型でもコマの画素数が揃う）',
+      land.width === 128 && land.height === 72 && port.width === 72 && port.height === 128,
+      `${land.width}×${land.height} / ${port.width}×${port.height}`,
+    );
+    check(
+      '細長い素材でも 1 画素未満に潰さない',
+      analysisSize(4000, 10, 128).height === 1,
+      `${JSON.stringify(analysisSize(4000, 10, 128))}`,
+    );
+    check(
+      '大きさが分からない素材でも落ちない',
+      analysisSize(0, 0, 128).width === 128,
+      `${JSON.stringify(analysisSize(0, 0, 128))}`,
+    );
+
+    // **希望より遅い素材は水増ししない。** 同じ絵が並ぶと距離 0 のコマができ、
+    // 周りの中央値が下がって、その場と比べる線が甘くなる。
+    check(
+      '素材が遅ければ素材に合わせ、速ければこちらへ揃える',
+      analysisFps(10, 15) === 10 && analysisFps(30, 15) === 15 && analysisFps(0, 15) === 15,
+      `10fps→${analysisFps(10, 15)} / 30fps→${analysisFps(30, 15)} / 不明→${analysisFps(0, 15)}`,
     );
   }
 
