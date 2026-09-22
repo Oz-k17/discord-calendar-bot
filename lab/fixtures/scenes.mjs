@@ -56,13 +56,29 @@ export const PORTRAIT_CROP_U = 81 / 256;
 /** 測る向きの一覧。`renderFixture(name, { aspect })` に渡す名前。 */
 export const SCENE_ASPECTS = {
   landscape: { width: FRAME_WIDTH, height: FRAME_HEIGHT, cropU: 1, label: '16:9' },
-  portrait: { width: PORTRAIT_WIDTH, height: PORTRAIT_HEIGHT, cropU: PORTRAIT_CROP_U, label: '9:16' },
+  portrait: { width: PORTRAIT_WIDTH, height: PORTRAIT_HEIGHT, cropU: PORTRAIT_CROP_U, label: '9:16（切り出し）' },
+  /**
+   * **最初から縦で撮った向き**（2026-09-22・3 回目）。
+   *
+   * 切り出し（`portrait`）と違って横を切らないので、**受け皿の縦横比だけが変わる**。
+   * これは上の `PORTRAIT_CROP_U` の注が「それでは何も測っていない」と書いた形そのもので、
+   * 分布は画素をどこで数えても同じ数になるから、**既存の素材をこの向きで測っても動かない**。
+   * それは不足ではなく、**この向きの正しい対照**として置いてある——
+   * 「縦にすると破れる」のが切り出しの性質なのか縦そのものの性質なのかは、
+   * 横を切らない縦型と並べて初めて分かる。
+   *
+   * この向きで何かが動くのは、**素材の側が縦向きに作られているとき**だけ:
+   *   - `tilt`（カメラが縦に流れる）・`crossing-vertical`（被写体が縦に横切る）
+   *   - `cuts-captions` / `captions-only`（上下に焼き込みの文字帯が乗る）
+   * 短尺の動画で実際に起きるのはこちらなので、意地悪の中身も横向きとは別に要る。
+   */
+  native: { width: PORTRAIT_WIDTH, height: PORTRAIT_HEIGHT, cropU: 1, label: '9:16（最初から縦）' },
 };
 
 /** 向きの名前から引く。知らない名前は黙って横型にせず、その場で落とす。 */
 export function sceneAspect(name = 'landscape') {
   const found = SCENE_ASPECTS[name];
-  if (!found) throw new Error(`向き ${name} は landscape / portrait のどちらかです`);
+  if (!found) throw new Error(`向き ${name} は ${Object.keys(SCENE_ASPECTS).join(' / ')} のどれかです`);
   return found;
 }
 
@@ -217,6 +233,67 @@ export const SCENE_FIXTURES = [
     hard: true,
     cuts: [4.0, 8.6],
     options: { seed: 116, pan: 0.9, cutsAt: [4.0, 8.6] },
+  },
+
+  // --- ここから下は「最初から縦で撮った」素材（2026-09-22・3 回目に足した） ---
+  //
+  // 上の意地悪はどれも横向きの撮り方（横へパン、横切る被写体）で、
+  // 縦型はそれを**切り出して**測っていた。短尺の動画で実際に起きるのは
+  // **縦に振る／縦に動く／上下に文字が乗る**ほうなので、そちらを別に置く。
+  // 横型でも同じものが撮れるので向きは選ばない。並べると「何が縦のせいか」が出る。
+  {
+    /**
+     * `pan` の縦版。縦は巻き戻せない（上下の色の階調が seam で段差になる）ので、
+     * **必ず新しい景色が入ってくる**形になる——つまり `pan-reveal` と同じ側の意地悪。
+     * 速さは `pan` と同じ 0.9（画面 1 枚ぶん / 秒）にしてあり、
+     * 横と縦をそのまま並べられる。
+     */
+    name: 'tilt',
+    note: 'カメラが縦に流れ続ける（新しい景色が入ってくる）。カットは 1 つも無い',
+    hard: true,
+    cuts: [],
+    options: { seed: 117, tilt: 0.9 },
+  },
+  {
+    /**
+     * `motion`（横切る被写体）の縦版。人が立ち上がる・物が落ちるなど、縦の動きは縦型でごく普通に出る。
+     * 切り出しの縦型では**横の動きだけが 3.16 倍になる**はずなので、
+     * この素材は切り出しても増幅されない——その非対称を数字にするために要る。
+     */
+    name: 'crossing-vertical',
+    note: '大きな被写体が画面を縦に横切る。カットは 1 つも無い',
+    hard: true,
+    cuts: [],
+    options: { seed: 118, crossing: 'vertical' },
+  },
+  {
+    /**
+     * **`cuts-plain` と同じ種・同じ切り所に、焼き込みの文字帯だけを乗せたもの。**
+     *
+     * 揃えてあるのは、差が帯だけになるようにするため。分布の距離は
+     * **動かない画素の割合ぶんそのまま薄まる**はずなので（上下で 26%）、
+     * 0.74 倍という予想が当たるかどうかがそのまま確かめになる。
+     * 短尺の動画では字幕・見出し・アカウント名がほぼ必ず焼き込まれていて、
+     * **カットしても 1 画素も動かない**。固定の線の余裕を直接食う形。
+     */
+    name: 'cuts-captions',
+    note: '上下に焼き込みの文字帯が乗ったまま 3 回カットする（画面の 26% が動かない）',
+    hard: true,
+    cuts: [3.0, 6.0, 9.4],
+    options: { seed: 101, cutsAt: [3.0, 6.0, 9.4], captions: { top: 0.1, bottom: 0.16 } },
+  },
+  {
+    /**
+     * 上の裏返し。**場面は 1 つも変わらないのに、字幕だけが 1.5 秒ごとに書き換わる。**
+     * 字幕は画面の一部しか占めないので距離は小さいが、
+     * **周りが静かな所で規則正しく立つ**ので「その場と比べる線」には都合が悪い。
+     * 帯を入れるなら、切りすぎる側の素材も一緒に要る。
+     */
+    name: 'captions-only',
+    note: '場面は変わらず、字幕だけが 1.5 秒ごとに書き換わる。カットは 1 つも無い',
+    hard: true,
+    cuts: [],
+    options: { seed: 119, captions: { top: 0.1, bottom: 0.16, changeEvery: 1.5 } },
   },
   {
     name: 'dark-noise',

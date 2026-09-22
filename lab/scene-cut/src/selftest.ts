@@ -75,6 +75,50 @@ function stripes(shift: number, width = W, height = H): FrameLike {
   return { width, height, data };
 }
 
+/**
+ * u（0〜1）・v（0〜1）から色を決める関数で 1 枚描く。
+ *
+ * **受け皿の大きさを変えても同じ絵**になるのが肝で、
+ * 「縦長の受け皿に描き直しても分布は動かない」を確かめるために要る
+ * （＝最初から縦で撮った向き `native` が、それ自体では何も測っていないことの検算）。
+ */
+function paint(f: (u: number, v: number) => [number, number, number], width = W, height = H): FrameLike {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const [r, g, b] = f((x + 0.5) / width, (y + 0.5) / height);
+      const p = (y * width + x) * 4;
+      data[p] = r;
+      data[p + 1] = g;
+      data[p + 2] = b;
+      data[p + 3] = 255;
+    }
+  }
+  return { width, height, data };
+}
+
+/**
+ * 上下に**動かない帯**（焼き込みの字幕・見出しのつもり）を乗せる。
+ *
+ * 帯は編集で最後に乗るものなので、場面が切り替わっても 1 画素も動かない。
+ * 分布どうしの距離は「動いた画素」しか数えないので、ここが距離を薄める。
+ */
+function withBars(frame: FrameLike, cover: number, ink = 40): FrameLike {
+  const { width, height } = frame;
+  const data = new Uint8ClampedArray(frame.data);
+  const rows = Math.round((height * cover) / 2);
+  for (let y = 0; y < height; y += 1) {
+    if (y >= rows && y < height - rows) continue;
+    for (let x = 0; x < width; x += 1) {
+      const p = (y * width + x) * 4;
+      data[p] = ink;
+      data[p + 1] = ink;
+      data[p + 2] = ink;
+    }
+  }
+  return { width, height, data };
+}
+
 /** コマの列を秒に並べる。 */
 function statsOf(frames: FrameLike[], fps = 15): FrameStat[] {
   return summarizeFrames(
@@ -588,11 +632,109 @@ export function runSelfTest(): TestResult[] {
     );
   }
 
+  // --- 焼き込みの文字帯と、縦向き（2026-09-22・3 回目） ---
+
+  {
+    // **受け皿を縦長にしただけでは、分布は 1 段も動かない。**
+    // `native`（最初から縦で撮った向き）は、それ自体では何も測っていない——
+    // 動くのは**素材の中身が縦向きに作られているとき**だけ、という対照をここで固定する。
+    const wave = (u: number, v: number): [number, number, number] => [
+      255 * (0.5 + 0.5 * Math.sin(u * 6.28)),
+      255 * v,
+      90,
+    ];
+    const wide = summarizeFrame(paint(wave, 128, 72), 0);
+    const tall = summarizeFrame(paint(wave, 72, 128), 0);
+    check(
+      '受け皿を縦長にしただけでは、分布は動かない（縦型それ自体は何も測らない）',
+      lumaHistDistance(wide, tall) < 0.02 && rgbHistDistance(wide, tall) < 0.02,
+      `明るさ ${lumaHistDistance(wide, tall).toFixed(4)} / 色 ${rgbHistDistance(wide, tall).toFixed(4)}`,
+    );
+  }
+
+  {
+    // **全面が変わるカットなら、帯は面積ぶんちょうど距離を薄める。**
+    // 帯の画素は両方のコマで同じなので、段ごとの差がそのまま (1-k) 倍になる。
+    const a = solid(10, 200, 40);
+    const b = solid(230, 30, 180);
+    const bare = combinedHistDistance(summarizeFrame(a, 0), summarizeFrame(b, 0));
+    const cover = 0.25;
+    const barred = combinedHistDistance(
+      summarizeFrame(withBars(a, cover), 0),
+      summarizeFrame(withBars(b, cover), 0),
+    );
+    // 行数の丸めがあるので、実際に塗った割合のほうで比べる。
+    const rows = Math.round((H * cover) / 2) * 2;
+    const k = rows / H;
+    check(
+      '動かない帯は、全面が変わるカットの距離を面積ぶん薄める',
+      approx(barred, bare * (1 - k), 1e-9),
+      `${bare.toFixed(3)} → ${barred.toFixed(3)}（面積 ${(k * 100).toFixed(0)}% / 予想 ${(bare * (1 - k)).toFixed(3)}）`,
+    );
+  }
+
+  {
+    // **ただし薄まる量は面積では決まらない。決めるのは「帯が隠した中身」のほう。**
+    // ここを面積だと思い込むと、素材で測ったときの 0.72〜0.85 のばらつきが
+    // 不具合に見えてしまう（実際は当たり前の振る舞い）。
+    const cover = 0.25;
+    const rows = Math.round((H * cover) / 2);
+    // 変わるのが真ん中だけなら、帯は何も隠していないので距離は動かない。
+    const midA = paint((_u, v) => (v > 0.4 && v < 0.6 ? [240, 20, 20] : [60, 60, 60]));
+    const midB = paint((_u, v) => (v > 0.4 && v < 0.6 ? [20, 20, 240] : [60, 60, 60]));
+    const midBare = combinedHistDistance(summarizeFrame(midA, 0), summarizeFrame(midB, 0));
+    const midBarred = combinedHistDistance(
+      summarizeFrame(withBars(midA, cover), 0),
+      summarizeFrame(withBars(midB, cover), 0),
+    );
+    // 逆に、変わるのが帯の下だけなら、帯はそれを丸ごと隠すので距離は 0 になる。
+    const edgeA = paint((_u, v) => (v < rows / H ? [240, 20, 20] : [60, 60, 60]));
+    const edgeB = paint((_u, v) => (v < rows / H ? [20, 20, 240] : [60, 60, 60]));
+    const edgeBarred = combinedHistDistance(
+      summarizeFrame(withBars(edgeA, cover), 0),
+      summarizeFrame(withBars(edgeB, cover), 0),
+    );
+    check(
+      '薄まる量を決めるのは帯の面積ではなく、帯が隠した中身',
+      approx(midBarred, midBare, 1e-9) && approx(edgeBarred, 0, 1e-12),
+      `真ん中が変わる ${midBare.toFixed(3)} → ${midBarred.toFixed(3)} / 帯の下だけ変わる → ${edgeBarred.toFixed(3)}`,
+    );
+  }
+
+  {
+    // **その場と比べる線は、帯の薄まりを素通りする。** 距離の列がまるごと定数倍されても
+    // 比は約分されるので、固定の線だけが余裕を失う。
+    // ——だから「帯には比で対抗できる」と読みたくなるが、それは半分しか正しくない。
+    // 下の検算のとおり、**字幕の書き換えは比では落ちない。**
+    const d = [0, 0.01, 0.01, 0.4, 0.01, 0.01, 0.01, 0.01, 0.01];
+    const thin = d.map((v) => v * 0.6);
+    check(
+      'その場と比べる線は、帯で一様に薄まっても変わらない',
+      approx(localRatioAt(d, 3, 30, 0), localRatioAt(thin, 3, 30, 0), 1e-9),
+      `${localRatioAt(d, 3, 30, 0).toFixed(1)} 倍 / 薄めても ${localRatioAt(thin, 3, 30, 0).toFixed(1)} 倍`,
+    );
+  }
+
+  {
+    // **字幕の書き換えは、比の側から見ると本物のカットと同じ顔をしている。**
+    // 周りが静かな所で小さく跳ねる——「周りが静かなのに跳ねたか」を見る線の、
+    // ちょうど真正面。止めているのは固定の線のほうだけなので、
+    // **帯のために線を下げるときは、この山を越えないところまで**にする。
+    const d = Array.from({ length: 40 }, (_, i) => (i === 0 ? 0 : i % 12 === 0 ? 0.03 : 0.002));
+    const ratio = localRatioAt(d, 12, 30, 0.002);
+    const line = DEFAULT_SCENE_CUT.localRatio ?? 0;
+    check(
+      '字幕の書き換えは比では落ちない（止めているのは固定の線だけ）',
+      ratio > line,
+      `比 ${ratio.toFixed(1)} 倍 > 線 ${line} 倍`,
+    );
+  }
+
   {
     check(
-      '既定は、組み合わせた量・線 0.10・またぐ幅 6 コマ・その場と比べて 4 倍（窓 30 コマ）・最短 0.4 秒',
+      '既定は、組み合わせた量・線 0.05・またぐ幅 6 コマ・その場と比べて 4 倍（窓 30 コマ）・最短 0.4 秒',
       DEFAULT_SCENE_CUT.metric === 'combined' &&
-        DEFAULT_SCENE_CUT.threshold === 0.1 &&
+        DEFAULT_SCENE_CUT.threshold === 0.05 &&
         DEFAULT_SCENE_CUT.straddleFrames === 6 &&
         DEFAULT_SCENE_CUT.localRatio === 4 &&
         DEFAULT_SCENE_CUT.localWindow === 30 &&

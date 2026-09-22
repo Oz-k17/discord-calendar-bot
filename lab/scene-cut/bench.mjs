@@ -3,6 +3,8 @@
  *
  *   npm run lab:scene
  *   npm run lab:scene:portrait          # 縦型（9:16 の切り出し）で測る
+ *   npm run lab:scene:native            # 縦型（最初から縦で撮った）で測る
+ *   LAB_CAPTIONS=0.26 npm run lab:scene # 全素材へ焼き込みの文字帯を乗せて測る
  *   LAB_FPS=30 npm run lab:scene      # コマの速さを変えて測る（つまみはコマ数で効く）
  *   LAB_NOGATE=1 npm run lab:scene   # またいだ距離の門を外す（入れる前の振る舞い）
  *   LAB_METRIC=grid npm run lab:scene
@@ -26,6 +28,13 @@ const { toClipEdits } = await import('../auto-cut/src/edits.ts');
 const aspect = process.env.LAB_ASPECT ?? 'landscape';
 const view = sceneAspect(aspect);
 const fps = Number(process.env.LAB_FPS ?? SCENE_FPS);
+// 焼き込みの文字帯を**全素材に**乗せて測る口（画面の高さの何割を覆うか）。
+// 短尺の実素材はたいてい字幕が焼かれているので、そのときの効きが既定の数字と別に要る。
+const captionCover = Number(process.env.LAB_CAPTIONS ?? 0);
+// 読めない値を黙って 0 にすると、「帯を乗せたつもりで乗っていない表」が出てしまう。
+if (!Number.isFinite(captionCover) || captionCover < 0 || captionCover >= 1) {
+  throw new Error(`LAB_CAPTIONS は 0 以上 1 未満です（${process.env.LAB_CAPTIONS}）`);
+}
 
 const options = {
   ...(process.env.LAB_NOGATE ? { straddleThreshold: 0 } : {}),
@@ -39,10 +48,11 @@ const pad = (s, n) => String(s).padEnd(n, ' ');
 const right = (s, n) => String(s).padStart(n, ' ');
 
 console.log(
-  `シーン検出の効き（正解と突き合わせ／向き ${aspect} ${view.label} ${view.width}×${view.height} ・ ${fps}fps）\n`,
+  `シーン検出の効き（正解と突き合わせ／向き ${aspect} ${view.label} ${view.width}×${view.height} ・ ${fps}fps` +
+    `${captionCover > 0 ? ` ・ 文字帯 ${(captionCover * 100).toFixed(0)}%` : ''}）\n`,
 );
 console.log(
-  `${pad('素材', 16)}${right('正解', 5)}${right('見つけた', 9)}${right('当たり', 7)}` +
+  `${pad('素材', 20)}${right('正解', 5)}${right('見つけた', 9)}${right('当たり', 7)}` +
     `${right('見逃し', 7)}${right('空振り', 7)}${right('ずれ(s)', 9)}  ${'落とした候補'}`,
 );
 console.log('-'.repeat(96));
@@ -54,7 +64,7 @@ const offsets = [];
 const details = [];
 
 for (const fixture of SCENE_FIXTURES) {
-  const clip = renderFixture(fixture.name, { aspect, fps });
+  const clip = renderFixture(fixture.name, { aspect, fps, captionCover });
   const stats = summarizeFrames(clip.frames, clip.times);
   const plan = planSceneCut(stats, options);
 
@@ -79,7 +89,7 @@ for (const fixture of SCENE_FIXTURES) {
     .join(' / ');
 
   console.log(
-    `${pad((fixture.hard ? '※ ' : '  ') + fixture.name, 16)}${right(truth.length, 5)}` +
+    `${pad((fixture.hard ? '※ ' : '  ') + fixture.name, 20)}${right(truth.length, 5)}` +
       `${right(plan.boundaries.length, 9)}${right(hit, 7)}${right(missed, 7)}${right(spurious, 7)}` +
       `${right(meanOffset === null ? '—' : meanOffset.toFixed(3), 9)}  ${reasons}`,
   );
@@ -92,7 +102,7 @@ const recall = totalTruth ? (totalHit / totalTruth) * 100 : 0;
 const precision = totalFound ? (totalHit / totalFound) * 100 : 0;
 const meanOffset = offsets.length ? offsets.reduce((a, b) => a + b, 0) / offsets.length : 0;
 console.log(
-  `${pad('  ぜんぶ', 16)}${right(totalTruth, 5)}${right(totalFound, 9)}${right(totalHit, 7)}` +
+  `${pad('  ぜんぶ', 20)}${right(totalTruth, 5)}${right(totalFound, 9)}${right(totalHit, 7)}` +
     `${right(totalTruth - totalHit, 7)}${right(totalFound - totalHit, 7)}${right(meanOffset.toFixed(3), 9)}`,
 );
 console.log(
@@ -136,7 +146,7 @@ if (!printed) console.log('  ありません。');
 // 場面は隙間なく並ぶので、`toClipEdits` に渡すと尺が 1 秒も減らないはず。
 console.log('\n\n切ったあとのクリップ（auto-cut の edits.ts へそのまま渡した）\n');
 {
-  const clip = renderFixture('cuts-plain', { aspect, fps });
+  const clip = renderFixture('cuts-plain', { aspect, fps, captionCover });
   const stats = summarizeFrames(clip.frames, clip.times);
   const plan = planSceneCut(stats, options);
   const placement = { start: 10, duration: 13, sourceIn: 0 };

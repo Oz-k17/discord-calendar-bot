@@ -32,6 +32,9 @@ npm run lab:build      # 単体で配れる形にする（lab/auto-cut/dist）
 npm run lab:frames       # 試し用の映像（コマの列）を作って一覧を出す
 npm run lab:scene:probe  # 「どの量ならカットを見分けられるか」を正解付きで測る
 npm run lab:scene        # シーン検出が実際どれくらい効くかを測る
+npm run lab:scene:portrait  # 同じものを縦型（9:16 の切り出し）で測る
+npm run lab:scene:native    # 同じものを縦型（最初から縦で撮った）で測る
+npm run lab:scene:captions  # 全素材へ焼き込みの文字帯を乗せて測る
 npm run lab:scene:demo   # シーン検出の画面を開く（本物の動画を読み込める）
 npm run lab:scene:uitest # シーン検出の画面まで通して確かめる（lab:uitest からも走る）
 

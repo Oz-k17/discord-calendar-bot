@@ -139,7 +139,7 @@ try {
   ok(
     '画面の既定が判定の側から来ている',
     defaults.scene.metric === 'combined' &&
-      defaults.scene.threshold === 0.1 &&
+      defaults.scene.threshold === 0.05 &&
       defaults.scene.straddleFrames === 6 &&
       defaults.scene.localRatio === 4 &&
       defaults.scene.minScene === 0.4 &&
@@ -178,7 +178,7 @@ try {
 
   // **ここがこの確認のいちばんの目的。** 画面で出た切り所を、コマンドラインと同じ物差しで
   // 採点し、コマンドラインの数字と突き合わせる。判定を画面でやり直していたらここでずれる。
-  for (const name of ['cuts-plain', 'cuts-rapid', 'dissolve', 'flash-cuts', 'quick-insert', 'pan']) {
+  for (const name of ['cuts-plain', 'cuts-rapid', 'dissolve', 'flash-cuts', 'quick-insert', 'pan', 'cuts-captions']) {
     const { state } = name === 'cuts-plain' ? plain : await feed(page, name);
     const cli = commandLine(name);
     const tol = toleranceFor(name);
@@ -190,6 +190,25 @@ try {
       `コマンドライン ${command.hit}/${command.missed}/${command.spurious} ・ 画面 ${screen.hit}/${screen.missed}/${screen.spurious}（正解 ${cli.cuts.length} 本）`,
     );
   }
+
+  // --- 焼き込みの文字帯（2026-09-22・3 回目） ---
+  //
+  // ここを画面で通す理由は 1 つで、**圧縮の粒が字幕の書き換えを押し上げないか**を見るため。
+  // 9/22（2 回目）に「圧縮の粒は小さい距離ほど押し上げる」と測ってあるので、
+  // 字幕の山（合成コマで 0.019）は**いちばん押し上げられやすい側**に居る。
+  // 固定の線を 0.10 → 0.05 へ下げた以上、ここは焼いた動画で確かめないと意味がない。
+  const capsCuts = await feed(page, 'cuts-captions');
+  ok(
+    '焼き込みの帯は、本物のカットの距離も薄める（焼いた動画でも）',
+    capsCuts.state.peak < plain.state.peak * 0.85 && capsCuts.state.boundaries.length === 3,
+    `帯なし ${plain.state.peak.toFixed(3)} → 帯あり ${capsCuts.state.peak.toFixed(3)}（切り所 ${capsCuts.state.boundaries.length} 本）`,
+  );
+  const capsOnly = await feed(page, 'captions-only');
+  ok(
+    '字幕だけが書き換わる素材は、圧縮を通しても 1 本も切らない',
+    capsOnly.state.boundaries.length === 0,
+    `${capsOnly.state.boundaries.length} 本（距離の最大 ${capsOnly.state.peak.toFixed(3)} / 線 0.05）`,
+  );
 
   // --- 自分の手を潰す素材 ---
   //
