@@ -32,7 +32,7 @@ import {
 import { renderFixture } from '../../fixtures/make-frames.mjs';
 
 /** `make-frames.mjs` が返すもの（.mjs なので型は無い。ここで最小限だけ名前を付ける）。 */
-interface RenderedClip {
+export interface RenderedClip {
   width: number;
   height: number;
   fps: number;
@@ -51,28 +51,38 @@ export interface EncodedFixture {
 }
 
 /**
- * 素材 1 本を WebM に焼く。
+ * 描いたコマの列を WebM に焼く。**素材の一覧に依らない**ので、
+ * シーン検出の素材（`scenes.mjs`）でも表紙の素材（`thumbs.mjs`）でも同じものを通せる。
  *
  * ビットレートを素材の大きさのわりに高く取ってあるのは、
  * **確かめたいのが圧縮の限界ではなく配線だから**。それでも粒は乗るので、
  * `uitest.mjs` の突き合わせには幅を持たせてある。
+ *
+ * `scale` は焼くときの拡大率。**表紙の側が要る**つまみで、
+ * 「測るコマ（長辺 128 へ縮める）」と「書き出すコマ（素材の大きさ）」が
+ * 別物であることを確かめるには、素材が 128 より大きくないと差が出ない。
+ * 拡大は補間で引き伸ばすだけなので、どの秒に何が写っているかは 1 つも動かない。
  */
-export async function encodeFixture(
-  name: string,
-  { aspect = 'landscape', fps }: { aspect?: string; fps?: number } = {},
-): Promise<EncodedFixture> {
-  const clip = renderFixture(name, { aspect, ...(fps ? { fps } : {}) }) as RenderedClip;
+export async function encodeClip(clip: RenderedClip, { scale = 1 }: { scale?: number } = {}): Promise<EncodedFixture> {
+  const width = Math.round(clip.width * scale);
+  const height = Math.round(clip.height * scale);
 
   const canvas = document.createElement('canvas');
-  canvas.width = clip.width;
-  canvas.height = clip.height;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('キャンバスを初期化できませんでした');
 
-  const codec = await getFirstEncodableVideoCodec(['vp9', 'vp8'], {
-    width: clip.width,
-    height: clip.height,
-  });
+  // 拡大するときだけ、いったん等倍へ描いてから引き伸ばす受け皿を作る
+  // （`putImageData` は拡大しないので、`drawImage` を挟まないと左上に貼られるだけになる）。
+  const source2d = scale === 1 ? null : document.createElement('canvas');
+  if (source2d) {
+    source2d.width = clip.width;
+    source2d.height = clip.height;
+  }
+  const sourceCtx = source2d?.getContext('2d', { alpha: false }) ?? null;
+
+  const codec = await getFirstEncodableVideoCodec(['vp9', 'vp8'], { width, height });
   if (!codec) throw new Error('この環境では映像を焼けるコーデックが見つかりませんでした');
 
   const output = new Output({ format: new WebMOutputFormat(), target: new BufferTarget() });
@@ -88,7 +98,13 @@ export async function encodeFixture(
   await output.start();
   for (let i = 0; i < clip.frames.length; i += 1) {
     const frame = clip.frames[i];
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height), 0, 0);
+    const image = new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height);
+    if (sourceCtx && source2d) {
+      sourceCtx.putImageData(image, 0, 0);
+      ctx.drawImage(source2d, 0, 0, width, height);
+    } else {
+      ctx.putImageData(image, 0, 0);
+    }
     await source.add(i / clip.fps, 1 / clip.fps);
   }
   await output.finalize();
@@ -99,12 +115,20 @@ export async function encodeFixture(
   return {
     bytes: new Uint8Array(buffer),
     cuts: clip.cuts,
-    width: clip.width,
-    height: clip.height,
+    width,
+    height,
     fps: clip.fps,
     frames: clip.frames.length,
     codec,
   };
+}
+
+/** シーン検出の素材 1 本を WebM に焼く。 */
+export async function encodeFixture(
+  name: string,
+  { aspect = 'landscape', fps }: { aspect?: string; fps?: number } = {},
+): Promise<EncodedFixture> {
+  return encodeClip(renderFixture(name, { aspect, ...(fps ? { fps } : {}) }) as RenderedClip);
 }
 
 declare global {
