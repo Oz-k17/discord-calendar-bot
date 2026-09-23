@@ -114,6 +114,14 @@ async function feed(page, name, { aspect = 'landscape' } = {}) {
   return { encoded, state: await page.evaluate(() => window.__labThumb.state()) };
 }
 
+/**
+ * 書き出しの形式を切り替える。**選び直しは起きない**ので、待つのは大きさの測り直しだけ。
+ */
+async function setExport(page, format) {
+  await page.locator('#export-format').selectOption(format);
+  await page.waitForTimeout(400);
+}
+
 /** つまみを動かして、選び直しが回りきるまで待つ。 */
 async function setRange(page, selector, value, settle = 500) {
   await page.locator(selector).evaluate((el, v) => {
@@ -167,8 +175,12 @@ try {
       defaults.pick.minDistance === 0.15 &&
       defaults.pick.flashHigh === 1.4 &&
       defaults.analysisFps === 15 &&
-      defaults.exportLongSide === 1920,
-    `${JSON.stringify(defaults.pick)} / ${defaults.analysisFps}fps / 書き出し ${defaults.exportLongSide}`,
+      defaults.exportLongSide === 1920 &&
+      defaults.exportFormat === 'png' &&
+      defaults.jpegQuality === 0.9 &&
+      defaults.jpegQualityMax === 0.95,
+    `${JSON.stringify(defaults.pick)} / ${defaults.analysisFps}fps / 書き出し ${defaults.exportLongSide} ・ ` +
+      `${defaults.exportFormat}・JPEG ${defaults.jpegQuality}（上限 ${defaults.jpegQualityMax}）`,
   );
 
   // --- 焼く → 読む → 点を付ける → 候補を出す ---
@@ -185,7 +197,8 @@ try {
     `${whip.state.width}×${whip.state.height}`,
   );
   ok('コマの欠けが無い', whip.state.missing === 0, `${whip.state.missing} 枚`);
-  ok('統計が画面に出る', (await page.locator('#thumb-stats div').count()) === 8);
+  // 8 → 10（2026-09-23・3 回目に「書き出しの形式」と「いちばん重い 1 枚」を足した）。
+  ok('統計が画面に出る', (await page.locator('#thumb-stats div').count()) === 10, `${await page.locator('#thumb-stats div').count()} 件`);
   ok('点の列と選んだコマが描かれている', await hasInk(page, 'thumb-canvas'));
   ok(
     '候補が絵として並ぶ',
@@ -234,6 +247,47 @@ try {
     name.join(' / ') || '押せていない',
   );
 
+  // --- 書き出しの形式（2026-09-23・3 回目に足した） ---
+  //
+  // PNG しか無かったところへ JPEG を足した。確かめたいのは 3 つ:
+  //   1. 本物の JPEG が出るか（札だけ変わって中身が PNG のまま、が起こりうる）
+  //   2. 名前の拡張子が中身と揃うか（`.png` の名前で JPEG が落ちると、
+  //      開けはするので**受け取る側が弾くまで誰も気づかない**）
+  //   3. 測って決めた「1 割になる」が、画面を通しても本当か
+  await setExport(page, 'jpeg');
+  const jpeg = await page.evaluate(async () => {
+    const blob = await window.__labThumb.image(0);
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    return { type: blob.type, size: blob.size, head: [...bytes.slice(0, 3)], settings: window.__labThumb.exportSettings() };
+  });
+  ok(
+    '書き出した絵は本物の JPEG',
+    jpeg.type === 'image/jpeg' && jpeg.head.join(',') === '255,216,255' && jpeg.size > 500,
+    `${jpeg.type} ・ ${jpeg.size} バイト ・ 先頭 ${jpeg.head.join(' ')}`,
+  );
+  ok(
+    '名前の拡張子が中身と揃う（JPEG に .png を付けない）',
+    /\.jpg$/.test(jpeg.settings.name ?? '') && jpeg.settings.format === 'jpeg' && jpeg.settings.quality === 0.9,
+    `${jpeg.settings.name} ・ 品質 ${jpeg.settings.quality}`,
+  );
+  ok(
+    'JPEG は PNG の 2 割以下（測って決めた既定どおり）',
+    jpeg.size < png.size * 0.2,
+    `JPEG ${jpeg.size} ・ PNG ${png.size} ・ ${((jpeg.size / png.size) * 100).toFixed(1)}%`,
+  );
+  // **品質の上限は 1.0 を選ばせない**（`export.ts` の注: 0.95 の 3〜4 倍になるのに誤差は動かない）。
+  const clamped = await page.evaluate(async () => {
+    const blob = await window.__labThumb.image(0, { format: 'jpeg', quality: 1 });
+    const top = await window.__labThumb.image(0, { format: 'jpeg', quality: 0.95 });
+    return { clamped: blob.size, top: top.size };
+  });
+  ok(
+    '品質 1.0 を頼まれても上限（0.95）で焼く',
+    clamped.clamped === clamped.top,
+    `1.0 → ${clamped.clamped} バイト ・ 0.95 → ${clamped.top} バイト`,
+  );
+  await setExport(page, 'png');
+
   // --- **この画面のいちばん静かな壊れ方**: 選んだ秒と書き出す秒が 1 コマずれる ---
   //
   // 絵は出るし、大きさも合うし、点も出る。違うのは「写っているもの」だけなので、
@@ -250,6 +304,27 @@ try {
     '書き出した絵は、選んだコマと同じ絵（別の候補とは桁が違う）',
     cmp.self < 0.05 && cmp.others.every((d) => d > cmp.self * 3),
     `自分と ${cmp.self.toFixed(4)} ・ ほかの候補と ${cmp.others.map((d) => d.toFixed(4)).join(' ')}`,
+  );
+  // **同じことを JPEG でも見る。** 形式を足すと `toBlob` の呼び方が分かれるので、
+  // 片方だけが正しいコマを出す、という壊れ方が新しく作れてしまった。
+  //
+  // **絶対値の線は形式ごとに違う。** ここは書いたとき「非可逆でもほとんど動かないはず」と
+  // 見立てて PNG と同じ 0.05 を置き、**落ちた**——JPEG の隔たりは PNG の **3 倍**
+  // （0.0176 → 0.0543）になる。`lab:thumb:format` で測った上乗せ（cuts-plain・品質 0.90 で
+  // 0.0203）と辻褄が合うので、これは配線の綻びではなく非可逆そのものの量。
+  // **見たいのは絶対値ではなく、別の候補との桁の違い**（9/23・2 回目に書いたとおり）なので、
+  // 絶対値は「上乗せの上限」として置き、判定の主は比のほうに任せる。
+  const cmpJpeg = await page.evaluate(() => window.__labThumbCompare(0, { format: 'jpeg' }));
+  ok(
+    'JPEG でも、選んだコマと同じ絵が出る（別の候補とは桁が違う）',
+    cmpJpeg.type === 'image/jpeg' && cmpJpeg.self < 0.08 && cmpJpeg.others.every((d) => d > cmpJpeg.self * 5),
+    `自分と ${cmpJpeg.self.toFixed(4)} ・ ほかの候補と ${cmpJpeg.others.map((d) => d.toFixed(4)).join(' ')}` +
+      `（いちばん近いほかの候補まで ${(Math.min(...cmpJpeg.others) / cmpJpeg.self).toFixed(1)} 倍）`,
+  );
+  ok(
+    '非可逆の上乗せは、別の候補との隔たりに比べて小さいまま',
+    cmpJpeg.self - cmp.self < 0.05 && cmpJpeg.self < Math.min(...cmpJpeg.others) / 5,
+    `PNG ${cmp.self.toFixed(4)} → JPEG ${cmpJpeg.self.toFixed(4)}（上乗せ ${(cmpJpeg.self - cmp.self).toFixed(4)}）`,
   );
 
   // --- 画面とコマンドラインを、同じ物差しで突き合わせる ---

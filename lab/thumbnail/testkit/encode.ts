@@ -66,13 +66,18 @@ window.__labThumbEncode = encodeThumbFixture;
  * （書き出しは素材の大きさから、測るコマは長辺 128 から、それぞれ別に縮めている）。
  * 見たいのは 0 かどうかではなく、**別のコマと比べたときに桁が違うか**。
  */
-export async function compareExport(order: number): Promise<{ self: number; others: number[] }> {
+export async function compareExport(
+  order: number,
+  options: { format?: 'png' | 'jpeg'; quality?: number } = {},
+): Promise<{ self: number; others: number[]; type: string; bytes: number }> {
   const { combinedHistDistance, summarizeFrames } = await import('../../scene-cut/src/frames.ts');
 
   const mine = window.__labThumb.analysisFrame(order);
   if (!mine) throw new Error(`候補 ${order} はありません`);
 
-  const blob = await window.__labThumb.png(order);
+  // 形式を渡せるようにしてある。**非可逆でも同じ絵が出ることを確かめたい**ので、
+  // PNG の道だけを見ていたのでは足りない（JPEG は別の `toBlob` を通る）。
+  const blob = await window.__labThumb.image(order, options);
   const bitmap = await createImageBitmap(blob);
   const canvas = document.createElement('canvas');
   canvas.width = mine.width;
@@ -92,7 +97,7 @@ export async function compareExport(order: number): Promise<{ self: number; othe
   }
   const stats = summarizeFrames(frames, frames.map((_, i) => i));
   for (let i = 2; i < stats.length; i += 1) others.push(combinedHistDistance(stats[0], stats[i]));
-  return { self: combinedHistDistance(stats[0], stats[1]), others };
+  return { self: combinedHistDistance(stats[0], stats[1]), others, type: blob.type, bytes: blob.size };
 }
 
 declare global {

@@ -116,8 +116,71 @@ export async function decodeFramesAt(
   }
 }
 
-/** コマ 1 枚を PNG にする。表紙は文字や線が乗る前提なので、非可逆では出さない。 */
-export async function frameToPng(frame: FrameLike): Promise<Blob> {
+/**
+ * 書き出せる形式。**中身は `npm run lab:thumb:format` で測って決めた**（2026-09-23・3 回目）。
+ *
+ * ここに 9/23（2 回目）までは「表紙は文字や線が乗る前提なので、非可逆では出さない」と
+ * 書いてあった。**測ったら、そうではなかった。** 焼き込みの文字帯を持つ素材
+ * （`whip-captions`・画面の 26%）で帯の中と外を分けて測ると、品質 0.85 以上では
+ * **帯の中のほうが帯の外より誤差が小さい**（0.90 で 0.36 対 0.58 / 255）。
+ * 平らな板に硬い縁という形は 8×8 の升目とよく噛み合うので、非可逆が苦手な相手ではない。
+ * 帯が外より荒れるのは品質 0.70 以下だけで、そこはもう誰も使わない領域だった。
+ *
+ * 既定を PNG のままにしてあるのは**文字のためではなく、置き先が決まっていないから**。
+ * 可逆なら、書き出した絵を測り直したときに選んだときの点とそのまま比べられる。
+ * 置き先（配信サイトの一覧）が決まれば JPEG へ寄せてよい——そのための札がこれ。
+ */
+export const EXPORT_FORMATS = {
+  png: { type: 'image/png', ext: 'png', lossy: false, label: 'PNG（可逆・大きい）' },
+  jpeg: { type: 'image/jpeg', ext: 'jpg', lossy: true, label: 'JPEG（非可逆・1 割の大きさ）' },
+} as const;
+
+export type ExportFormat = keyof typeof EXPORT_FORMATS;
+
+/** 既定の形式。上の注のとおり、置き先が決まっていないので可逆のまま。 */
+export const DEFAULT_EXPORT_FORMAT: ExportFormat = 'png';
+
+/**
+ * JPEG の既定の品質。測って決めた（`format-probe.mjs`）。
+ *
+ * 実寸（1920×1080）で **PNG の 9〜13%**（103〜129KB 対 852〜1476KB）まで落ちて、
+ * 明るさの食い違いは **0.53〜0.59 / 255 ＝ 0.2%**。ここから品質を上げても、
+ * 大きさだけが増えて誤差はほとんど動かない（0.95 で 1.6 倍・誤差は 0.07 しか縮まない）。
+ */
+export const DEFAULT_JPEG_QUALITY = 0.9;
+
+/**
+ * JPEG の品質の上限。**1.0 を選ばせない。**
+ *
+ * 測ると 1.0 は 0.95 の **3〜4 倍**の大きさになるのに、誤差は 0.1 / 255 しか縮まない。
+ * しかも**細かさへの粗はそこでいちばん大きい**（足す量 +0.00036。0.90 では +0.0001 前後）。
+ * 量子化が粗を丸めてくれなくなるぶん、画素ごとの丸め誤差がそのまま残るためで、
+ * **「いちばん高い品質がいちばん元に近い」が、この量では成り立たない。**
+ * 上限を 0.95 に置いて、押せない所へ寄せてある。
+ */
+export const JPEG_QUALITY_MAX = 0.95;
+export const JPEG_QUALITY_MIN = 0.5;
+
+/** 品質を使える範囲へ収める。**範囲の外を黙って通さない**（上の注の 1.0 がそれ）。 */
+export function clampQuality(quality: number): number {
+  if (!Number.isFinite(quality)) return DEFAULT_JPEG_QUALITY;
+  return Math.min(JPEG_QUALITY_MAX, Math.max(JPEG_QUALITY_MIN, quality));
+}
+
+/**
+ * コマ 1 枚を絵のファイルにする。
+ *
+ * **非可逆は細かさを削らない。足す。** これも測って分かったことで、
+ * JPEG を通した絵の細かさ（`grad`）は元のコマより必ず大きくなる（素材 4 本・品質 7 通りで
+ * 例外なし）。表紙を選ぶ根拠が書き出しで消える心配をしていたが、向きは逆だった。
+ * 足す量は**絶対値でほぼ一定**（品質 1.0 でどの素材も +0.00036）なので、
+ * 元が滑らかな素材ほど比が大きく出る——**比だけを見ると素材の話を形式の話と読み違える。**
+ */
+export async function frameToImage(
+  frame: FrameLike,
+  { format = DEFAULT_EXPORT_FORMAT, quality = DEFAULT_JPEG_QUALITY }: { format?: ExportFormat; quality?: number } = {},
+): Promise<Blob> {
+  const spec = EXPORT_FORMATS[format] ?? EXPORT_FORMATS[DEFAULT_EXPORT_FORMAT];
   const canvas = document.createElement('canvas');
   canvas.width = frame.width;
   canvas.height = frame.height;
@@ -125,8 +188,19 @@ export async function frameToPng(frame: FrameLike): Promise<Blob> {
   if (!ctx) throw new Error('キャンバスを初期化できませんでした');
   ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height), 0, 0);
   return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('絵を書き出せませんでした'))), 'image/png');
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error(`${spec.ext} で書き出せませんでした`))),
+      spec.type,
+      // PNG に品質を渡しても無視されるが、**渡さない**ほうがよい。
+      // 渡すと「PNG にも品質のつまみがある」と読まれる。
+      spec.lossy ? clampQuality(quality) : undefined,
+    );
   });
+}
+
+/** コマ 1 枚を PNG にする（`frameToImage` の既定そのもの）。 */
+export async function frameToPng(frame: FrameLike): Promise<Blob> {
+  return frameToImage(frame, { format: 'png' });
 }
 
 /** 絵をファイルとして保存させる。`URL` は必ず捨てる（貼りっぱなしだと絵が居座る）。 */
@@ -146,8 +220,13 @@ export function saveBlob(blob: Blob, filename: string) {
  * 3 枚まとめて落とすと、名前が同じだと `(1)` `(2)` が付いて
  * どれがどの秒か分からなくなる。素材の名前も残しておけば、
  * 別の素材の候補と同じフォルダへ落としても混ざらない。
+ *
+ * 拡張子は**形式から引く**。ここを固定で `.png` と書いておくと、
+ * JPEG の中身に `.png` の名前が付いて落ちる——開けはするが、
+ * 受け取る側が拡張子で弾く所（配信サイトの一覧）では黙って蹴られる。
  */
-export function exportName(source: string, time: number): string {
+export function exportName(source: string, time: number, format: ExportFormat = DEFAULT_EXPORT_FORMAT): string {
   const base = source.replace(/\.[^.]+$/, '').replace(/[^\w\-一-龠ぁ-んァ-ヶ]+/g, '_') || 'thumb';
-  return `${base}_${time.toFixed(2).replace('.', 'p')}s.png`;
+  const spec = EXPORT_FORMATS[format] ?? EXPORT_FORMATS[DEFAULT_EXPORT_FORMAT];
+  return `${base}_${time.toFixed(2).replace('.', 'p')}s.${spec.ext}`;
 }

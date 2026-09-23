@@ -40,7 +40,8 @@
     "lab:thumb:portrait": "LAB_ASPECT=portrait node lab/thumbnail/bench.mjs",
     "lab:thumb:native": "LAB_ASPECT=native node lab/thumbnail/bench.mjs",
     "lab:thumb:demo": "vite lab/thumbnail",
-    "lab:thumb:uitest": "node lab/thumbnail/uitest.mjs"
+    "lab:thumb:uitest": "node lab/thumbnail/uitest.mjs",
+    "lab:thumb:format": "node lab/thumbnail/format-probe.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",

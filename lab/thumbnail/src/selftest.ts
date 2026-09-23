@@ -26,6 +26,17 @@ import {
   sharpnessSeries,
   type PickOptions,
 } from './pick.ts';
+import {
+  DEFAULT_EXPORT_FORMAT,
+  DEFAULT_JPEG_QUALITY,
+  EXPORT_FORMATS,
+  EXPORT_LONG_SIDE,
+  JPEG_QUALITY_MAX,
+  JPEG_QUALITY_MIN,
+  clampQuality,
+  exportName,
+  exportSize,
+} from './export.ts';
 
 export interface TestResult {
   name: string;
@@ -303,6 +314,90 @@ export function runSelfTest(): TestResult[] {
     `${DEFAULT_PICK.sharpness}/${DEFAULT_PICK.floorBase}/${DEFAULT_PICK.qualityFloor}`,
   );
   check('升目は 8×8', DETAIL_W === 8 && DETAIL_H === 8);
+
+  // --- 書き出し（2026-09-23・3 回目に形式を足した） ---
+  //
+  // `frameToImage` そのものは canvas が要るので、ここでは確かめられない
+  // （画面の側は `uitest.mjs` が本物の JPEG として読めるかまで見る）。
+  // ここで押さえるのは**名前と数の約束**——形式を足したときに黙って崩れるのはそちら。
+
+  check(
+    '名前の拡張子が形式から来る（JPEG に .png を付けて落とさない）',
+    exportName('cuts.webm', 3.5, 'png') === 'cuts_3p50s.png' &&
+      exportName('cuts.webm', 3.5, 'jpeg') === 'cuts_3p50s.jpg',
+    `${exportName('cuts.webm', 3.5, 'png')} / ${exportName('cuts.webm', 3.5, 'jpeg')}`,
+  );
+  check(
+    '形式を言わなければ既定（PNG）で名前を付ける',
+    exportName('cuts.webm', 3.5) === exportName('cuts.webm', 3.5, DEFAULT_EXPORT_FORMAT),
+    exportName('cuts.webm', 3.5),
+  );
+  check(
+    '秒は名前に残る（3 枚落として混ざらないため）',
+    exportName('a.webm', 0) === 'a_0p00s.png' && exportName('a.webm', 12.345, 'jpeg') === 'a_12p35s.jpg',
+    `${exportName('a.webm', 0)} / ${exportName('a.webm', 12.345, 'jpeg')}`,
+  );
+  check(
+    '名前の無い素材でも名前が作れる',
+    exportName('', 1, 'jpeg') === 'thumb_1p00s.jpg',
+    exportName('', 1, 'jpeg'),
+  );
+
+  // **1.0 を通さない。** 0.95 の 3〜4 倍の大きさになるのに誤差は 0.1/255 しか縮まず、
+  // 細かさへの粗はそこでいちばん大きい（`export.ts` の注・`lab:thumb:format` で測った）。
+  check(
+    '品質は範囲の外を黙って通さない（1.0 を選ばせない）',
+    clampQuality(1) === JPEG_QUALITY_MAX &&
+      clampQuality(0) === JPEG_QUALITY_MIN &&
+      clampQuality(0.9) === 0.9 &&
+      clampQuality(Number.NaN) === DEFAULT_JPEG_QUALITY,
+    `1→${clampQuality(1)} / 0→${clampQuality(0)} / NaN→${clampQuality(Number.NaN)}`,
+  );
+  check(
+    '既定は PNG・JPEG は 0.90（測って決めた。export.ts の注）',
+    DEFAULT_EXPORT_FORMAT === 'png' && DEFAULT_JPEG_QUALITY === 0.9 && JPEG_QUALITY_MAX === 0.95,
+    `${DEFAULT_EXPORT_FORMAT} / ${DEFAULT_JPEG_QUALITY} / 上限 ${JPEG_QUALITY_MAX}`,
+  );
+  check(
+    '形式の札に矛盾が無い（非可逆なのは JPEG だけ・拡張子は重ならない）',
+    (() => {
+      const specs = Object.values(EXPORT_FORMATS);
+      const exts = new Set(specs.map((f) => f.ext));
+      return (
+        exts.size === specs.length &&
+        specs.filter((f) => f.lossy).length === 1 &&
+        EXPORT_FORMATS.jpeg.lossy &&
+        !EXPORT_FORMATS.png.lossy
+      );
+    })(),
+    Object.entries(EXPORT_FORMATS).map(([k, v]) => `${k}→.${v.ext}${v.lossy ? '(非可逆)' : ''}`).join(' '),
+  );
+
+  // 書き出す大きさ。**素材より大きくはしない**（無い細かさは作れない）。
+  check(
+    '長辺の上限まで縮める・素材が小さければ拡大しない',
+    (() => {
+      const big = exportSize(3840, 2160, EXPORT_LONG_SIDE);
+      const small = exportSize(640, 360, EXPORT_LONG_SIDE);
+      const tall = exportSize(1080, 1920, EXPORT_LONG_SIDE);
+      return (
+        big.width === 1920 &&
+        big.height === 1080 &&
+        small.width === 640 &&
+        small.height === 360 &&
+        tall.width === 1080 &&
+        tall.height === 1920
+      );
+    })(),
+    `${JSON.stringify(exportSize(3840, 2160, EXPORT_LONG_SIDE))} / ${JSON.stringify(exportSize(640, 360, EXPORT_LONG_SIDE))}`,
+  );
+  check(
+    '大きさが 0 でも 0 を返さない（0 の canvas は作れない）',
+    (() => {
+      const zero = exportSize(0, 0, EXPORT_LONG_SIDE);
+      return zero.width >= 1 && zero.height >= 1;
+    })(),
+  );
 
   return results;
 }

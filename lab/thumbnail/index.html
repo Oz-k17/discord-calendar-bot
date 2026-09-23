@@ -59,6 +59,28 @@
           <strong>条件を緩めて入れた 1 枚には理由が付きます</strong>——
           黙って混ぜると「3 枚とも同じくらい良い」と読めてしまうためです。
         </p>
+        <div class="controls export-controls">
+          <label>
+            書き出す形式
+            <select id="export-format">
+              <option value="png">PNG（可逆・大きい）</option>
+              <option value="jpeg">JPEG（非可逆・1 割の大きさ）</option>
+            </select>
+            <small>
+              <strong>「文字が乗るから非可逆は駄目」は測ったら違った</strong>——
+              焼き込みの文字帯は品質 0.85 以上なら<strong>帯の外より誤差が小さい</strong>
+              （<code>npm run lab:thumb:format</code>）
+            </small>
+          </label>
+          <label>
+            JPEG の品質 <output id="out-jpeg-quality"></output>
+            <input type="range" id="jpeg-quality" min="0.5" max="0.95" step="0.05" value="0.9" />
+            <small>
+              <strong>1.0 は置いていない。</strong> 0.95 の 3〜4 倍の大きさになるのに誤差は
+              0.1/255 しか縮まず、<strong>細かさへの粗はそこでいちばん大きい</strong>
+            </small>
+          </label>
+        </div>
         <div class="picks" id="thumb-picks"></div>
         <p class="muted" id="thumb-picks-note">まだ何も読み込んでいません。</p>
       </section>

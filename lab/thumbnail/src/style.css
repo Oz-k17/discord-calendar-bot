@@ -71,3 +71,23 @@
   margin-top: 6px;
   width: 100%;
 }
+
+/*
+ * 書き出しの形式のつまみ。**候補の絵のすぐ上に置く**。
+ *
+ * 選び方のつまみ（3 の段）と混ぜないのは、こちらが候補を選び直さないため——
+ * 形式を変えても出てくるコマは同じで、変わるのは「それを何で焼くか」だけ。
+ * 同じ列に並べると、回すと候補が変わるつまみと見分けが付かない。
+ */
+.export-controls {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  padding: 10px 12px;
+  border: 1px solid var(--line, #2a2d33);
+  border-radius: 6px;
+  margin-bottom: 14px;
+}
+
+/* 品質は PNG のときに触れない。**触れないことが見えるように**薄くする。 */
+.export-controls input:disabled {
+  opacity: 0.35;
+}

@@ -22,7 +22,21 @@ import { summarizeFrames, type FrameStat } from '../../scene-cut/src/frames.ts';
 import { ANALYSIS_FPS, decodeVideoFrames, type DecodedClip } from '../../scene-cut/src/decode.ts';
 import { summarizeThumbs, type ThumbStat } from './thumb.ts';
 import { DEFAULT_PICK, exposureScore, flashScore, pickThumbnails, sharpnessSeries, type PickOptions, type ThumbPick } from './pick.ts';
-import { EXPORT_LONG_SIDE, decodeFramesAt, exportName, frameToPng, saveBlob, type ExportedFrame } from './export.ts';
+import {
+  DEFAULT_EXPORT_FORMAT,
+  DEFAULT_JPEG_QUALITY,
+  EXPORT_FORMATS,
+  EXPORT_LONG_SIDE,
+  JPEG_QUALITY_MAX,
+  JPEG_QUALITY_MIN,
+  clampQuality,
+  decodeFramesAt,
+  exportName,
+  frameToImage,
+  saveBlob,
+  type ExportFormat,
+  type ExportedFrame,
+} from './export.ts';
 import { runSelfTest } from './selftest.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -58,6 +72,19 @@ const exported = new Map<number, ExportedFrame>();
 let exporting = false;
 
 /**
+ * 書き出したときの大きさ（バイト）。鍵は「コマ番号・形式・品質」。
+ *
+ * **押す前に見せる。** PNG は実寸（1920×1080）で 0.85〜1.5MB まで来るので、
+ * 置き先の上限（配信サイトはだいたい 2MB）に当たるかどうかは**押したあとでは遅い**。
+ * 形式を選ぶ画面で大きさが見えないと、選ぶ材料が画面に無いことになる。
+ * 焼いて `size` だけ読んで捨てる（絵は保存のときに焼き直す。持っておくほうが高くつく）。
+ */
+const sizes = new Map<string, number>();
+const sizeKey = (index: number, format: ExportFormat, quality: number) =>
+  `${index}:${format}:${format === 'png' ? '—' : quality.toFixed(2)}`;
+let measuringSizes = false;
+
+/**
  * 読み込みと書き出しの順番待ち。
  *
  * シーン検出の画面と同じ作りだが、こちらは**書き出しの読み直しも同じ列に並べる**。
@@ -81,6 +108,7 @@ async function load(file: Blob & { name?: string }) {
   const status = $<HTMLParagraphElement>('thumb-status');
   loading = true;
   exported.clear();
+  sizes.clear();
   status.className = 'status';
   status.textContent = `${file.name ?? '素材'} を読み込んでいます…`;
   try {
@@ -132,6 +160,17 @@ function currentOptions(): Partial<PickOptions> {
   };
 }
 
+/**
+ * いまの書き出しの設定。**既定は `export.ts` が持っている**（画面に直書きしない）。
+ */
+function currentExport(): { format: ExportFormat; quality: number } {
+  const format = ($<HTMLSelectElement>('export-format').value as ExportFormat) ?? DEFAULT_EXPORT_FORMAT;
+  return {
+    format: format in EXPORT_FORMATS ? format : DEFAULT_EXPORT_FORMAT,
+    quality: clampQuality(Number($<HTMLInputElement>('jpeg-quality').value)),
+  };
+}
+
 function refresh() {
   if (!loaded) return;
   const o = { ...DEFAULT_PICK, ...currentOptions() };
@@ -175,8 +214,45 @@ function queueExports() {
       exporting = false;
       showPicks();
       showStats();
+      measureSizes();
     }
   });
+}
+
+/**
+ * いまの形式で、候補がそれぞれ何バイトになるかを測る。
+ *
+ * 読み直しと同じ列には並べない（デコーダを開かないので待たせる理由が無い）。
+ * **測れたぶんから順に出す。** 3 枚ぜんぶ揃うまで黙っていると、
+ * 重い素材で「大きさの欄がずっと空のまま」になり、壊れているのと区別が付かない。
+ */
+async function measureSizes() {
+  if (!loaded || measuringSizes) return;
+  const { format, quality } = currentExport();
+  const want = picks.filter((p) => exported.has(p.index) && !sizes.has(sizeKey(p.index, format, quality)));
+  if (!want.length) return;
+  measuringSizes = true;
+  try {
+    for (const pick of want) {
+      const frame = exported.get(pick.index);
+      if (!frame) continue;
+      const blob = await frameToImage(frame, { format, quality });
+      sizes.set(sizeKey(pick.index, format, quality), blob.size);
+      showPicks();
+    }
+  } catch {
+    // 見積りが出せなくても画面は死なせない（保存そのものは別の道）。
+  } finally {
+    measuringSizes = false;
+    showStats();
+  }
+  // 測っているあいだに形式を変えられていたら、**その形式ぶんが誰にも測られずに残る**
+  // （入口で `measuringSizes` を見て帰っているので、変えた側の呼び出しは何もしていない）。
+  // 絵の大きさの欄が「—」のまま固まるが、押せば出るので数字のどこにも出ない壊れ方。
+  const now = currentExport();
+  if (picks.some((p) => exported.has(p.index) && !sizes.has(sizeKey(p.index, now.format, now.quality)))) {
+    void measureSizes();
+  }
 }
 
 // ---------- 描画 ----------
@@ -298,6 +374,20 @@ function drawFrame(canvas: HTMLCanvasElement, frame: { width: number; height: nu
   ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height), 0, 0);
 }
 
+/**
+ * 置き先が受け取れる大きさの目安。
+ *
+ * **判定には使っていない**（画面で知らせるためだけの数）。本当の上限は置き先ごとに違うので、
+ * 決め打ちの線として `export.ts` には置かない。ここに置いてあるのは、
+ * 画面が知らせるときの根拠を 1 か所に集めるため。
+ */
+const DESTINATION_LIMIT_BYTES = 2 * 1024 * 1024;
+
+/** バイト数を人の読む形へ。**KB / MB を混ぜない**（並べたときに大小が読めなくなる）。 */
+function formatBytes(bytes: number): string {
+  return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(2)} MB` : `${Math.round(bytes / 1024)} KB`;
+}
+
 const WHY: Record<string, string> = {
   similar: '似た絵を避ける条件を緩めた',
   gap: '時間で離す条件を緩めた',
@@ -324,6 +414,7 @@ function showPicks() {
     return;
   }
 
+  const { format, quality } = currentExport();
   const relaxed = picks.filter((p) => p.relaxed).length;
   note.textContent =
     `${picks.length} 枚を選びました` +
@@ -343,10 +434,14 @@ function showPicks() {
       : exporting
         ? `${loaded.clip.width}×${loaded.clip.height}（測ったコマ・読み直し中）`
         : `${loaded.clip.width}×${loaded.clip.height}（測ったコマ）`;
+    // **押す前に大きさを見せる。** 形式を選ばせておいて、選ぶ材料（何バイトになるか）を
+    // 画面に出さないなら、選ばせている意味が無い。
+    const bytes = sizes.get(sizeKey(pick.index, format, quality));
     caption.innerHTML =
       `<b>${i + 1}.</b> ${pick.time.toFixed(2)} 秒<br>` +
       `ふつうの <b>${pick.relative.toFixed(2)}</b> 倍 ・ 写り ${pick.exposure.toFixed(2)}<br>` +
-      `${size}` +
+      `${size}<br>` +
+      `${EXPORT_FORMATS[format].ext.toUpperCase()} ${bytes === undefined ? (full ? '測っています…' : '—') : formatBytes(bytes)}` +
       (pick.relaxed ? `<br><span class="relaxed">※ ${WHY[pick.relaxed]}</span>` : '');
 
     const button = document.createElement('button');
@@ -360,22 +455,27 @@ function showPicks() {
 }
 
 /**
- * 候補 1 枚を PNG で保存する。
+ * 候補 1 枚を、いま選んでいる形式で保存する。
  *
  * まだ大きい絵を持っていなければ、その場で読む（つまみを回した直後に押されうる）。
  * **測ったコマで代用しない。** 長辺 128 の絵を「表紙」として渡すほうが、
  * 「まだ読めていません」と言うより害がある。
+ *
+ * 名前の拡張子は**形式から引く**（`exportName`）。ここを `.png` で固定したまま
+ * JPEG を足すと、中身と名前が食い違った絵が落ちる——開けはするので、
+ * 受け取る側が拡張子で弾くまで誰も気づかない。
  */
 async function savePick(order: number) {
   const pick = picks[order];
   if (!loaded || !pick) return;
   const status = $<HTMLParagraphElement>('thumb-status');
+  const { format, quality } = currentExport();
   try {
     const frame = (await fullFrame(pick)) ?? null;
     // **測ったコマで代用しない。** 長辺 128 の絵を「表紙」として渡すほうが、
     // 「出せませんでした」と言うより害がある。
     if (!frame) throw new Error('この秒のコマを読み直せませんでした');
-    saveBlob(await frameToPng(frame), exportName(loaded.name, pick.time));
+    saveBlob(await frameToImage(frame, { format, quality }), exportName(loaded.name, pick.time, format));
   } catch (e) {
     status.className = 'status error';
     status.textContent = `絵を書き出せませんでした（${e instanceof Error ? e.message : e}）`;
@@ -409,9 +509,14 @@ function showStats() {
   }
 
   const o = { ...DEFAULT_PICK, ...currentOptions() };
+  const { format: exportFormat, quality: exportQuality } = currentExport();
   const relaxed = picks.filter((p) => p.relaxed);
   const best = picks.length ? Math.max(...picks.map((p) => p.relative)) : 0;
   const full = picks.map((p) => exported.get(p.index)).find((f) => f);
+  const measured = picks
+    .map((p) => sizes.get(sizeKey(p.index, exportFormat, exportQuality)))
+    .filter((v): v is number => v !== undefined);
+  const heaviest = measured.length ? Math.max(...measured) : null;
 
   box.innerHTML = [
     stat('選んだ枚数', picks.length ? `${picks.length} / ${o.count} 枚` : '無し', !picks.length),
@@ -422,6 +527,8 @@ function showStats() {
     stat('書き出す大きさ', full ? `${full.width}×${full.height}` : exporting ? '読み直し中' : '—', !full),
     stat('素材の速さ', `${loaded.clip.sourceFps.toFixed(1)} fps`),
     stat('コマの欠け', loaded.clip.missing ? `${loaded.clip.missing} 枚` : 'なし', !loaded.clip.missing),
+    stat('書き出しの形式', exportFormat === 'png' ? 'PNG（可逆）' : `JPEG 品質 ${exportQuality.toFixed(2)}`),
+    stat('いちばん重い 1 枚', heaviest === null ? '—' : formatBytes(heaviest), heaviest === null),
   ].join('');
 
   // 知らせるのは「そのまま読むと結果の意味が変わる」ときだけ。
@@ -443,6 +550,17 @@ function showStats() {
       '<strong>いちばん良い候補が、ふつうのコマとほとんど変わりません。</strong>' +
         'この倍率は素材の中での順位なので、尺ぜんたいが同じ調子（ずっとボケている・ずっと暗い）だと 1 倍に張り付きます。' +
         '「選べた」ではなく「選ぶ相手が居なかった」ほうを疑ってください。',
+    );
+  }
+  // 置き先の上限に当たりそうなら知らせる。**押したあとでは遅い**ので、ここで出す。
+  // 実寸（1920×1080）の PNG は測ると 0.85〜1.5MB まで来る（`lab:thumb:format`）。
+  if (heaviest !== null && heaviest > DESTINATION_LIMIT_BYTES * 0.5) {
+    messages.push(
+      `<strong>1 枚が ${formatBytes(heaviest)} あります。</strong>` +
+        `配信サイトの一覧はだいたい ${formatBytes(DESTINATION_LIMIT_BYTES)} が上限なので、` +
+        (exportFormat === 'png'
+          ? 'JPEG にすると 1 割ほどの大きさになります（測った誤差は 0.2%）。'
+          : '品質を下げるか、長辺の上限を下げてください。'),
     );
   }
   if (full && Math.max(full.sourceWidth, full.sourceHeight) > EXPORT_LONG_SIDE) {
@@ -479,6 +597,28 @@ for (const id of ['count', 'min-gap', 'min-distance', 'quality-floor', 'flash-hi
 for (const id of ['sharpness', 'floor-base']) $<HTMLElement>(id).addEventListener('change', refresh);
 $<HTMLElement>('fill').addEventListener('change', refresh);
 
+/**
+ * 書き出しの設定は**選び直しを起こさない**。形式を変えても候補は同じコマで、
+ * 変わるのは「それを何で焼くか」だけ。ここで `refresh()` を呼ぶと、
+ * 形式を変えただけで読み直しの列が動き出す（重いうえに、動く理由が無い）。
+ */
+for (const id of ['export-format', 'jpeg-quality']) {
+  $<HTMLElement>(id).addEventListener('input', () => {
+    showExportValues();
+    showPicks();
+    showStats();
+    measureSizes();
+  });
+}
+
+/** JPEG のときだけ品質を触らせる。**PNG に品質のつまみがあると読まれないため。** */
+function showExportValues() {
+  const { format, quality } = currentExport();
+  $<HTMLInputElement>('jpeg-quality').disabled = format === 'png';
+  $<HTMLOutputElement>('out-jpeg-quality').textContent =
+    format === 'png' ? '（可逆なので品質は無い）' : quality.toFixed(2);
+}
+
 $<HTMLButtonElement>('run-tests').addEventListener('click', () => {
   const results = runSelfTest();
   $<HTMLUListElement>('test-results').innerHTML = results
@@ -503,7 +643,12 @@ $<HTMLSelectElement>('floor-base').value = DEFAULT_PICK.floorBase;
 $<HTMLInputElement>('flash-high').value = String(DEFAULT_PICK.flashHigh);
 $<HTMLInputElement>('flash-window').value = String(DEFAULT_PICK.flashWindow);
 $<HTMLInputElement>('fill').checked = DEFAULT_PICK.fill;
+$<HTMLSelectElement>('export-format').value = DEFAULT_EXPORT_FORMAT;
+$<HTMLInputElement>('jpeg-quality').value = String(DEFAULT_JPEG_QUALITY);
+$<HTMLInputElement>('jpeg-quality').max = String(JPEG_QUALITY_MAX);
+$<HTMLInputElement>('jpeg-quality').min = String(JPEG_QUALITY_MIN);
 showAllValues();
+showExportValues();
 
 // Playwright から呼べるようにしておく（画面を触らずに中身を確かめるため）。
 declare global {
@@ -511,7 +656,14 @@ declare global {
     __labThumb: {
       selfTest: typeof runSelfTest;
       /** 画面が使っている既定（コマンドラインと同じ所から来ているかの確認用）。 */
-      defaults: { pick: PickOptions; analysisFps: number; exportLongSide: number };
+      defaults: {
+        pick: PickOptions;
+        analysisFps: number;
+        exportLongSide: number;
+        exportFormat: ExportFormat;
+        jpegQuality: number;
+        jpegQualityMax: number;
+      };
       state: () => {
         /** 読み込みの最中か。**数字を読む前にこれが false であることを確かめる。** */
         loading: boolean;
@@ -531,6 +683,15 @@ declare global {
       };
       /** 選んだ候補 1 枚を PNG にして返す（保存はしない）。 */
       png: (order: number) => Promise<Blob>;
+      /**
+       * 選んだ候補 1 枚を、**画面がいま選んでいる形式**で返す（保存はしない）。
+       *
+       * `png` と分けてあるのは、書き出しの中身を確かめる検査（`compareExport`）が
+       * 「どの形式でも同じ絵が出るか」を見るのに、形式を指定して呼べる口が要るため。
+       */
+      image: (order: number, options?: { format?: ExportFormat; quality?: number }) => Promise<Blob>;
+      /** いま画面が選んでいる書き出しの設定。 */
+      exportSettings: () => { format: ExportFormat; quality: number; name: string | null };
       /** 測るのに使ったコマ（長辺 128）。書き出した絵と突き合わせるために要る。 */
       analysisFrame: (order: number) => { width: number; height: number; data: Uint8ClampedArray } | null;
     };
@@ -538,7 +699,14 @@ declare global {
 }
 window.__labThumb = {
   selfTest: runSelfTest,
-  defaults: { pick: DEFAULT_PICK, analysisFps: ANALYSIS_FPS, exportLongSide: EXPORT_LONG_SIDE },
+  defaults: {
+    pick: DEFAULT_PICK,
+    analysisFps: ANALYSIS_FPS,
+    exportLongSide: EXPORT_LONG_SIDE,
+    exportFormat: DEFAULT_EXPORT_FORMAT,
+    jpegQuality: DEFAULT_JPEG_QUALITY,
+    jpegQualityMax: JPEG_QUALITY_MAX,
+  },
   state: () => ({
     loading,
     exporting,
@@ -567,7 +735,19 @@ window.__labThumb = {
     if (!loaded || !pick) throw new Error(`候補 ${order} はありません`);
     const frame = await fullFrame(pick);
     if (!frame) throw new Error('絵を読み直せませんでした');
-    return frameToPng(frame);
+    return frameToImage(frame, { format: 'png' });
+  },
+  image: async (order: number, options = {}) => {
+    const pick = picks[order];
+    if (!loaded || !pick) throw new Error(`候補 ${order} はありません`);
+    const frame = await fullFrame(pick);
+    if (!frame) throw new Error('絵を読み直せませんでした');
+    const current = currentExport();
+    return frameToImage(frame, { format: options.format ?? current.format, quality: options.quality ?? current.quality });
+  },
+  exportSettings: () => {
+    const { format, quality } = currentExport();
+    return { format, quality, name: picks.length && loaded ? exportName(loaded.name, picks[0].time, format) : null };
   },
   analysisFrame: (order: number) => {
     const pick = picks[order];
