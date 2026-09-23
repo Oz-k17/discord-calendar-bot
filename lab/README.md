@@ -16,6 +16,7 @@
 | [`auto-cut/`](./auto-cut/) | 無音カット（ジェットカット）とオートダッキング、波形表示 | `npm run lab` |
 | [`scene-cut/`](./scene-cut/) | シーン検出（カットの切り替わりを見つけて割る） | `npm run lab:scene:demo` |
 | [`beat/`](./beat/) | 拍の検出（テンポと、拍が来る秒） | `npm run lab:beat:demo` |
+| [`thumbnail/`](./thumbnail/) | 表紙（サムネイル）候補の自動抽出 | `npm run lab:thumb` |
 
 ```
 npm run lab            # 開発サーバで開く
@@ -43,6 +44,11 @@ npm run lab:beat:probe      # 「どの手なら拍を見分けられるか」�
 npm run lab:beat            # 拍の検出が実際どれくらい効くかを測る
 npm run lab:beat:demo       # 拍の画面を開く
 npm run lab:beat:uitest     # 拍の画面まで通して確かめる（lab:uitest からも走る）
+
+npm run lab:thumb:probe     # 「どの量なら表紙に使えないコマを見分けられるか」を正解付きで測る
+npm run lab:thumb           # 表紙の候補選びが実際どれくらい効くかを測る
+npm run lab:thumb:portrait  # 同じものを縦型（9:16 の切り出し）で測る
+npm run lab:thumb:native    # 同じものを縦型（最初から縦で撮った）で測る
 ```
 
 `lab:test` は**すべての試作の検算をまとめて走らせる**（1 つだけ緑にして終わらないため）。

@@ -12,8 +12,8 @@
     "bundle": "npm run build && npm run lab:build && node scripts/sync-bundles.mjs",
     "lab": "vite lab/auto-cut",
     "lab:build": "vite build lab/auto-cut",
-    "lab:typecheck": "tsc -p lab/auto-cut --pretty false && tsc -p lab/scene-cut --pretty false && tsc -p lab/beat --pretty false",
-    "lab:test": "node lab/auto-cut/selftest.mjs && node lab/scene-cut/selftest.mjs && node lab/beat/selftest.mjs",
+    "lab:typecheck": "tsc -p lab/auto-cut --pretty false && tsc -p lab/scene-cut --pretty false && tsc -p lab/beat --pretty false && tsc -p lab/thumbnail --pretty false",
+    "lab:test": "node lab/auto-cut/selftest.mjs && node lab/scene-cut/selftest.mjs && node lab/beat/selftest.mjs && node lab/thumbnail/selftest.mjs",
     "lab:fixtures": "node lab/fixtures/make-audio.mjs",
     "lab:bench": "node lab/auto-cut/bench.mjs",
     "lab:loudness": "node lab/auto-cut/loudness.mjs",
@@ -34,7 +34,11 @@
     "lab:beat": "node lab/beat/bench.mjs",
     "lab:beat:demo": "vite lab/beat",
     "lab:beat:uitest": "node lab/beat/uitest.mjs",
-    "lab:beat:probe": "node lab/beat/probe.mjs"
+    "lab:beat:probe": "node lab/beat/probe.mjs",
+    "lab:thumb": "node lab/thumbnail/bench.mjs",
+    "lab:thumb:probe": "node lab/thumbnail/probe.mjs",
+    "lab:thumb:portrait": "LAB_ASPECT=portrait node lab/thumbnail/bench.mjs",
+    "lab:thumb:native": "LAB_ASPECT=native node lab/thumbnail/bench.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",

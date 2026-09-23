@@ -52,7 +52,7 @@ function hsv(h, s, v) {
  * 色の面だけだと横へずらしても画素が 1 つも変わらず、「カメラが動いても切らない」を
  * 試したつもりで何も試していないことになる。
  */
-function makeShot(rnd, { palette = null, dark = false, tint = null, span = 1, spanV = 1 } = {}) {
+function makeShot(rnd, { palette = null, dark = false, tint = null, span = 1, spanV = 1, fine = 0 } = {}) {
   const hue = rnd();
   const top = palette ? palette.top.slice() : hsv(hue, 0.45 + 0.35 * rnd(), 0.55 + 0.35 * rnd());
   const bottom = palette
@@ -103,7 +103,13 @@ function makeShot(rnd, { palette = null, dark = false, tint = null, span = 1, sp
     }
   }
 
-  return { top, bottom, texU, texV, blobs };
+  // 細かい肌理の粗さ。**画面の幅に対して**決める（96 升 ≒ 128 画素の画面で 1.3 画素ごと）。
+  // 縦横で同じ密度になるよう 16:9 で割ってある。ここを画素の数で決めてしまうと、
+  // 縦型で測ったときに肌理の細かさまで一緒に変わって、何が効いたのか分からなくなる。
+  // 種は `fine` を使うときだけ引く。使わない素材で 1 つ余分に引くと、
+  // そのあとの乱数の列がまるごとずれて**既存の素材の絵が変わってしまう**。
+  const fineSeed = fine > 0 ? Math.floor(rnd() * 1e9) : 0;
+  return { top, bottom, texU, texV, blobs, fine, fineU: 96, fineV: 54, fineSeed };
 }
 
 /**
@@ -122,6 +128,48 @@ function lumaNeutralTint(index) {
   const t = table[index % table.length];
   const l = 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
   return [t[0] / l, t[1] / l, t[2] / l];
+}
+
+/**
+ * 2 つの整数から 0〜1 の値を作る（細かい模様のため）。
+ *
+ * 配列を持たずに済ませているのは、**帯の長さが素材ごとに変わる**ため
+ * （パンで 14 画面ぶん流れる素材だと、画素と同じ細かさの配列は現実的でない）。
+ * 種を混ぜて散らすだけなので、同じ座標なら毎回まったく同じ値が出る。
+ */
+function hash2(x, y, seed) {
+  let h = Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(y | 0, 0x165667b1) ^ Math.imul(seed | 0, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 1 | h);
+  h = (h + Math.imul(h ^ (h >>> 7), 61 | h)) ^ h;
+  return ((h ^ (h >>> 14)) >>> 0) / 4294967296;
+}
+
+/**
+ * 細かい模様（画素 1〜2 つぶんの粗さ）を滑らかに読む。
+ *
+ * 2026-09-23 に足した。**ボケを測るには、ボケて失われるものが絵の中に要る**。
+ * それまでの素材は色の面と丸い塊だけで、隣どうしの差が 0.007 しか無かった
+ * （128 画素の幅に模様の山が 24 個しか無い）。そこへ動きボケを掛けても
+ * 消えるものが無く、**ボケたコマと鮮明なコマの差が 3 桁目にしか出ない**。
+ * 本物の映像には髪・布・草・肌理があり、真っ先に潰れるのはそこなので、
+ * ここが無いと「ボケを見分けた」と言っても何も見分けていない。
+ *
+ * 角で値を決めて滑らかに繋ぐ（value noise）。段差にすると、それ自体が輪郭になる。
+ */
+function fineTexture(u, v, scaleU, scaleV, seed) {
+  const x = u * scaleU;
+  const y = v * scaleV;
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = x - x0;
+  const fy = y - y0;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const a = hash2(x0, y0, seed);
+  const b = hash2(x0 + 1, y0, seed);
+  const c = hash2(x0, y0 + 1, seed);
+  const d = hash2(x0 + 1, y0 + 1, seed);
+  return (a + (b - a) * sx) * (1 - sy) + (c + (d - c) * sx) * sy;
 }
 
 /** 模様を滑らかに読む（端は巻き戻す）。段差にすると、そこが偽のカットになってしまう。 */
@@ -146,7 +194,12 @@ function shotPixel(shot, u, v, t, out, span = 1, spanV = 1) {
   // 縦は巻き戻さず、帯の座標へ直してから 0〜1 に丸める（帯の外は端の色が続く）。
   const vv = v / spanV;
   const vc = vv < 0 ? 0 : vv > 1 ? 1 : vv;
-  const shade = 0.68 + 0.32 * (0.6 * sampleWrap(shot.texU, uw) + 0.4 * sampleWrap(shot.texV, vc));
+  let shade = 0.68 + 0.32 * (0.6 * sampleWrap(shot.texU, uw) + 0.4 * sampleWrap(shot.texV, vc));
+  if (shot.fine > 0) {
+    // 細かい肌理。**帯の座標で読む**ので、カメラが動けば模様も一緒に流れる
+    // ——つまりシャッターの中で動けば、そのぶんきちんと潰れる。
+    shade *= 1 + shot.fine * (fineTexture(uw * span, vc * spanV, shot.fineU, shot.fineV, shot.fineSeed) - 0.5);
+  }
   for (let i = 0; i < 3; i += 1) {
     out[i] = (shot.top[i] + (shot.bottom[i] - shot.top[i]) * vc) * shade;
   }
@@ -217,14 +270,25 @@ function captionAt(caps, u0, v0, t) {
 }
 
 /**
- * 素材 1 本ぶんのコマを作る。
+ * 素材 1 本ぶんのコマを作る（名前で引く）。
  *
  * 返すのは `{ width, height, fps, times, frames }`。
  * `frames[i]` は RGBA の `Uint8ClampedArray`（`ImageData.data` と同じ並び）。
  * 本物の動画を縮めて渡すときと同じ形にしてある。
  */
-export function renderFixture(name, { aspect = 'landscape', fps = SCENE_FPS, captionCover = 0 } = {}) {
-  const fixture = sceneFixture(name);
+export function renderFixture(name, opts = {}) {
+  return renderSpec(sceneFixture(name), opts);
+}
+
+/**
+ * 素材 1 本ぶんのコマを作る（正解の入れ物をそのまま渡す）。
+ *
+ * `renderFixture` と中身は同じで、**一覧に載っていない素材も描ける**ようにしてある
+ * （2026-09-23）。サムネイルの側は正解の付け方が「どこで切り替わるか」ではなく
+ * 「どのコマが使い物になるか」なので、`SCENE_FIXTURES` とは別の一覧を持つ。
+ * 描く仕掛けまで書き写すと、片方を直したときにもう片方が静かに古くなる。
+ */
+export function renderSpec(fixture, { aspect = 'landscape', fps = SCENE_FPS, captionCover = 0 } = {}) {
   const o = fixture.options ?? {};
   const view = sceneAspect(aspect);
   const width = view.width;
@@ -246,8 +310,36 @@ export function renderFixture(name, { aspect = 'landscape', fps = SCENE_FPS, cap
     ? { top: hsv(0.58, 0.5, 0.72), bottom: hsv(0.62, 0.55, 0.34), blob: hsv(0.55, 0.45, 0.5) }
     : null;
 
+  /**
+   * カメラの横の位置（画面何枚ぶん動いたか）。
+   *
+   * `pan` はずっと同じ速さで流れる。`whip` を付けると、その区間だけ**速く振る**
+   * （2026-09-23）。速さを時間で変えられないと「ブレているコマとブレていないコマが
+   * 同じ素材の中に並ぶ」形が作れず、サムネイルの選び分けを測る相手が用意できない。
+   * 区間の外では止まる（位置は保つ）ので、振り切った先の絵がそのまま続く。
+   */
+  const panAt = (t) => {
+    let p = (o.pan ?? 0) * t;
+    if (o.whip) {
+      const { from, to, speed } = o.whip;
+      p += speed * Math.min(Math.max(t - from, 0), to - from);
+    }
+    return p;
+  };
+
+  /**
+   * シャッター（動きボケ）。`{ frames: k, open: 0.5 }` で、1 コマを k 枚の平均にする。
+   *
+   * **ボケの量を自分で決めない**のがここの要点で、サブコマの間にカメラが動いた
+   * ぶんだけボケる。後からぼかすと「どれくらいボケているか」を作る側が決めてしまい、
+   * 測る側はその数字を測り返すだけになる。`open` は 1 コマのうちシャッターが
+   * 開いている割合（写真の 180 度シャッターが 0.5）。
+   */
+  const shutterFrames = Math.max(1, Math.round(o.shutter?.frames ?? 1));
+  const shutterOpen = o.shutter?.open ?? 0.5;
+
   // パンで新しい中身が入ってくる素材では、帯をパンの距離ぶんだけ長く持つ。
-  const span = o.panReveal ? 1 + (o.pan ?? 0) * SCENE_LENGTH : 1;
+  const span = o.panReveal ? 1 + panAt(SCENE_LENGTH) : 1;
   // 縦へ振る素材では、**必ず**振った距離ぶんの帯を持つ（縦は巻き戻せないので選択肢が無い）。
   const spanV = o.tilt ? 1 + o.tilt * SCENE_LENGTH : 1;
 
@@ -262,11 +354,11 @@ export function renderFixture(name, { aspect = 'landscape', fps = SCENE_FPS, cap
     // 骨格まで変えると「色が違うのか形が違うのか」が分からなくなるため。
     // 種を場面ごとに作り直すので、骨格（模様と配置）は 1 ビットも同じになる。
     for (let i = 0; i < shotCount; i += 1) {
-      shots.push(makeShot(rng((o.seed ?? 1) + 1), { tint: lumaNeutralTint(i), span, spanV }));
+      shots.push(makeShot(rng((o.seed ?? 1) + 1), { tint: lumaNeutralTint(i), span, spanV, fine: o.fine ?? 0 }));
     }
   } else {
     for (let i = 0; i < shotCount; i += 1) {
-      shots.push(makeShot(rnd, { palette, dark: o.dark, span, spanV }));
+      shots.push(makeShot(rnd, { palette, dark: o.dark, span, spanV, fine: o.fine ?? 0 }));
     }
   }
 
@@ -294,11 +386,18 @@ export function renderFixture(name, { aspect = 'landscape', fps = SCENE_FPS, cap
   const rgb = [0, 0, 0];
   const rgbB = [0, 0, 0];
 
-  for (let f = 0; f < total; f += 1) {
-    const t = f / fps;
-    times[f] = t;
-    const data = new Uint8ClampedArray(width * height * 4);
+  // 1 コマぶんの受け皿（RGB の生の値）。シャッターが開いているあいだの平均をここへ溜める。
+  const acc = new Float64Array(width * height * 3);
 
+  /**
+   * 秒 `t` の絵を `acc` へ `weight` の重みで足す。
+   *
+   * 粒ノイズと文字帯をここへ入れていないのは、**どちらもシャッターの後に乗るもの**だから。
+   * 粒は撮像素子がコマ単位で出すもので、平均すると本来より静かになってしまう。
+   * 文字帯は編集で最後に乗るので、カメラがどれだけ振られていても鮮明なまま残る
+   * ——その「帯だけ鮮明」がサムネイルの選び分けを潰す側の性質なので、消してはいけない。
+   */
+  function drawInto(t, frameIndex, weight) {
     // --- このコマで何が起きているか ---
     let index = 0;
     for (const c of cutsAt) if (t >= c - 1e-9) index += 1;
@@ -343,14 +442,15 @@ export function renderFixture(name, { aspect = 'landscape', fps = SCENE_FPS, cap
       if (d < 2.5 / fps) flash = Math.max(flash, 0.92 * (1 - d / (2.5 / fps)));
     }
 
-    const pan = (o.pan ?? 0) * t;
+    const pan = panAt(t);
     const tilt = (o.tilt ?? 0) * t;
     const zoom = 1 + (o.zoom ?? 0) * t;
-    const shakeRnd = rng((o.seed ?? 1) * 7919 + f);
+    // 手ぶれはコマ**ごと**の揺れとして置いてある（シャッターの中では動かさない）。
+    // 揺れの中身をサブコマごとに振り直すと、「コマとコマの間で跳ねる」はずの量が
+    // 1 コマの中の平均に化けて、手持ちの素材の性質そのものが変わってしまう。
+    const shakeRnd = rng((o.seed ?? 1) * 7919 + frameIndex);
     const shakeU = o.shake ? (shakeRnd() - 0.5) * o.shake : 0;
     const shakeV = o.shake ? (shakeRnd() - 0.5) * o.shake : 0;
-    const grainRnd = rng((o.seed ?? 1) * 104729 + f);
-    const grain = (o.grain ?? 0) * 255;
     // 横切るものは 13 秒かけて画面の外から外へ抜ける。縦のときは同じ道筋を縦に置く。
     const crossAt = crossing ? -0.3 + 1.6 * (t / SCENE_LENGTH) : 0;
 
@@ -384,11 +484,40 @@ export function renderFixture(name, { aspect = 'landscape', fps = SCENE_FPS, cap
           }
         }
 
-        const p = (y * width + x) * 4;
-        // 粒ノイズは帯の下でも同じ数だけ引いておく（帯の有無で乱数の列がずれないように）。
+        const q = (y * width + x) * 3;
         for (let i = 0; i < 3; i += 1) {
           let c = rgb[i] * fade;
           if (flash > 0) c += (255 - c) * flash;
+          acc[q + i] += c * weight;
+        }
+      }
+    }
+  }
+
+  for (let f = 0; f < total; f += 1) {
+    const t = f / fps;
+    times[f] = t;
+    acc.fill(0);
+
+    // シャッターが開いているあいだを等間隔に割って平均する。
+    // 1 枚だけのときは**コマの頭そのもの**を描く（＝シャッターを足す前と 1 ビットも変わらない）。
+    for (let s = 0; s < shutterFrames; s += 1) {
+      const offset = shutterFrames === 1 ? 0 : (((s + 0.5) / shutterFrames) * shutterOpen) / fps;
+      drawInto(t + offset, f, 1 / shutterFrames);
+    }
+
+    const data = new Uint8ClampedArray(width * height * 4);
+    const grainRnd = rng((o.seed ?? 1) * 104729 + f);
+    const grain = (o.grain ?? 0) * 255;
+    for (let y = 0; y < height; y += 1) {
+      const v0 = (y + 0.5) / height;
+      for (let x = 0; x < width; x += 1) {
+        const u0 = (x + 0.5) / width;
+        const p = (y * width + x) * 4;
+        const q = (y * width + x) * 3;
+        // 粒ノイズは帯の下でも同じ数だけ引いておく（帯の有無で乱数の列がずれないように）。
+        for (let i = 0; i < 3; i += 1) {
+          let c = acc[q + i];
           if (grain > 0) c += (grainRnd() - 0.5) * grain;
           data[p + i] = c;
         }
@@ -407,7 +536,7 @@ export function renderFixture(name, { aspect = 'landscape', fps = SCENE_FPS, cap
   }
 
   return {
-    name,
+    name: fixture.name,
     aspect,
     width,
     height,
