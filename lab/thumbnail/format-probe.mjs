@@ -38,6 +38,12 @@ const QUALITIES = [0.5, 0.7, 0.8, 0.85, 0.9, 0.95, 1];
  * `LAB_SCALE=15` で 1920×1080＝書き出しの上限そのものになる。
  */
 const SCALE = Number(process.env.LAB_SCALE ?? 4);
+/**
+ * 帯の板の不透明度（2026-09-24）。既定は素材の書いたまま（不透明）。
+ * 9/23（3 回目）の「帯の中のほうが誤差が小さい」は**平らな板**での話だったので、
+ * 透かして測り直せるようにここを口にしてある。
+ */
+const CAPTION_ALPHA = process.env.LAB_CAPTION_ALPHA ? Number(process.env.LAB_CAPTION_ALPHA) : null;
 
 /**
  * 素材に焼き込みの文字帯があるなら、その区間（高さの割合）を返す。
@@ -74,8 +80,8 @@ try {
     const bands = captionBands(name);
     process.stdout.write(`${name} を測っています…\n`);
     const report = await page.evaluate(
-      ([n, q, b, s]) => window.__labThumbFormats(n, { qualities: q, bands: b, scale: s }),
-      [name, QUALITIES, bands, SCALE],
+      ([n, q, b, s, a]) => window.__labThumbFormats(n, { qualities: q, bands: b, scale: s, captionAlpha: a }),
+      [name, QUALITIES, bands, SCALE, CAPTION_ALPHA],
     );
     reports.push(report);
   }

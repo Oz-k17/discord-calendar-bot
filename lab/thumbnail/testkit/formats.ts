@@ -182,12 +182,13 @@ export async function measureFormats(
     qualities = [0.5, 0.7, 0.8, 0.85, 0.9, 0.95, 1],
     bands = [] as { from: number; to: number }[],
     scale = 4,
+    captionAlpha = null as number | null,
   } = {},
 ): Promise<FormatReport> {
   // 焼く倍率を上げると、**実寸の絵**（1920×1080）でそのまま測れる。
   // 小さい絵で測ってバイト数を掛け算すると、PNG も JPEG も画素あたりの効率が
   // 大きさで変わるので当てにならない（置き先の容量の上限を語るならここを動かす）。
-  const encoded = await encodeThumbFixture(name, { aspect, scale });
+  const encoded = await encodeThumbFixture(name, { aspect, scale, captionAlpha });
   const file = new Blob([encoded.bytes], { type: 'video/webm' });
   const clip = await decodeVideoFrames(file);
   const stats = summarizeThumbs(clip.frames, clip.times);

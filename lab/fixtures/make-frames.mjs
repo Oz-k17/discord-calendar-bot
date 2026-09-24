@@ -231,11 +231,24 @@ function shotPixel(shot, u, v, t, out, span = 1, spanV = 1) {
  * 形は「暗い板の上に明るい字の升目」。本物の字形を真似る必要は無くて、
  * 要るのは**占める割合が決まっていること**と**時間で動かないこと**の 2 つだけ。
  * `changeEvery` を付けると下の帯（字幕）だけが書き換わる。上（見出し）は動かさない。
+ *
+ * ## 透ける帯（2026-09-24）
+ *
+ * `alpha` は**板の不透明度**（既定 1 ＝ 不透明。9/22・3 回目までの帯はこれ）。
+ * 板だけを分けているのは、実際の字幕がその形だから——**半透明なのは背景の板で、
+ * 字そのものは読ませるために不透明**に置く。板も字もまとめて薄くする置き方
+ * （素材ごと不透明度を下げる編集）も測れるように、字の側は `inkAlpha` で別に持つ。
+ *
+ * 透けると「1 画素も動かない領域」が**板の下だけ動く領域**に変わる。
+ * 薄まりが (1-k) 倍で決まるという読みが正しければ、板が透けたぶんだけ k が減って
+ * 距離が戻るはず——それが戻るかどうかがこの回の題。
  */
 function buildCaptions(spec, seed) {
   const top = spec.top ?? 0;
   const bottom = spec.bottom ?? 0;
   const changeEvery = spec.changeEvery ?? 0;
+  const alpha = opacity(spec.alpha ?? 1);
+  const inkAlpha = opacity(spec.inkAlpha ?? 1);
   const cells = 16;
   // 升目の並びを何通りか先に作っておく。書き換えるときはこの中を順に使う。
   const patterns = [];
@@ -244,19 +257,42 @@ function buildCaptions(spec, seed) {
     const r = rng(seed * 31 + i * 7);
     patterns.push(Array.from({ length: cells }, () => r() < 0.62));
   }
-  return { top, bottom, changeEvery, cells, patterns, plate: [22, 20, 26], ink: [236, 236, 228] };
+  return {
+    top,
+    bottom,
+    changeEvery,
+    cells,
+    patterns,
+    alpha,
+    inkAlpha,
+    plate: [22, 20, 26],
+    ink: [236, 236, 228],
+  };
+}
+
+/** 不透明度として受け取れる値か見る。**範囲の外は黙って詰めない**（帯の厚みと同じ扱い）。
+ * 黙って詰めると「透かしたつもりで透けていない表」が出る。 */
+function opacity(v) {
+  if (!Number.isFinite(v)) throw new Error(`不透明度は 0〜1 の数です（${v}）`);
+  if (v < 0 || v > 1) throw new Error(`不透明度は 0〜1 の数です（${v}）`);
+  return v;
 }
 
 /**
- * その画素が文字帯なら色を返す。帯の外なら null。
+ * その画素が文字帯なら、`out` へ色と不透明度を書いて true を返す。帯の外なら false。
  *
  * 帯の内側に少し余白を取ってあるのは、**板と字の割合を現実に寄せる**ため。
  * 板が全部字だと、書き換えたときの距離が実際よりずっと大きく出る。
+ *
+ * 色と不透明度を分けて渡しているのは、**混ぜるのは呼ぶ側の仕事**にするため。
+ * ここで混ぜてしまうと、下の絵（粒ノイズまで乗ったあとの値）を引数で渡す羽目になる。
+ * 受け皿を使い回すのは `shotPixel` と同じ理由で、**画素ごとに物を作らない**ため
+ * （1 本 195 コマ × 9216 画素あるので、ここでの 1 つは 180 万個になる）。
  */
-function captionAt(caps, u0, v0, t) {
+function captionAt(caps, u0, v0, t, out) {
   const inTop = caps.top > 0 && v0 < caps.top;
   const inBottom = caps.bottom > 0 && v0 > 1 - caps.bottom;
-  if (!inTop && !inBottom) return null;
+  if (!inTop && !inBottom) return false;
 
   // 上は見出し（動かない）、下は字幕（`changeEvery` ごとに書き換わる）。
   const index = inBottom && caps.changeEvery > 0 ? 1 + Math.floor(t / caps.changeEvery) : 0;
@@ -266,7 +302,10 @@ function captionAt(caps, u0, v0, t) {
   const h = (v0 - band.from) / (band.to - band.from);
   const cell = Math.min(caps.cells - 1, Math.floor(u0 * caps.cells));
   const inner = h > 0.3 && h < 0.75 && u0 > 0.06 && u0 < 0.94;
-  return inner && pattern[cell] ? caps.ink : caps.plate;
+  const lit = inner && pattern[cell];
+  out.color = lit ? caps.ink : caps.plate;
+  out.alpha = lit ? caps.inkAlpha : caps.alpha;
+  return true;
 }
 
 /**
@@ -288,7 +327,10 @@ export function renderFixture(name, opts = {}) {
  * 「どのコマが使い物になるか」なので、`SCENE_FIXTURES` とは別の一覧を持つ。
  * 描く仕掛けまで書き写すと、片方を直したときにもう片方が静かに古くなる。
  */
-export function renderSpec(fixture, { aspect = 'landscape', fps = SCENE_FPS, captionCover = 0 } = {}) {
+export function renderSpec(
+  fixture,
+  { aspect = 'landscape', fps = SCENE_FPS, captionCover = 0, captionAlpha = null, captionInkAlpha = null } = {},
+) {
   const o = fixture.options ?? {};
   const view = sceneAspect(aspect);
   const width = view.width;
@@ -378,13 +420,21 @@ export function renderSpec(fixture, { aspect = 'landscape', fps = SCENE_FPS, cap
   // 強いカット 1 本（`cuts-captions`）だけを見ていても、破れる所は見えない。
   // 上下の割り振りは既定の帯と同じ 10:16（見出しより字幕のほうが厚い）。
   const cover = captionCover > 0 ? { top: (captionCover * 10) / 26, bottom: (captionCover * 16) / 26 } : null;
-  const captionSpec = cover ? { ...(o.captions ?? {}), ...cover } : o.captions;
+  // `captionAlpha` / `captionInkAlpha` は**帯を持つ素材の透け方だけ**を差し替えるつまみ
+  // （2026-09-24）。帯の厚みと違って**帯の無い素材には何も足さない**ので、
+  // 「同じ素材の帯を透かすと何が戻るか」が 1 本の差として出る。
+  const sheer = {};
+  if (captionAlpha !== null) sheer.alpha = captionAlpha;
+  if (captionInkAlpha !== null) sheer.inkAlpha = captionInkAlpha;
+  const captionSpec = cover || o.captions ? { ...(o.captions ?? {}), ...(cover ?? {}), ...sheer } : null;
   const captions = captionSpec ? buildCaptions(captionSpec, o.seed ?? 1) : null;
 
   const times = new Float64Array(total);
   const frames = [];
   const rgb = [0, 0, 0];
   const rgbB = [0, 0, 0];
+  // 文字帯の受け皿。画素ごとに作らないよう 1 つを使い回す。
+  const cap = { color: null, alpha: 1 };
 
   // 1 コマぶんの受け皿（RGB の生の値）。シャッターが開いているあいだの平均をここへ溜める。
   const acc = new Float64Array(width * height * 3);
@@ -523,9 +573,19 @@ export function renderSpec(fixture, { aspect = 'landscape', fps = SCENE_FPS, cap
         }
         if (captions) {
           // 文字は**編集で最後に乗せる**ものなので、フェードもフラッシュも粒も通さない。
-          // ここが「カットしても 1 画素も動かない領域」になる。
-          const cap = captionAt(captions, u0, v0, t);
-          if (cap !== null) for (let i = 0; i < 3; i += 1) data[p + i] = cap[i];
+          // 不透明なら、ここが「カットしても 1 画素も動かない領域」になる。
+          // 透けるときは下の絵（粒まで乗ったあとの値）と混ぜるので、
+          // **その割合ぶんだけ動く領域**に変わる。混ぜ算は素直な α 合成。
+          if (captionAt(captions, u0, v0, t, cap)) {
+            const a = cap.alpha;
+            if (a >= 1) {
+              for (let i = 0; i < 3; i += 1) data[p + i] = cap.color[i];
+            } else if (a > 0) {
+              // `data` は Uint8ClampedArray なので、読み戻すと丸めが 1 度入る。
+              // 帯の外と同じ丸めなので、混ぜる前の値を別に持つ理由は無い。
+              for (let i = 0; i < 3; i += 1) data[p + i] = data[p + i] + (cap.color[i] - data[p + i]) * a;
+            }
+          }
         }
         data[p + 3] = 255;
       }

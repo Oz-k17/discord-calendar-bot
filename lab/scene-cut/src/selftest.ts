@@ -119,6 +119,27 @@ function withBars(frame: FrameLike, cover: number, ink = 40): FrameLike {
   return { width, height, data };
 }
 
+/**
+ * 上下に**半透明の板**の帯を乗せる（2026-09-24）。
+ *
+ * 実際の字幕は「半透明の板に不透明な字」なので、板だけが透ける。
+ * 透けた板の下は場面と一緒に動くので、**「1 画素も動かない領域」ではなくなる**。
+ * `alpha` = 1 なら `withBars` と同じもの（不透明）。
+ */
+function withSheerBars(frame: FrameLike, cover: number, ink: number, alpha: number): FrameLike {
+  const { width, height } = frame;
+  const data = new Uint8ClampedArray(frame.data);
+  const rows = Math.round((height * cover) / 2);
+  for (let y = 0; y < height; y += 1) {
+    if (y >= rows && y < height - rows) continue;
+    for (let x = 0; x < width; x += 1) {
+      const p = (y * width + x) * 4;
+      for (let i = 0; i < 3; i += 1) data[p + i] = data[p + i] + (ink - data[p + i]) * alpha;
+    }
+  }
+  return { width, height, data };
+}
+
 /** コマの列を秒に並べる。 */
 function statsOf(frames: FrameLike[], fps = 15): FrameStat[] {
   return summarizeFrames(
@@ -727,6 +748,104 @@ export function runSelfTest(): TestResult[] {
       '字幕の書き換えは比では落ちない（止めているのは固定の線だけ）',
       ratio > line,
       `比 ${ratio.toFixed(1)} 倍 > 線 ${line} 倍`,
+    );
+  }
+
+  // --- 透ける文字帯（2026-09-24） ---
+
+  {
+    // **板を少し透かすだけで、薄まりはほとんど戻る。**
+    //
+    // 面積で薄まると思っていると、板の不透明度 a のときの距離は
+    // 「帯の外 (1-k) ＋ 帯の中 k×(1-a)」に比例するはず——と読みたくなる。
+    // ところが分布の距離が数えているのは**升目をまたいだ画素**であって、
+    // その画素がどれだけ動いたかではない。全面が変わるカットなら 15% だけ透かせば
+    // もう升目をまたぐので、**帯の中もほぼ丸ごと数えられる**。
+    // ここを線形だと思い込むと、「透ける帯は不透明な帯の少しましな版」と読み違える。
+    const a = solid(10, 200, 40);
+    const b = solid(230, 30, 180);
+    const cover = 0.25;
+    const bare = combinedHistDistance(summarizeFrame(a, 0), summarizeFrame(b, 0));
+    const sheer = combinedHistDistance(
+      summarizeFrame(withSheerBars(a, cover, 40, 0.85), 0),
+      summarizeFrame(withSheerBars(b, cover, 40, 0.85), 0),
+    );
+    const rows = Math.round((H * cover) / 2) * 2;
+    const k = rows / H;
+    // 面積で薄まると読んだときの予想（帯の中は 15% しか効かない）。
+    const linear = bare * (1 - k + k * 0.15);
+    check(
+      '板を 15% 透かすだけで薄まりは丸ごと戻る（面積ぶんの薄まりにはならない）',
+      approx(sheer, bare, 1e-9) && sheer > linear * 1.1,
+      `帯なし ${bare.toFixed(3)} / 板 0.85 ${sheer.toFixed(3)} / 面積で読んだ予想 ${linear.toFixed(3)}`,
+    );
+  }
+
+  {
+    // **不透明な板は、字幕の書き換えの出入りを同じ升目の中で相殺する。**
+    //
+    // 升目が点くのと消えるのは、板が不透明なら「板の色」と「字の色」の 2 つの升目の
+    // 間の出入りでしかない。同じ数だけ点いて消えれば、分布は**1 段も動かない**——
+    // 書き換えた画素がいくつであっても。ここでは帯の厚みを 3 通り変えても 0 のまま。
+    // 板が透けると消えた側が下の絵の色へ散るので、相殺が効かなくなって山が立つ。
+    // 9/22（3 回目）に測った「書き換えの山」は、この相殺が効いた側の数字だった。
+    const ink = 40;
+    const plate = 230;
+    /** 帯の中の 8 つの升目のうち `on` を字にする。場面は動かさない。 */
+    const lit = (on: number[], alpha: number, band: number): FrameLike => {
+      const frame = paint((u, v) => {
+        const scene: [number, number, number] = [90 + 120 * v, 70, 160 * u];
+        if (v > band) return scene;
+        return on.includes(Math.min(7, Math.floor(u * 8))) ? [plate, plate, plate] : scene;
+      });
+      const out = new Uint8ClampedArray(frame.data);
+      const rows = Math.round(H * band);
+      for (let y = 0; y < rows; y += 1) {
+        for (let x = 0; x < W; x += 1) {
+          const p = (y * W + x) * 4;
+          // 字（明るい升目）はそのまま。板（升目でない所）だけを透かす。
+          if (frame.data[p] === plate && frame.data[p + 1] === plate) continue;
+          for (let i = 0; i < 3; i += 1) out[p + i] = frame.data[p + i] + (ink - frame.data[p + i]) * alpha;
+        }
+      }
+      return { width: W, height: H, data: out };
+    };
+    // 2 つ点いて 2 つ消える（出入りの数が釣り合う書き換え）。
+    const spike = (alpha: number, band: number) =>
+      combinedHistDistance(summarizeFrame(lit([0, 1, 4, 5], alpha, band), 0), summarizeFrame(lit([2, 3, 4, 5], alpha, band), 0));
+    const opaque = [0.12, 0.26, 0.5].map((b) => spike(1, b));
+    check(
+      '不透明な板は書き換えの出入りを相殺する（帯を厚くしても 0 のまま）',
+      opaque.every((v) => v < 1e-9),
+      `厚み 12/26/50% で ${opaque.map((v) => v.toFixed(4)).join(' / ')}`,
+    );
+    check(
+      '板を透かすと相殺が効かなくなり、同じ書き換えが山になる',
+      spike(0.5, 0.26) > 0.005 && spike(0, 0.26) > 0.005,
+      `不透明 ${spike(1, 0.26).toFixed(4)} → 板 0.5 ${spike(0.5, 0.26).toFixed(4)} / 板 0 ${spike(0, 0.26).toFixed(4)}`,
+    );
+  }
+
+  {
+    // **透ける帯は、厚くしても上（本物のカット）を締めない。**
+    // 不透明な帯は厚さ 70% で本物のカットの最小と書き換えの山が交わって線が引けなくなるが、
+    // 透けていれば上は薄まらないので、**先に壊れるのは下（切りすぎ）の側**になる。
+    // 帯の性質を「上下から締める」と一言で覚えると、向きを取り違える。
+    const a = solid(10, 200, 40);
+    const b = solid(230, 30, 180);
+    const bare = combinedHistDistance(summarizeFrame(a, 0), summarizeFrame(b, 0));
+    const thick = combinedHistDistance(
+      summarizeFrame(withSheerBars(a, 0.7, 40, 0.5), 0),
+      summarizeFrame(withSheerBars(b, 0.7, 40, 0.5), 0),
+    );
+    const opaque = combinedHistDistance(
+      summarizeFrame(withBars(a, 0.7), 0),
+      summarizeFrame(withBars(b, 0.7), 0),
+    );
+    check(
+      '厚い帯でも、透けていれば本物のカットは薄まらない（不透明なら薄まる）',
+      approx(thick, bare, 1e-9) && opaque < bare * 0.45,
+      `帯なし ${bare.toFixed(3)} / 透ける 70% ${thick.toFixed(3)} / 不透明 70% ${opaque.toFixed(3)}`,
     );
   }
 

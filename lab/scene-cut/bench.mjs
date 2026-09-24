@@ -5,6 +5,7 @@
  *   npm run lab:scene:portrait          # 縦型（9:16 の切り出し）で測る
  *   npm run lab:scene:native            # 縦型（最初から縦で撮った）で測る
  *   LAB_CAPTIONS=0.26 npm run lab:scene # 全素材へ焼き込みの文字帯を乗せて測る
+ *   LAB_CAPTION_ALPHA=0.5 npm run lab:scene # 帯の板を透かして測る（1 = 不透明・既定）
  *   LAB_FPS=30 npm run lab:scene      # コマの速さを変えて測る（つまみはコマ数で効く）
  *   LAB_NOGATE=1 npm run lab:scene   # またいだ距離の門を外す（入れる前の振る舞い）
  *   LAB_METRIC=grid npm run lab:scene
@@ -35,6 +36,11 @@ const captionCover = Number(process.env.LAB_CAPTIONS ?? 0);
 if (!Number.isFinite(captionCover) || captionCover < 0 || captionCover >= 1) {
   throw new Error(`LAB_CAPTIONS は 0 以上 1 未満です（${process.env.LAB_CAPTIONS}）`);
 }
+// 帯の透け方（2026-09-24）。板と字を別に持つのは、実際の字幕が
+// 「半透明の板＋不透明な字」だから。素材ごと薄くする編集は字の側も下げて測る。
+const captionAlpha = process.env.LAB_CAPTION_ALPHA ? Number(process.env.LAB_CAPTION_ALPHA) : null;
+const captionInkAlpha = process.env.LAB_CAPTION_INK_ALPHA ? Number(process.env.LAB_CAPTION_INK_ALPHA) : null;
+const sheer = { captionAlpha, captionInkAlpha };
 
 const options = {
   ...(process.env.LAB_NOGATE ? { straddleThreshold: 0 } : {}),
@@ -49,7 +55,9 @@ const right = (s, n) => String(s).padStart(n, ' ');
 
 console.log(
   `シーン検出の効き（正解と突き合わせ／向き ${aspect} ${view.label} ${view.width}×${view.height} ・ ${fps}fps` +
-    `${captionCover > 0 ? ` ・ 文字帯 ${(captionCover * 100).toFixed(0)}%` : ''}）\n`,
+    `${captionCover > 0 ? ` ・ 文字帯 ${(captionCover * 100).toFixed(0)}%` : ''}` +
+    `${captionAlpha !== null ? ` ・ 板の不透明度 ${captionAlpha}` : ''}` +
+    `${captionInkAlpha !== null ? ` ・ 字の不透明度 ${captionInkAlpha}` : ''}）\n`,
 );
 console.log(
   `${pad('素材', 20)}${right('正解', 5)}${right('見つけた', 9)}${right('当たり', 7)}` +
@@ -64,7 +72,7 @@ const offsets = [];
 const details = [];
 
 for (const fixture of SCENE_FIXTURES) {
-  const clip = renderFixture(fixture.name, { aspect, fps, captionCover });
+  const clip = renderFixture(fixture.name, { aspect, fps, captionCover, ...sheer });
   const stats = summarizeFrames(clip.frames, clip.times);
   const plan = planSceneCut(stats, options);
 
@@ -146,7 +154,7 @@ if (!printed) console.log('  ありません。');
 // 場面は隙間なく並ぶので、`toClipEdits` に渡すと尺が 1 秒も減らないはず。
 console.log('\n\n切ったあとのクリップ（auto-cut の edits.ts へそのまま渡した）\n');
 {
-  const clip = renderFixture('cuts-plain', { aspect, fps, captionCover });
+  const clip = renderFixture('cuts-plain', { aspect, fps, captionCover, ...sheer });
   const stats = summarizeFrames(clip.frames, clip.times);
   const plan = planSceneCut(stats, options);
   const placement = { start: 10, duration: 13, sourceIn: 0 };

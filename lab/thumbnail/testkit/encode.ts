@@ -38,10 +38,17 @@ export interface EncodedThumbFixture extends EncodedFixture {
 
 export async function encodeThumbFixture(
   name: string,
-  { aspect = 'landscape', scale = ENCODE_SCALE }: { aspect?: string; scale?: number } = {},
+  {
+    aspect = 'landscape',
+    scale = ENCODE_SCALE,
+    // 帯の板の不透明度（2026-09-24）。既定は null ＝ 素材の書いたまま（不透明）。
+    // **書き出しの誤差を帯の中と外で比べる話は、板が平らな板かどうかで答えが変わる**ので、
+    // ここを外から差し替えられないと、9/23（3 回目）の結論が不透明な帯でしか確かめられない。
+    captionAlpha = null,
+  }: { aspect?: string; scale?: number; captionAlpha?: number | null } = {},
 ): Promise<EncodedThumbFixture> {
   const spec = thumbFixture(name);
-  const clip = renderSpec(spec, { aspect }) as RenderedClip;
+  const clip = renderSpec(spec, { aspect, captionAlpha }) as RenderedClip;
   const encoded = await encodeClip(clip, { scale });
   return { ...encoded, bad: spec.bad, good: spec.good, shots: spec.shots };
 }
