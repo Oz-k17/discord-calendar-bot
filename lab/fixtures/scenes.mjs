@@ -352,6 +352,97 @@ export const SCENE_FIXTURES = [
   },
 ];
 
+/**
+ * **横切る被写体の道筋**（2026-09-24・3 回目に外へ出した）。
+ *
+ * もとは `make-frames.mjs` の中に `-0.3 + 1.6 * (t / SCENE_LENGTH)` と直に書いてあった。
+ * 自動リフレーム（被写体を追ってクロップ枠を動かす）を測るには
+ * **「被写体がいまどこに居るか」が正解として要る**ので、作る側と測る側が
+ * 同じ 1 か所を読む形へ直した。式は 1 ビットも変えていない
+ * （`from + (to - from) * ((t - t0) / (t1 - t0))` が同じ値になることは、
+ *  既存 18 本 × 3 向きのコマを sha1 で突き合わせて確かめた）。
+ *
+ * `keys` は `[秒, 位置]` の折れ線で、間は直線で結ぶ。両端の外では止まる。
+ * 折れ線にしてあるのは、**途中で止まる被写体**を作れるようにするため
+ * （等速で動くものしか無いと、追従の遅れが「遅れているのに当たっている」形で隠れる）。
+ */
+export const CROSSING_KEYS = [
+  [0, -0.3],
+  [SCENE_LENGTH, 1.3],
+];
+
+/** 横切る被写体の色。場面の色とぶつからない橙で、これも 1 か所から引く。 */
+export const SUBJECT_HUE = 0.08;
+
+/**
+ * 素材が持っている被写体の一覧を、**描く側と測る側が同じ形で読めるように**返す。
+ *
+ * `crossing: true` / `'vertical'` は 1 つだけの被写体を置く書き方で、
+ * 複数を置く素材（おとりが逆向きに動くもの）は `subjects` に直接書く。
+ * 前者を後者へ均してから返すので、**呼ぶ側は 1 つの形だけを知っていればよい。**
+ */
+export function subjectsOf(fixture) {
+  const o = fixture.options ?? {};
+  if (o.subjects) return o.subjects;
+  if (!o.crossing) return [];
+  const vertical = o.crossing === 'vertical';
+  return [
+    {
+      axis: vertical ? 'v' : 'u',
+      // 縦に横切るときは、長いほうの軸を入れ替えるだけ（もとの書き方のまま）。
+      rx: vertical ? 0.42 : 0.2,
+      ry: vertical ? 0.2 : 0.42,
+      keys: CROSSING_KEYS,
+      hue: SUBJECT_HUE,
+    },
+  ];
+}
+
+/** 折れ線の上の位置。両端の外では止まる（画面の外に居続ける、という意味になる）。 */
+export function subjectTrackAt(subject, t) {
+  const keys = subject.keys ?? CROSSING_KEYS;
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i += 1) {
+    const [t0, p0] = keys[i - 1];
+    const [t1, p1] = keys[i];
+    if (t <= t1) return p0 + (p1 - p0) * ((t - t0) / (t1 - t0));
+  }
+  return keys[keys.length - 1][1];
+}
+
+/**
+ * **被写体が画面のどこに居るか**（正解）。自動リフレームの採点はここを見る。
+ *
+ * 返すのは**切り出したあとの画面の座標**（u・v とも 0〜1）で、画面の外なら 0〜1 を外れる。
+ * 被写体はカメラの前を通るものなので切り出しより先に置かれる——つまり
+ * **切り出すと横の動きだけが 1/cropU 倍に増幅される**（`PORTRAIT_CROP_U` の注と同じ話）。
+ * 追う側が見るのは切り出す前の画面なので、既定の `landscape`（cropU = 1）では素通し。
+ */
+export function subjectsAt(fixture, t, aspect = 'landscape') {
+  const { cropU } = sceneAspect(aspect);
+  return subjectsOf(fixture).map((s) => {
+    const p = subjectTrackAt(s, t);
+    const uFrame = s.axis === 'u' ? p : 0.5;
+    return {
+      u: 0.5 + (uFrame - 0.5) / cropU,
+      v: s.axis === 'v' ? p : 0.5,
+      rx: (s.rx ?? 0.2) / cropU,
+      ry: s.ry ?? 0.42,
+      lead: !!s.lead,
+    };
+  });
+}
+
+/**
+ * **追いかける相手**（おとりが居る素材では、そちらではないほう）。
+ * 1 つも居ない素材では `null`。採点はこれと枠の中心を突き合わせる。
+ */
+export function leadSubjectAt(fixture, t, aspect = 'landscape') {
+  const all = subjectsAt(fixture, t, aspect);
+  if (!all.length) return null;
+  return all.find((s) => s.lead) ?? all[0];
+}
+
 /** 等間隔のカットを並べる。手で書くと数え違えるので作らせる。 */
 function rapidCuts(from, every, until) {
   const out = [];
@@ -359,9 +450,141 @@ function rapidCuts(from, every, until) {
   return out;
 }
 
+/**
+ * **自動リフレーム（被写体を追ってクロップ枠を動かす）のための素材**（2026-09-24・3 回目）。
+ *
+ * ## なぜ `SCENE_FIXTURES` へ足さずに別の列にしたか
+ *
+ * シーン検出の数字（見つけた率 / 当てた率）は**一覧ぜんたいの集計**なので、
+ * ここへ 4 本足すと 9/22 以前の数字と並べられなくなる。
+ * 測りたいものが別（枠の置き所であって切り所ではない）なのに、
+ * **測り終えた表のほうを動かしてしまう**のは割に合わない。
+ * 切り所の正解（`cuts`）は書いてあるので、シーン検出の側で要るようになったら
+ * そのとき一覧へ移せばよい。
+ *
+ * ## 意地悪の向き
+ *
+ * 追う側の外し方は 2 つある。**追えない**（被写体を枠から落とす）と、
+ * **追いすぎる**（被写体が居ないのに枠が泳ぐ）。混ぜてあるのは、
+ * 片方だけ見ていると「ずっと真ん中に置く」が満点に見えてしまうため——
+ * 実際、被写体の居ない素材だけなら**何もしない**のが最強になる。
+ */
+export const REFRAME_FIXTURES = [
+  {
+    /**
+     * **背景ごと動く**素材。コマの引き算で「動いた所」を探す手は、
+     * パンしていると画面じゅうが動くので、被写体の所だけが立つ理由が無くなる。
+     * 歩き撮りでは背景が常に動いているので、意地悪であると同時に本物の使い道でもある。
+     */
+    name: 'subject-pan',
+    note: '被写体が横切る後ろで、カメラも横に流れ続ける。カットは 1 つも無い',
+    hard: true,
+    cuts: [],
+    options: { seed: 120, crossing: true, pan: 0.9 },
+  },
+  {
+    /**
+     * **途中で 3.5 秒止まる**被写体。引き算の手はここで何も見えなくなるので、
+     * 「見えなければその場で保つ」が要る。保たずに真ん中へ戻る作りなら、
+     * 止まっているあいだに枠がすべって、動き出したときに置いていかれる。
+     * 人がしゃべっている画では、被写体は動くより止まっているほうが長い。
+     */
+    name: 'subject-pause',
+    note: '被写体が横切る途中で 3.5 秒止まり、また動き出す。カットは 1 つも無い',
+    hard: true,
+    cuts: [],
+    options: {
+      seed: 121,
+      subjects: [
+        {
+          axis: 'u',
+          rx: 0.2,
+          ry: 0.42,
+          hue: 0.08,
+          keys: [
+            [0, -0.3],
+            [4.0, 0.42],
+            [7.5, 0.42],
+            [13, 1.3],
+          ],
+        },
+      ],
+    },
+  },
+  {
+    /**
+     * **被写体は居続けるのに背景だけが切り替わる**素材。
+     * カットのコマは画面ぜんたいが別物になるので、引き算の重心はそこで嘘をつく。
+     * 枠がそこで飛ぶと、**切り所ではない所で画が跳ねる**ことになり、いちばん目立つ壊れ方になる。
+     */
+    name: 'subject-cuts',
+    note: '被写体が横切る後ろで、場面が 2 回切り替わる',
+    hard: true,
+    cuts: [4.0, 8.6],
+    options: { seed: 122, crossing: true, cutsAt: [4.0, 8.6] },
+  },
+  {
+    /**
+     * **ずっと同じ所に居る被写体**。`bg`（列ごとの時間の中央値を背景とみなす手）を潰す。
+     *
+     * その手は「背景は動かない・被写体は通り過ぎる」を当てにしているので、
+     * **被写体が一度も動かないと、被写体自身が背景の中央値になる**。
+     * 短尺の動画でいちばん多いのはこの形（三脚に据えて人がしゃべる）なので、
+     * 意地悪というより**本命の使い道**。真ん中から外して置いてあるのは、
+     * 「ずっと真ん中に置く」が正解になってしまわないようにするため。
+     */
+    name: 'subject-static',
+    note: '被写体が画面の右寄りに居続ける（動かない）。カットは 1 つも無い',
+    hard: true,
+    cuts: [],
+    options: {
+      seed: 124,
+      subjects: [
+        {
+          axis: 'u',
+          rx: 0.2,
+          ry: 0.42,
+          hue: SUBJECT_HUE,
+          keys: [
+            [0, 0.72],
+            [13, 0.72],
+          ],
+        },
+      ],
+    },
+  },
+  {
+    /**
+     * **おとり**。小さいほうが逆向きに動く。動いた所の**重心**を取る手は、
+     * 2 つの間（つまりどちらでもない所）を指すはず——重心は「いちばん強い所」ではなく
+     * 「平均」なので、相手が 2 つあると必ず負ける。追うべきは大きいほう（`lead`）。
+     */
+    name: 'subject-decoy',
+    note: '大きい被写体と、逆向きに動く小さい被写体。追うのは大きいほう',
+    hard: true,
+    cuts: [],
+    options: {
+      seed: 123,
+      subjects: [
+        { axis: 'u', rx: 0.2, ry: 0.42, hue: SUBJECT_HUE, keys: CROSSING_KEYS, lead: true },
+        {
+          axis: 'u',
+          rx: 0.08,
+          ry: 0.18,
+          hue: 0.55,
+          keys: [
+            [0, 1.2],
+            [13, -0.2],
+          ],
+        },
+      ],
+    },
+  },
+];
+
 /** 名前から引く。 */
 export function sceneFixture(name) {
-  const found = SCENE_FIXTURES.find((f) => f.name === name);
+  const found = SCENE_FIXTURES.find((f) => f.name === name) ?? REFRAME_FIXTURES.find((f) => f.name === name);
   if (!found) throw new Error(`素材 ${name} は一覧にありません`);
   return found;
 }

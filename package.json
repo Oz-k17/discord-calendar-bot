@@ -12,8 +12,8 @@
     "bundle": "npm run build && npm run lab:build && node scripts/sync-bundles.mjs",
     "lab": "vite lab/auto-cut",
     "lab:build": "vite build lab/auto-cut",
-    "lab:typecheck": "tsc -p lab/auto-cut --pretty false && tsc -p lab/scene-cut --pretty false && tsc -p lab/beat --pretty false && tsc -p lab/thumbnail --pretty false",
-    "lab:test": "node lab/auto-cut/selftest.mjs && node lab/scene-cut/selftest.mjs && node lab/beat/selftest.mjs && node lab/thumbnail/selftest.mjs",
+    "lab:typecheck": "tsc -p lab/auto-cut --pretty false && tsc -p lab/scene-cut --pretty false && tsc -p lab/beat --pretty false && tsc -p lab/thumbnail --pretty false && tsc -p lab/reframe --pretty false",
+    "lab:test": "node lab/auto-cut/selftest.mjs && node lab/scene-cut/selftest.mjs && node lab/beat/selftest.mjs && node lab/thumbnail/selftest.mjs && node lab/reframe/selftest.mjs",
     "lab:fixtures": "node lab/fixtures/make-audio.mjs",
     "lab:bench": "node lab/auto-cut/bench.mjs",
     "lab:loudness": "node lab/auto-cut/loudness.mjs",
@@ -44,7 +44,9 @@
     "lab:thumb:demo": "vite lab/thumbnail",
     "lab:thumb:uitest": "node lab/thumbnail/uitest.mjs",
     "lab:thumb:format": "node lab/thumbnail/format-probe.mjs",
-    "lab:thumb:outline": "node lab/thumbnail/outline-format-probe.mjs"
+    "lab:thumb:outline": "node lab/thumbnail/outline-format-probe.mjs",
+    "lab:reframe": "node lab/reframe/bench.mjs",
+    "lab:reframe:probe": "node lab/reframe/probe.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",

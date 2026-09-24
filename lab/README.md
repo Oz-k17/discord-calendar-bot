@@ -17,6 +17,7 @@
 | [`scene-cut/`](./scene-cut/) | シーン検出（カットの切り替わりを見つけて割る） | `npm run lab:scene:demo` |
 | [`beat/`](./beat/) | 拍の検出（テンポと、拍が来る秒） | `npm run lab:beat:demo` |
 | [`thumbnail/`](./thumbnail/) | 表紙（サムネイル）候補の自動抽出 | `npm run lab:thumb` |
+| [`reframe/`](./reframe/) | 自動リフレーム（縦型へ切り出す窓を被写体に合わせて動かす） | `npm run lab:reframe` |
 
 ```
 npm run lab            # 開発サーバで開く
@@ -53,6 +54,9 @@ npm run lab:thumb:portrait  # 同じものを縦型（9:16 の切り出し）で
 npm run lab:thumb:native    # 同じものを縦型（最初から縦で撮った）で測る
 npm run lab:thumb:format    # 書き出しの形式を測る（PNG と JPEG・品質 7 通り）
 npm run lab:thumb:outline   # 字の縁取り（細い線）が非可逆でどれだけ荒れるかを実寸で測る
+
+npm run lab:reframe:probe   # 「どの手なら被写体が横のどこに居るかを指せるか」を正解付きで測る
+npm run lab:reframe         # 自動リフレームが実際どれくらい効くかを測る
 ```
 
 `lab:test` は**すべての試作の検算をまとめて走らせる**（1 つだけ緑にして終わらないため）。

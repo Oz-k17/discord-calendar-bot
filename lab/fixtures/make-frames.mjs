@@ -14,7 +14,18 @@
  * 呼ぶ側は `renderFixture(name)` でコマの列をその場で作る。
  */
 
-import { SCENE_ASPECTS, SCENE_FIXTURES, SCENE_FPS, SCENE_LENGTH, sceneAspect, sceneFixture } from './scenes.mjs';
+import {
+  REFRAME_FIXTURES,
+  SCENE_ASPECTS,
+  SCENE_FIXTURES,
+  SCENE_FPS,
+  SCENE_LENGTH,
+  SUBJECT_HUE,
+  sceneAspect,
+  sceneFixture,
+  subjectTrackAt,
+  subjectsOf,
+} from './scenes.mjs';
 
 /** 種を固定した擬似乱数（mulberry32）。音の側と同じものを使う。 */
 function rng(seed) {
@@ -549,13 +560,20 @@ export function renderSpec(
   }
 
   // 横切る被写体は場面の一部ではなく、カメラの前を通るものとして別に持つ。
-  // 縦に横切る（`crossing: 'vertical'`）ときは、長いほうの軸を入れ替えるだけ。
-  const crossingVertical = o.crossing === 'vertical';
-  const crossing = o.crossing
-    ? crossingVertical
-      ? { color: hsv(0.08, 0.7, 0.95), rx: 0.42, ry: 0.2 }
-      : { color: hsv(0.08, 0.7, 0.95), ry: 0.42, rx: 0.2 }
-    : null;
+  //
+  // 大きさも道筋も**正解を返す側（`scenes.mjs` の `subjectsOf`）から受け取る**
+  // （2026-09-24・3 回目）。もとはここに `-0.3 + 1.6 * (t / SCENE_LENGTH)` と直に書いてあったが、
+  // 自動リフレームを測るには「被写体がいまどこに居るか」が正解として要るので、
+  // **描く側と測る側が同じ 1 か所を読む**形へ直した。
+  // `crossing: 'vertical'`（長いほうの軸を入れ替えるだけ）もそちらで均してある。
+  const subjects = subjectsOf(fixture).map((sub) => ({
+    axis: sub.axis,
+    rx: sub.rx,
+    ry: sub.ry,
+    keys: sub.keys,
+    color: hsv(sub.hue ?? SUBJECT_HUE, 0.7, 0.95),
+  }));
+  const subjectPos = new Float64Array(subjects.length);
 
   // 焼き込みの文字帯。**切り出しより後に乗る**ものなので、画面の座標（u0・v0）で置く。
   //
@@ -650,7 +668,8 @@ export function renderSpec(
     const shakeU = o.shake ? (shakeRnd() - 0.5) * o.shake : 0;
     const shakeV = o.shake ? (shakeRnd() - 0.5) * o.shake : 0;
     // 横切るものは 13 秒かけて画面の外から外へ抜ける。縦のときは同じ道筋を縦に置く。
-    const crossAt = crossing ? -0.3 + 1.6 * (t / SCENE_LENGTH) : 0;
+    // 途中で止まる道筋（`subject-pause`）も折れ線として同じ口から出てくる。
+    for (let si = 0; si < subjects.length; si += 1) subjectPos[si] = subjectTrackAt(subjects[si], t);
 
     for (let y = 0; y < height; y += 1) {
       const v0 = (y + 0.5) / height;
@@ -669,16 +688,19 @@ export function renderSpec(
           for (let i = 0; i < 3; i += 1) rgb[i] += (rgbB[i] - rgb[i]) * mix;
         }
 
-        if (crossing) {
+        for (let si = 0; si < subjects.length; si += 1) {
           // 横切る被写体は場面の一部ではなくカメラの前を通るものなので、
           // **切り出す前の画面**の座標で置く。横型では `uFrame === u0` なので
           // ここを切り替えても横型の絵は 1 ビットも変わらない。
-          const du = crossingVertical ? uFrame - 0.5 : uFrame - crossAt;
-          const dv = crossingVertical ? v0 - crossAt : v0 - 0.5;
-          const d = (du / crossing.rx) * (du / crossing.rx) + (dv / crossing.ry) * (dv / crossing.ry);
+          const sub = subjects[si];
+          const at = subjectPos[si];
+          const du = sub.axis === 'v' ? uFrame - 0.5 : uFrame - at;
+          const dv = sub.axis === 'v' ? v0 - at : v0 - 0.5;
+          const d = (du / sub.rx) * (du / sub.rx) + (dv / sub.ry) * (dv / sub.ry);
           if (d < 1) {
             const a = Math.min(1, (1 - d) * 3);
-            for (let i = 0; i < 3; i += 1) rgb[i] += (crossing.color[i] - rgb[i]) * a;
+            // 重なったときは後ろに書いたものが上に乗る（おとりは主役より小さく・後ろ）。
+            for (let i = 0; i < 3; i += 1) rgb[i] += (sub.color[i] - rgb[i]) * a;
           }
         }
 
@@ -771,7 +793,9 @@ if (typeof process !== 'undefined' && process.argv?.[1]?.endsWith('make-frames.m
   const only = process.argv[2];
   const aspect = process.argv[3] ?? 'landscape';
   const fps = Number(process.argv[4] ?? SCENE_FPS);
-  const list = only ? [sceneFixture(only)] : SCENE_FIXTURES;
+  // 自動リフレームの素材は別の列に置いてあるが（`scenes.mjs` の注）、
+  // 一覧から漏れると「無い素材」に見えるので、ここでは続けて出す。
+  const list = only ? [sceneFixture(only)] : [...SCENE_FIXTURES, ...REFRAME_FIXTURES];
   console.log(`向き: ${aspect}（${SCENE_ASPECTS[aspect]?.label ?? '?'}） ・ ${fps}fps\n`);
   for (const f of list) {
     const clip = renderFixture(f.name, { aspect, fps });
