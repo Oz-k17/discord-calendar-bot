@@ -242,13 +242,33 @@ function shotPixel(shot, u, v, t, out, span = 1, spanV = 1) {
  * 透けると「1 画素も動かない領域」が**板の下だけ動く領域**に変わる。
  * 薄まりが (1-k) 倍で決まるという読みが正しければ、板が透けたぶんだけ k が減って
  * 距離が戻るはず——それが戻るかどうかがこの回の題。
+ *
+ * ## 字の縁取り（2026-09-24・2 回目）
+ *
+ * `outline` は**字の周りの暗い輪郭**の太さ。板と違って**字と一緒に動く**ので、
+ * 書き換わるたびに位置が変わる。単位は**画面の高さに対する割合**にしてある
+ * （帯の厚みに対する割合ではない）。本物の縁取りは字の大きさで決まるもので、
+ * 帯を厚くしても太らないから。1080p の 4 画素なら 4/1080 ＝ 0.0037。
+ *
+ * `samples` は**画素の中を何等分して面積で混ぜるか**（既定 1 ＝ 点で測る。
+ * それまでの帯と 1 ビットも変わらない）。縁取りにこれが要るのは、
+ * **現実の縁取りが測るコマでは 1 画素より細い**から——128×72 で 0.0037 は 0.27 画素で、
+ * 点で測ると画素の中心に当たるかどうかの運になる（当たらなければ丸ごと消える）。
+ * 本物の映像は 1920×1080 で焼いてから縮むので、細い線は**消えずに薄まって**残る。
+ * それを作るには面積で混ぜるほかない。
+ *
+ * **混ぜるのは帯の中だけ**にしてある。絵の側まで面積で混ぜると、
+ * 手ぶれやパンの当たり方まで一緒に変わってしまい、
+ * 「縁取りを足したから動いた」のか「混ぜ方を変えたから動いた」のかが分からなくなる。
  */
-function buildCaptions(spec, seed) {
+function buildCaptions(spec, seed, view) {
   const top = spec.top ?? 0;
   const bottom = spec.bottom ?? 0;
   const changeEvery = spec.changeEvery ?? 0;
   const alpha = opacity(spec.alpha ?? 1);
   const inkAlpha = opacity(spec.inkAlpha ?? 1);
+  const outline = thickness(spec.outline ?? 0);
+  const samples = subSamples(spec.samples ?? 1);
   const cells = 16;
   // 升目の並びを何通りか先に作っておく。書き換えるときはこの中を順に使う。
   const patterns = [];
@@ -265,8 +285,19 @@ function buildCaptions(spec, seed) {
     patterns,
     alpha,
     inkAlpha,
+    outline,
+    samples,
+    // 縁取りの太さは高さの割合で受けるので、横へは**画面の縦横比のぶんだけ縮める**
+    // （そうしないと横に太い縁取りになる）。切り出した縦型では受け皿が縦長なので、
+    // 同じ 1 つの数から出る横の太さは向きごとに変わる——それが正しい。
+    outlineU: (outline * view.height) / view.width,
+    outlineV: outline,
     plate: [22, 20, 26],
     ink: [236, 236, 228],
+    // 縁取りは**字と同じ不透明度**で置く（読ませるための線なので、板と一緒に透かさない）。
+    // 色は黒。板（22,20,26）とは明るさの升目で 2 つ離れるが、
+    // **色の升目（4×4×4）では板と同じ所に落ちる**——`rgbHist` からは見えない線になる。
+    stroke: [0, 0, 0],
   };
 }
 
@@ -275,6 +306,24 @@ function buildCaptions(spec, seed) {
 function opacity(v) {
   if (!Number.isFinite(v)) throw new Error(`不透明度は 0〜1 の数です（${v}）`);
   if (v < 0 || v > 1) throw new Error(`不透明度は 0〜1 の数です（${v}）`);
+  return v;
+}
+
+/**
+ * 縁取りの太さ（画面の高さに対する割合）。
+ *
+ * 上限 0.05 は**思い違いを弾くための線**で、「これなら字が埋まらない」という保証ではない
+ * （字の高さは帯の厚み × 0.45 なので、薄い帯では 0.05 は字より太い）。
+ * 帯の厚みと同じく**範囲の外は黙って詰めない**——詰めると「太くしたつもりの表」が出る。
+ */
+function thickness(v) {
+  if (!Number.isFinite(v) || v < 0 || v > 0.05) throw new Error(`縁取りの太さは 0〜0.05 の数です（${v}）`);
+  return v;
+}
+
+/** 画素の中を何等分するか。1 は「点で測る」＝面積で混ぜない。 */
+function subSamples(v) {
+  if (!Number.isInteger(v) || v < 1 || v > 32) throw new Error(`分割数は 1〜32 の整数です（${v}）`);
   return v;
 }
 
@@ -299,13 +348,93 @@ function captionAt(caps, u0, v0, t, out) {
   const pattern = caps.patterns[index % caps.patterns.length];
 
   const band = inTop ? { from: 0, to: caps.top } : { from: 1 - caps.bottom, to: 1 };
-  const h = (v0 - band.from) / (band.to - band.from);
-  const cell = Math.min(caps.cells - 1, Math.floor(u0 * caps.cells));
-  const inner = h > 0.3 && h < 0.75 && u0 > 0.06 && u0 < 0.94;
-  const lit = inner && pattern[cell];
-  out.color = lit ? caps.ink : caps.plate;
-  out.alpha = lit ? caps.inkAlpha : caps.alpha;
+  if (litAt(caps, pattern, band, u0, v0)) {
+    out.color = caps.ink;
+    out.alpha = caps.inkAlpha;
+    return true;
+  }
+  // 縁取りは「字ではないが、字から縁取りの太さのうちにある所」。
+  // 板と同じ升目に混ざらないよう、字の側を先に見てから引く。
+  if (caps.outline > 0 && nearInk(caps, pattern, band, u0, v0)) {
+    out.color = caps.stroke;
+    out.alpha = caps.inkAlpha;
+    return true;
+  }
+  out.color = caps.plate;
+  out.alpha = caps.alpha;
   return true;
+}
+
+/**
+ * その点が字（明るい升目）の上かどうか。
+ *
+ * 帯の内側に少し余白を取ってあるのは `captionAt` の注のとおり。
+ * **`u0` の余白は帯ぜんたいに 1 回だけ掛かる**ので、隣り合う升目が両方点いていれば
+ * 字は横に繋がる。縁取りが「升目の数」ではなく**「かたまりの数」で決まる**のはそのため。
+ */
+function litAt(caps, pattern, band, u0, v0) {
+  if (!(u0 > 0.06 && u0 < 0.94)) return false;
+  const h = (v0 - band.from) / (band.to - band.from);
+  if (!(h > 0.3 && h < 0.75)) return false;
+  return pattern[Math.min(caps.cells - 1, Math.floor(u0 * caps.cells))];
+}
+
+/**
+ * 字から縁取りの太さのうちにあるか。
+ *
+ * 字は軸に平行な四角の集まりなので、**8 方向を突いて 1 つでも字に当たれば縁の中**
+ * （四角の周りの、角まで四角い輪になる）。距離の式を書く形にしないのは、
+ * 升目が繋がったときの輪郭が「1 つの四角」ではなくなるため。
+ */
+function nearInk(caps, pattern, band, u0, v0) {
+  const du = caps.outlineU;
+  const dv = caps.outlineV;
+  for (let j = -1; j <= 1; j += 1) {
+    for (let i = -1; i <= 1; i += 1) {
+      if (i === 0 && j === 0) continue;
+      if (litAt(caps, pattern, band, u0 + i * du, v0 + j * dv)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 帯を 1 画素ぶん、**面積で**混ぜる（2026-09-24・2 回目）。
+ *
+ * 画素の中を `samples` × `samples` に割って、それぞれの点で帯を引き、
+ * **不透明度を先に掛けて（premultiplied）足す**。最後に 1 回だけ下の絵へ乗せる。
+ * 足しながら 1 点ずつ下の絵へ乗せる形にすると、同じ画素を何度も塗り重ねることになり、
+ * 覆っている割合が指数で効いてしまう（0.5 を 2 回で 0.75）。
+ *
+ * これが要る理由は `buildCaptions` の注のとおりで、**現実の縁取りは測るコマでは
+ * 1 画素より細い**。点で測ると当たり外れになるので、割合として残すには面積で混ぜる。
+ * 逆に言えば、この道は**縁取りが無くても帯の縁を滑らかにする**ので、
+ * 縁取りの効きを測るときは「面積で混ぜただけ」の列も並べて見ること。
+ */
+function overlayCaptionArea(caps, u0, v0, du, dv, t, data, p, cap) {
+  const n = caps.samples;
+  const each = 1 / (n * n);
+  let a = 0;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  for (let j = 0; j < n; j += 1) {
+    const v = v0 + ((j + 0.5) / n - 0.5) * dv;
+    for (let i = 0; i < n; i += 1) {
+      const u = u0 + ((i + 0.5) / n - 0.5) * du;
+      if (!captionAt(caps, u, v, t, cap)) continue;
+      const w = cap.alpha * each;
+      if (w <= 0) continue;
+      a += w;
+      r += cap.color[0] * w;
+      g += cap.color[1] * w;
+      b += cap.color[2] * w;
+    }
+  }
+  if (a <= 0) return;
+  data[p] = data[p] * (1 - a) + r;
+  data[p + 1] = data[p + 1] * (1 - a) + g;
+  data[p + 2] = data[p + 2] * (1 - a) + b;
 }
 
 /**
@@ -329,12 +458,27 @@ export function renderFixture(name, opts = {}) {
  */
 export function renderSpec(
   fixture,
-  { aspect = 'landscape', fps = SCENE_FPS, captionCover = 0, captionAlpha = null, captionInkAlpha = null } = {},
+  {
+    aspect = 'landscape',
+    fps = SCENE_FPS,
+    captionCover = 0,
+    captionAlpha = null,
+    captionInkAlpha = null,
+    captionOutline = null,
+    captionSamples = null,
+    scale = 1,
+  } = {},
 ) {
   const o = fixture.options ?? {};
   const view = sceneAspect(aspect);
-  const width = view.width;
-  const height = view.height;
+  // `scale` は**描く大きさそのもの**を変える口（2026-09-24・2 回目）。
+  // 既定の 1 は 128×72 ＝ これまでの大きさ。15 なら 1920×1080 になる。
+  // 要るのは書き出しの側で、**細い線を細い線として焼くには実寸で描くほかない**
+  // （表紙の書き出しは 128×72 を 15 倍して焼いているので、1 画素の線が 15 画素の帯になる）。
+  // シーン検出の側では使わない——測るコマは本物でも縮めて渡すから。
+  if (!Number.isInteger(scale) || scale < 1 || scale > 32) throw new Error(`scale は 1〜32 の整数です（${scale}）`);
+  const width = view.width * scale;
+  const height = view.height * scale;
   // 縦型は「同じ絵を縦長の受け皿に描き直す」のではなく、**横型の画面から横を切り出す**。
   // 理由は `scenes.mjs` の `PORTRAIT_CROP_U` の注に書いた。
   const cropU = view.cropU;
@@ -426,8 +570,12 @@ export function renderSpec(
   const sheer = {};
   if (captionAlpha !== null) sheer.alpha = captionAlpha;
   if (captionInkAlpha !== null) sheer.inkAlpha = captionInkAlpha;
+  // 縁取りと分割数も同じ立場の口にしてある（2026-09-24・2 回目）。
+  // 素材の一覧を書き換えずに振れないと、「縁取りだけを足した 1 本の差」が測れない。
+  if (captionOutline !== null) sheer.outline = captionOutline;
+  if (captionSamples !== null) sheer.samples = captionSamples;
   const captionSpec = cover || o.captions ? { ...(o.captions ?? {}), ...(cover ?? {}), ...sheer } : null;
-  const captions = captionSpec ? buildCaptions(captionSpec, o.seed ?? 1) : null;
+  const captions = captionSpec ? buildCaptions(captionSpec, o.seed ?? 1, { width, height }) : null;
 
   const times = new Float64Array(total);
   const frames = [];
@@ -576,7 +724,11 @@ export function renderSpec(
           // 不透明なら、ここが「カットしても 1 画素も動かない領域」になる。
           // 透けるときは下の絵（粒まで乗ったあとの値）と混ぜるので、
           // **その割合ぶんだけ動く領域**に変わる。混ぜ算は素直な α 合成。
-          if (captionAt(captions, u0, v0, t, cap)) {
+          if (captions.samples > 1) {
+            // 面積で混ぜる道（2026-09-24・2 回目）。**画素の中心が帯の外でも呼ぶ**ので、
+            // 帯の縁にかかった画素もそのぶんだけ混ざる。点の道は 1 ビットも動かさない。
+            overlayCaptionArea(captions, u0, v0, 1 / width, 1 / height, t, data, p, cap);
+          } else if (captionAt(captions, u0, v0, t, cap)) {
             const a = cap.alpha;
             if (a >= 1) {
               for (let i = 0; i < 3; i += 1) data[p + i] = cap.color[i];

@@ -29,6 +29,7 @@
     "lab:scene:probe:native": "LAB_ASPECT=native node lab/scene-cut/probe.mjs",
     "lab:scene:captions": "LAB_CAPTIONS=0.26 node lab/scene-cut/bench.mjs",
     "lab:scene:caption-probe": "node lab/scene-cut/caption-probe.mjs",
+    "lab:scene:outline-probe": "node lab/scene-cut/outline-probe.mjs",
     "lab:scene:demo": "vite lab/scene-cut",
     "lab:scene:uitest": "node lab/scene-cut/uitest.mjs",
     "lab:beats-fixtures": "node lab/fixtures/make-beats.mjs",
@@ -42,7 +43,8 @@
     "lab:thumb:native": "LAB_ASPECT=native node lab/thumbnail/bench.mjs",
     "lab:thumb:demo": "vite lab/thumbnail",
     "lab:thumb:uitest": "node lab/thumbnail/uitest.mjs",
-    "lab:thumb:format": "node lab/thumbnail/format-probe.mjs"
+    "lab:thumb:format": "node lab/thumbnail/format-probe.mjs",
+    "lab:thumb:outline": "node lab/thumbnail/outline-format-probe.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",

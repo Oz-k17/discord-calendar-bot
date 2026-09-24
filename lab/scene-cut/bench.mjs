@@ -6,6 +6,7 @@
  *   npm run lab:scene:native            # 縦型（最初から縦で撮った）で測る
  *   LAB_CAPTIONS=0.26 npm run lab:scene # 全素材へ焼き込みの文字帯を乗せて測る
  *   LAB_CAPTION_ALPHA=0.5 npm run lab:scene # 帯の板を透かして測る（1 = 不透明・既定）
+ *   LAB_CAPTION_OUTLINE=0.0037 npm run lab:scene # 字に縁取りを付けて測る（0.0037 = 1080p の 4 画素）
  *   LAB_FPS=30 npm run lab:scene      # コマの速さを変えて測る（つまみはコマ数で効く）
  *   LAB_NOGATE=1 npm run lab:scene   # またいだ距離の門を外す（入れる前の振る舞い）
  *   LAB_METRIC=grid npm run lab:scene
@@ -40,7 +41,18 @@ if (!Number.isFinite(captionCover) || captionCover < 0 || captionCover >= 1) {
 // 「半透明の板＋不透明な字」だから。素材ごと薄くする編集は字の側も下げて測る。
 const captionAlpha = process.env.LAB_CAPTION_ALPHA ? Number(process.env.LAB_CAPTION_ALPHA) : null;
 const captionInkAlpha = process.env.LAB_CAPTION_INK_ALPHA ? Number(process.env.LAB_CAPTION_INK_ALPHA) : null;
-const sheer = { captionAlpha, captionInkAlpha };
+// 字の縁取り（2026-09-24・2 回目）。太さは画面の高さに対する割合で、1080p の 4 画素なら 0.0037。
+// **分割数を添えないと意味が無い**（0.0037 は測るコマでは 0.27 画素なので、
+// 点で測ると当たり外れになる）。既定を 4 にしてあるのはそのため。
+// **`LAB_CAPTION_OUTLINE=0` は「縁取りを外す」**（自前で縁取りを持つ素材も 0 になる）。
+// 列を揃えて測るときはこちらを明示すること——渡さないと `captions-only-outline` だけが縁取りを持つ。
+const captionOutline = process.env.LAB_CAPTION_OUTLINE ? Number(process.env.LAB_CAPTION_OUTLINE) : null;
+const captionSamples = process.env.LAB_CAPTION_SAMPLES
+  ? Number(process.env.LAB_CAPTION_SAMPLES)
+  : captionOutline
+    ? 4
+    : null;
+const sheer = { captionAlpha, captionInkAlpha, captionOutline, captionSamples };
 
 const options = {
   ...(process.env.LAB_NOGATE ? { straddleThreshold: 0 } : {}),
@@ -57,7 +69,8 @@ console.log(
   `シーン検出の効き（正解と突き合わせ／向き ${aspect} ${view.label} ${view.width}×${view.height} ・ ${fps}fps` +
     `${captionCover > 0 ? ` ・ 文字帯 ${(captionCover * 100).toFixed(0)}%` : ''}` +
     `${captionAlpha !== null ? ` ・ 板の不透明度 ${captionAlpha}` : ''}` +
-    `${captionInkAlpha !== null ? ` ・ 字の不透明度 ${captionInkAlpha}` : ''}）\n`,
+    `${captionInkAlpha !== null ? ` ・ 字の不透明度 ${captionInkAlpha}` : ''}` +
+    `${captionOutline !== null ? ` ・ 縁取り ${captionOutline}（分割 ${captionSamples}）` : ''}）\n`,
 );
 console.log(
   `${pad('素材', 20)}${right('正解', 5)}${right('見つけた', 9)}${right('当たり', 7)}` +

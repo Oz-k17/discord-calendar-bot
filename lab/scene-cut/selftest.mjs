@@ -9,6 +9,8 @@
 
 const { runSelfTest } = await import('./src/selftest.ts');
 const { renderSpec } = await import('../fixtures/make-frames.mjs');
+// 縁取りの検算は本数が増えたので別のファイルへ分けてある（2026-09-24・2 回目）。
+const { runOutlineFixtureTests } = await import('./outline-selftest.mjs');
 
 const results = runSelfTest();
 
@@ -56,6 +58,7 @@ const results = runSelfTest();
     detail: `板を消した所からの寄り  0.25 で ${part.toFixed(1)} / 1 で ${full.toFixed(1)}（比 ${(part / full).toFixed(3)}）`,
   });
 }
+results.push(...(await runOutlineFixtureTests()));
 let failed = 0;
 for (const r of results) {
   if (!r.ok) failed += 1;

@@ -36,6 +36,8 @@ npm run lab:scene        # シーン検出が実際どれくらい効くかを�
 npm run lab:scene:portrait  # 同じものを縦型（9:16 の切り出し）で測る
 npm run lab:scene:native    # 同じものを縦型（最初から縦で撮った）で測る
 npm run lab:scene:captions  # 全素材へ焼き込みの文字帯を乗せて測る
+npm run lab:scene:caption-probe  # 帯の板の透け方が線の上下をどう動かすか測る
+npm run lab:scene:outline-probe  # 字の縁取りが線の上下をどう動かすか測る
 npm run lab:scene:demo   # シーン検出の画面を開く（本物の動画を読み込める）
 npm run lab:scene:uitest # シーン検出の画面まで通して確かめる（lab:uitest からも走る）
 
@@ -49,6 +51,8 @@ npm run lab:thumb:probe     # 「どの量なら表紙に使えないコマを�
 npm run lab:thumb           # 表紙の候補選びが実際どれくらい効くかを測る
 npm run lab:thumb:portrait  # 同じものを縦型（9:16 の切り出し）で測る
 npm run lab:thumb:native    # 同じものを縦型（最初から縦で撮った）で測る
+npm run lab:thumb:format    # 書き出しの形式を測る（PNG と JPEG・品質 7 通り）
+npm run lab:thumb:outline   # 字の縁取り（細い線）が非可逆でどれだけ荒れるかを実寸で測る
 ```
 
 `lab:test` は**すべての試作の検算をまとめて走らせる**（1 つだけ緑にして終わらないため）。
