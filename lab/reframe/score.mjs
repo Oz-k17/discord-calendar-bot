@@ -48,21 +48,29 @@ export function scoreFollow(fixture, times, centers, cropWidth, aspect = 'landsc
  *
  * コマ単位ではなく run 単位で持つのは、**カット直後の組み直しを丸ごと外す**ため
  * （下の `scoreSwim` の注を参照）。
+ *
+ * `cuts` を渡すと、**カットをまたぐ run はそこで切る**。
+ * 2026-09-25（3 回目）に足した。理由は下の `scoreSwim` の注。
  */
-export function movingRuns(times, centers) {
+export function movingRuns(times, centers, cuts = []) {
   const runs = [];
   let open = null;
+  const close = () => {
+    if (open) runs.push(open);
+    open = null;
+  };
   for (let i = 1; i < centers.length; i += 1) {
     const moved = Math.abs(centers[i] - centers[i - 1]);
     if (moved > 0) {
+      // このコマでカットをまたいだなら、ここから先は別の run として数える。
+      if (open && cuts.some((c) => c > times[i - 1] && c <= times[i])) close();
       if (!open) open = { start: times[i - 1], travel: 0 };
       open.travel += moved;
-    } else if (open) {
-      runs.push(open);
-      open = null;
+    } else {
+      close();
     }
   }
-  if (open) runs.push(open);
+  close();
   return runs;
 }
 
@@ -76,13 +84,39 @@ export function movingRuns(times, centers) {
  * 寄せの上限は 0.22/s なので端から端まで組み直すのに 3 秒以上かかり、
  * コマで外すと組み直しの大半が窓の外に落ちる。なので外すのは**ひと続きごと**で、
  * **その始まりがカットから 0.6 秒以内なら、その run は丸ごと組み直し**とみなす。
+ *
+ * ## run をカットで切るようにした（2026-09-25・3 回目）
+ *
+ * 「始まりで決める」だけだと、**枠が止まらずに動き続ける門では丸ごと裏返る。**
+ * カットの手前から枠がわずかに動いていると run はそこから開いているので、
+ * カットの直後の組み直しまで含めて **1 本の「泳ぎ」**として数えてしまう。
+ * 実際 `cuts-plain` は、動いた量の合計が 0.078 → 0.071 と**減っている**のに、
+ * 泳ぎだけが 0.000 → 0.071 に化けた。
+ *
+ * **これは門の出来ではなく物差しの穴**（「枠は止まったり動いたりする」を
+ * 暗黙に仮定していた）。なので run をカットで切って、
+ * **カットから先は別の run**として始まりを測り直す。
+ * 切っても、貯めて動き出す門の数字は 1 つも動かない（あちらの run は
+ * もともとカットをまたがない）。**物差しを直したら、前の答えが動かないことを確かめること。**
  */
 export const AFTER_CUT = 0.6;
 
+/**
+ * コマの時刻の**丸めしろ**（秒）。
+ *
+ * 動き出しがカットのすぐ手前のコマに乗ったとき、`c - 1/fps` の線で拾いそこねる。
+ * デコードした時刻はミリ秒に丸めてあり、速さも素材から読んだ見積もり
+ * （15fps の素材が 15.0015fps と出る）なので、**ちょうど 1 コマぶんが
+ * きっかり 1 コマぶんにならない。** 実際 `cuts-plain` は
+ * 2.9330 対 2.9334 と **0.0004 秒**足りずに落ちていた。
+ * 判定の話ではなく時刻の丸めの話なので、そのぶんだけ緩める。
+ */
+const TIME_EPS = 1e-3;
+
 export function scoreSwim(times, centers, cuts, fps) {
   const seconds = times.length > 1 ? times[times.length - 1] - times[0] : 0;
-  const runs = movingRuns(times, centers);
-  const isRecompose = (r) => cuts.some((c) => r.start >= c - 1 / fps && r.start < c + AFTER_CUT);
+  const runs = movingRuns(times, centers, cuts);
+  const isRecompose = (r) => cuts.some((c) => r.start >= c - 1 / fps - TIME_EPS && r.start < c + AFTER_CUT);
   const wander = runs.filter((r) => !isRecompose(r));
   const sum = (rs) => rs.reduce((a, r) => a + r.travel, 0);
   return {

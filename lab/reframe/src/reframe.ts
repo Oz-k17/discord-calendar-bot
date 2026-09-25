@@ -19,15 +19,26 @@
  * 生の位置は**当たっているが落ち着きが無い**。そのまま枠にすると 1 コマごとに揺れて、
  * 出来上がりは手ぶれのひどい映像になる。かといって強くならすと、
  * 動き出した被写体に置いていかれる。**遅れと揺れは同じつまみの裏表**なので、
- * ここは「ならす」ではなく**いつ動かすかを決める**形にしてある:
+ * ここは「ならす」ではなく**どれだけ動かすかを決める**形にしてある:
  *
  *   1. 生の位置を**中央値**でならす（平均ではない。カットのコマで飛ぶ 1 点を落とすため）
  *   2. 枠の中心からのずれが `deadband` の内側なら**動かさない**
- *   3. 外へ出ても、`settle` 秒ぶん続けて同じ側に居るまでは動かさない
- *   4. 動き出したら `maxSpeed` を上限に寄せ、**真ん中に来るまで**寄せ切る
+ *   3. 外へ出たら、**はみ出したぶんだけ**（`maxSpeed` を上限に）寄せる
  *
- * 3 と 4 が対で、これが無いと枠は deadband の縁を這い続けて、
- * 「いつも少し遅れている」状態から抜けられない。
+ * ## 3 は、2026-09-25（3 回目）まで「貯めて動き出す」形だった
+ *
+ * 前は「`settle` 秒ぶん続けて外に居たら動き出し、真ん中まで寄せ切って止まる」形で、
+ * **その形が、同じ動画を焼き直しただけで枠の置き所を変えていた。**
+ * ならした的が **0.001** 違うだけで「動き出す / 動かない」が入れ替わり、
+ * 枠ぜんたいが **0.059**（死に帯ぶん）別の所へ行く——**59 倍の増幅器**だった。
+ * 貯め方を変える手（`release` / `ramp`）は測って足りず、**貯めるのをやめると消えた**
+ * （枠の開き 0.0145 → 0.0016 / 焼き直しの振れ幅 1.6pt → 0.4pt）。
+ * 表は `gate` の注と `npm run lab:reframe:gate`、経緯は `README.md`。
+ *
+ * 払ったのは `deadband` の意味が変わったこと（下の注）と、
+ * **泳ぎが少し増えたこと**（被写体の居ない 20 本で、動いた量の合計の中央値 0.042 → 0.050）。
+ * 買ったのは再現性と、**短い寄り道への追従**（`subject-dart` の寄り道で 55.0% → 90.0%）。
+ * 寄り道に強くなったのは、`settle` が消えて**待たずに動き出す**ようになったため。
  */
 
 import {
@@ -43,11 +54,27 @@ import {
 export interface ReframeOptions {
   /** 切り出す窓の幅（画面の幅に対する割合）。16:9 から 9:16 を切るなら 81/256 ≒ 0.316。 */
   cropWidth: number;
-  /** 枠の中心からこのぶんまでのずれは、動かす理由にしない（画面の幅に対する割合）。 */
+  /**
+   * 枠の中心からこのぶんまでのずれは、動かす理由にしない（画面の幅に対する割合）。
+   *
+   * **`gate` が `soft` のとき、この値はそのまま「止まるときに残るずれ」になる。**
+   * 縁の内側では 1 コマも動かないので、寄っていっても必ずこのぶん手前で止まる。
+   * 貯めて動き出す形では「動き出す線」でしかなく、動き出したあとは
+   * `stopBand` まで詰め切っていた——**同じつまみが、門の形で別の意味になる。**
+   *
+   * 既定を 0.06 → 0.03 にしたのはそのため（2026-09-25・3 回目）。
+   * 0.06 のままだと、正解が画面の端に貼り付く素材で枠が端まで詰め切れず、
+   * **入れた率が 4.6 ポイント落ちる**（落ちたコマは 24 本とも画面の端だった）。
+   * 0.02 まで詰めると入れた率は戻るが、**パンの泳ぎが 0.029 → 0.063 と倍**になる。
+   */
   deadband: number;
   /** 1 秒に動かしてよい幅（画面の幅 / 秒）。 */
   maxSpeed: number;
-  /** 外へ出てから動き出すまでに要る時間（秒）。 */
+  /**
+   * 外へ出てから動き出すまでに要る時間（秒）。**`gate` が `soft` のときは使わない。**
+   *
+   * `leadIn` が頭の置き所を決めるのにはこの値を使い続けるので、消していない。
+   */
   settle: number;
   /** 生の位置をならす窓（秒）。中央値を取る。 */
   smooth: number;
@@ -69,6 +96,28 @@ export interface ReframeOptions {
    * 編集では頭から最後まで素材が手元にあるので、始まる前に決めてよい。
    */
   leadIn: boolean;
+  /**
+   * **門の貯め方**——「外へ出ている」という証拠を、コマごとにどう足し引きするか。
+   *
+   * ここが 1 本のつまみになっているのは、2026-09-25（2 回目）に
+   * **同じ動画を焼き直しただけで枠が数ポイントぶん振れる**と分かり、
+   * その根が「貯めを 1 コマで捨てる作り」だったため。
+   * 読む速さを上げる（30fps）のは上から被せた蓋で、ここが本体。
+   *
+   * - `step`  … 外なら +1、内へ入った瞬間に **0 へ捨てる**（2026-09-25 まではこれ）
+   * - `release` … 捨てる線を入る線より内側へ置く。あいだは **据え置き**
+   * - `ramp`  … 縁からの距離に**比例して**足し、内側では同じだけ引く
+   * - `soft`  … 貯めを**持たない**。縁からはみ出したぶんだけ、そのコマで寄せる
+   *
+   * `soft` だけ毛色が違う（`settle` も `maxSpeed` の寄せ切りも使わない）。
+   * 並べてあるのは、**貯め方を直すのと、貯めるのをやめるのと、どちらが効くか**を
+   * 測るため。`step` / `release` / `ramp` は同じ骨格の中の違いでしかない。
+   */
+  gate: 'step' | 'release' | 'ramp' | 'soft';
+  /** `release` のとき、貯めを捨てる線（`deadband` に対する割合）。 */
+  gateRelease: number;
+  /** `ramp` のとき、1 コマで満額たまるずれ（`deadband` からの超過分 / `deadband`）。 */
+  gateRamp: number;
 }
 
 /**
@@ -81,7 +130,21 @@ export interface ReframeOptions {
  * **同じ 1 本の動画から、2 つの判定が別々の速さを欲しがる。**
  * なので「読む速さ」は読み込みの持ち物ではなく、**判定ごとの持ち物**にしてある。
  *
- * ## 30 にしたのは、当たるからではなく**振れないから**
+ * ## 2026-09-25（3 回目）に、30 を持っている理由が入れ替わった
+ *
+ * 下に書いてある「間引くと振れる」は、**門が増幅器だったせい**だった。
+ * 門を `soft` にしたら **15fps 読みも 30fps 読みも振れ幅 0.0pt** になり、
+ * **当時の理由はまるごと消えた**（`npm run lab:reframe:decimate`）。
+ *
+ * それでも 30 のままにしているのは別の理由で、**間引くと泳ぐ**から——
+ * `pan` の泳ぎが 30fps 読み 0.029 に対して 15fps 読み **0.091 / 秒**（3 倍）。
+ * ならしが中央値なので、窓に入る標本が半分になると的が隣の値へ飛びやすくなり、
+ * `soft` はその飛びに**そのまま付いていく**（貯める門は飛びを 1 コマぶん無視できていた）。
+ *
+ * **15 へ戻せば読む時間もメモリも半分・上限までの尺は 2 倍**になるので、
+ * ここは開いたままの問いとして残してある（`README.md` の積み残し）。
+ *
+ * ## （以下は 2 回目の記録）30 にしたのは、当たるからではなく**振れないから**
  *
  * 1 回目（9/25）に「間引くと落ちる（92.6% 対 97.9%）」と書いたが、
  * **そのうち大半は測り方の穴だった。** 読む時刻をコマの頭に置いていたので、
@@ -121,17 +184,21 @@ export interface ReframeOptions {
  *
  * **不安定の根は、標本の数ではなく門の側にある**（数コマの違いが
  * 「動き出す / 動かない」に化ける作り）。ここで増やしているのは、その上から被せた蓋。
+ * → **その根は 2026-09-25（3 回目）に直した**（`gate` の注）。上の節を参照。
  */
 export const REFRAME_ANALYSIS_FPS = 30;
 
 export const DEFAULT_REFRAME: ReframeOptions = {
   cropWidth: 81 / 256,
-  deadband: 0.06,
+  deadband: 0.03,
   maxSpeed: 0.22,
   settle: 0.3,
   smooth: 1.0,
   rowBand: { from: 0.15, to: 0.85 },
   leadIn: true,
+  gate: 'soft',
+  gateRelease: 0.6,
+  gateRamp: 0.5,
 };
 
 export interface ReframeFrame {
@@ -157,6 +224,14 @@ export interface ReframePlan {
   options: ReframeOptions;
   /** 枠が動いた量の合計（画面の幅ぶん）。尺で割れば「1 秒あたりどれだけ泳いだか」。 */
   travel: number;
+  /**
+   * 門のふるまい。**「同じ動画を焼き直すと枠が振れる」の根を名指しするために持つ。**
+   *
+   * `resets` は貯めが捨てられた回数、`nearResets` はそのうち
+   * **あと半分で動き出すところまで貯まっていた**もの。
+   * 後者が出ている素材は、**コマ 1 枚の行き先が枠ぜんたいの行き先に化けている**。
+   */
+  gate: { resets: number; nearResets: number };
 }
 
 /**
@@ -199,23 +274,46 @@ export function rawTargets(cols: ColumnStat[]): number[] {
 
 /** 枠の置き所を決める。 */
 export function planReframe(cols: ColumnStat[], options: Partial<ReframeOptions> = {}): ReframePlan {
+  return planFromRaw(
+    rawTargets(cols),
+    cols.map((c) => c.time),
+    options,
+  );
+}
+
+/**
+ * **生の位置の列から**枠を決める。`planReframe` の中身はこちら。
+ *
+ * 列（`ColumnStat`）を経由しない入口を分けてあるのは、**門を検算するため**。
+ * 門が壊れるのは「ならし後の的が**ごくわずか**違ったとき、行き先が変わる」形なので、
+ * 合成したコマからでは試せない——**コマは画素に量子化されている**ので、
+ * 1 画素（0.008）より細かい差が作れない。2026-09-25（3 回目）に
+ * 0.0036 の差を入れようとして、まったく同じコマが 2 枚できた。
+ * **検算したい層より粗い入口からは、その層は検算できない。**
+ */
+export function planFromRaw(
+  raw: number[],
+  times: ArrayLike<number>,
+  options: Partial<ReframeOptions> = {},
+): ReframePlan {
   const opt = { ...DEFAULT_REFRAME, ...options };
   const frames: ReframeFrame[] = [];
-  if (!cols.length) return { frames, options: opt, travel: 0 };
+  if (!raw.length) return { frames, options: opt, travel: 0, gate: { resets: 0, nearResets: 0 } };
 
   const half = opt.cropWidth / 2;
   const lo = half;
   const hi = 1 - half;
   // 窓が画面より広ければ動かしようが無い（切り出す意味が無い）ので、真ん中で止める。
   if (lo >= hi) {
-    for (const c of cols) frames.push({ time: c.time, center: 0.5, raw: 0.5, target: 0.5, moving: false });
-    return { frames, options: opt, travel: 0 };
+    for (let i = 0; i < raw.length; i += 1) {
+      frames.push({ time: times[i], center: 0.5, raw: 0.5, target: 0.5, moving: false });
+    }
+    return { frames, options: opt, travel: 0, gate: { resets: 0, nearResets: 0 } };
   }
 
-  const raw = rawTargets(cols);
   // コマの速さは素材から読む（つまみは秒で書いてあるので、ここでコマ数へ直す）。
-  const span = cols.length > 1 ? cols[cols.length - 1].time - cols[0].time : 0;
-  const fps = span > 0 ? (cols.length - 1) / span : 30;
+  const span = raw.length > 1 ? times[raw.length - 1] - times[0] : 0;
+  const fps = span > 0 ? (raw.length - 1) / span : 30;
   const smoothFrames = Math.max(1, Math.round(opt.smooth * fps));
 
   // 中央値でならす。窓は前後へ同じだけ広げる（片側だけだと半窓ぶん遅れる）。
@@ -240,30 +338,72 @@ export function planReframe(cols: ColumnStat[], options: Partial<ReframeOptions>
   }
   center = Math.min(hi, Math.max(lo, center));
 
+  // `release` の捨てる線。入る線（`deadband`）より内側に置くので、
+  // 縁をまたいだ 1 コマでは貯めが消えない。
+  const releaseAt = opt.deadband * opt.gateRelease;
+
   let outside = 0;
   let moving = false;
   let travel = 0;
-  for (let i = 0; i < cols.length; i += 1) {
+  let resets = 0;
+  let nearResets = 0;
+  for (let i = 0; i < raw.length; i += 1) {
     const want = Math.min(hi, Math.max(lo, targets[i]));
     const err = want - center;
+    const dist = Math.abs(err);
+    const before = outside;
 
-    if (Math.abs(err) >= opt.deadband) outside += 1;
-    else outside = 0;
+    if (opt.gate === 'soft') {
+      // 状態を持たないので、貯めの話が丸ごと消える。
+      // **どの 1 コマも「動き出すか」を決めない**——決めるのは動く量だけ。
+      outside = 0;
+    } else if (opt.gate === 'ramp') {
+      // 縁ちょうどで 0 なので、縁に居るあいだは**貯めも減りもしない**。
+      // 深く外に居るコマほど速く貯まり、深く内に居るコマほど速く抜ける。
+      // 1 コマが動かせるのは高々 1 ぶんなので、**どの 1 コマも門を独りで決められない。**
+      // 0 で割らない。死に帯も目盛りも 0 を渡せる形なので、
+      // **つまみを端まで回したら NaN が枠に流れ込む**（画面からは 0.005 までしか回せないが、
+      // 呼ぶ側は数字を直に渡せる）。極小で止めれば「縁の外はすぐ満額」と同じ意味になる。
+      const rampSpan = Math.max(1e-6, opt.deadband * opt.gateRamp);
+      const score = (dist - opt.deadband) / rampSpan;
+      outside = Math.max(0, outside + Math.max(-1, Math.min(1, score)));
+    } else if (opt.gate === 'release') {
+      if (dist >= opt.deadband) outside += 1;
+      else if (dist < releaseAt) outside = 0;
+      // あいだ（捨てる線と入る線のあいだ）は据え置き。
+    } else {
+      if (dist >= opt.deadband) outside += 1;
+      else outside = 0;
+    }
+    // **捨てた回数は、門の形に依らず同じ意味で数える**（形どうしを並べるため）。
+    // `ramp` は少しずつ減るので、「貯めが半分より下へ落ちた」を 1 回と読む。
+    if (before >= 1 && outside < before / 2) {
+      resets += 1;
+      if (before >= settleFrames / 2) nearResets += 1;
+    }
     if (outside >= settleFrames) moving = true;
     // 寄せ切ったら止める。止める線を入れる側より内側にしてあるのがヒステリシス。
     if (moving && Math.abs(err) <= stopBand) moving = false;
 
     let next = center;
-    if (moving) {
+    if (opt.gate === 'soft') {
+      // 縁からはみ出したぶんだけ寄せる。縁の内側では 0 なので、
+      // 止まっている被写体には反応しない（そこは `step` と同じ）。
+      // 代わりに**動き続ける被写体には deadband ぶん遅れて付いていく**形になる。
+      const over = Math.max(0, dist - opt.deadband);
+      const move = Math.sign(err) * Math.min(step, over);
+      next = Math.min(hi, Math.max(lo, center + move));
+      moving = move !== 0;
+    } else if (moving) {
       next = center + Math.max(-step, Math.min(step, err));
       next = Math.min(hi, Math.max(lo, next));
     }
     travel += Math.abs(next - center);
-    frames.push({ time: cols[i].time, center: next, raw: raw[i], target: targets[i], moving });
+    frames.push({ time: times[i], center: next, raw: raw[i], target: targets[i], moving });
     center = next;
   }
 
-  return { frames, options: opt, travel };
+  return { frames, options: opt, travel, gate: { resets, nearResets } };
 }
 
 /** 枠を、クロップの矩形（0〜1 の左端と幅）として読む。本体のクロップへ渡す形。 */

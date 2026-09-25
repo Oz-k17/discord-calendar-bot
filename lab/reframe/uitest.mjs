@@ -166,7 +166,8 @@ try {
   ok(
     '画面の既定が判定の側から来ている',
     Math.abs(defaults.reframe.cropWidth - 81 / 256) < 1e-9 &&
-      defaults.reframe.deadband === 0.06 &&
+      defaults.reframe.deadband === 0.03 &&
+      defaults.reframe.gate === 'soft' &&
       defaults.reframe.maxSpeed === 0.22 &&
       defaults.reframe.settle === 0.3 &&
       defaults.reframe.smooth === 1 &&
@@ -275,11 +276,16 @@ try {
   // --- コマの速さ（シーン検出との違いを、画面から確かめる） ---
   //
   // シーン検出は既定のつまみが **15fps という単位を隠し持っていた**ので、速いまま渡すと壊れた。
-  // **こちらは遅く読むと「負ける」のではなく「振れる」**（2026-09-25・2 回目に測って既定を 30 にした。
-  // 入れた率の平均は 7 本で 15fps 読みも 30fps 読みも 96.5% で同じ）。
-  // つまみは全部「秒」で書いてあるが、ならしは中央値なので効くのは**コマの数**で、
-  // 標本が半分になると中央値が隣の値へ飛びやすくなり、その飛びを門が拡大する。
-  // 合成コマでは 3 通りとも 99.2% で 1 桁も動かないので、**ここは画面でしか測れない。**
+  // こちらが 30 を持っている理由は、**2026-09-25（3 回目）に入れ替わった。**
+  //
+  // 2 回目に 30 を選んだ理由は「間引くと焼き直しで答えが振れる（4.1pt 対 0.4pt）」だった。
+  // その振れは**門が増幅器だったせい**で、門を `soft` にしたら
+  // **どちらの読み方でも 0.0pt になった**（`npm run lab:reframe:decimate`）。
+  // つまり**当時の理由は、もう残っていない。**
+  //
+  // それでも 30 のままにしているのは別の理由で、**間引くとカメラの動く素材で泳ぐ**から
+  // （`pan` が 0.029 → 0.091 / 秒）。下の 2 つは、その 2 つをそれぞれ押さえる。
+  // 合成コマでは 1 桁も動かないので、**ここは画面でしか測れない。**
   const fast = await feed(page, 'motion', { fps: 30 });
   ok(
     '30fps の素材を、既定では間引かずに読む（シーン検出の 15fps とは別に持っている）',
@@ -305,13 +311,30 @@ try {
 
   const thinSpread = Math.abs(decimatedScore.inside - coarseThinScore.inside);
   const denseSpread = Math.abs(denseScore.inside - coarseDenseScore.inside);
+  // **門を直したので、ここは「間引いた側のほうが大きい」ではなくなった。**
+  // 2 回目はこの行で `thinSpread > denseSpread + 1` を見ていた（15fps 読みで 5.7pt 振れていた）。
+  // いまは**どちらも振れない**ので、見るのは「小さいこと」のほう。
+  // ここが再び開いたら、門が貯める形へ戻っている。
   ok(
-    '焼き直しただけで答えが動く幅は、間引いた側のほうが大きい（既定を 30 にした理由）',
-    thinSpread > denseSpread + 1,
+    '焼き直しただけでは答えが動かない（門を直した効きを、画面から見る）',
+    thinSpread <= 2 && denseSpread <= 2,
     `15fps 読み ${decimatedScore.inside.toFixed(1)}% → ${coarseThinScore.inside.toFixed(1)}%（${thinSpread.toFixed(1)}pt） / ` +
       `30fps 読み ${denseScore.inside.toFixed(1)}% → ${coarseDenseScore.inside.toFixed(1)}%（${denseSpread.toFixed(1)}pt）` +
       ` ・ 粒は 15fps 読みで ${grain(decimated.raws).toFixed(5)} → ${grain(coarseThin.raws).toFixed(5)} としか動いていない`,
   );
+
+  // **いま 30 を持っている理由のほう。** 間引くと、カメラが動く素材で枠が泳ぐ。
+  // 被写体の居ない素材で見るのは、ここに「追えているか」の言い訳が効かないから。
+  const panDense = await feed(page, 'pan', { fps: 30 });
+  const panDenseSwim = scoreSwim(panDense.state.times, panDense.state.centers, fixtureOf('pan').cuts, SCENE_FPS);
+  const panThin = await readAt(page, 15);
+  const panThinSwim = scoreSwim(panThin.times, panThin.centers, fixtureOf('pan').cuts, SCENE_FPS);
+  ok(
+    '間引くと、カメラの動く素材で枠が泳ぐ（いまの既定が 30 である理由）',
+    panThinSwim.swim > panDenseSwim.swim * 1.5,
+    `30fps 読み ${panDenseSwim.swim.toFixed(3)} / 秒 ・ 15fps 読み ${panThinSwim.swim.toFixed(3)} / 秒`,
+  );
+  await readAt(page, DEFAULT_REFRAME_FPS);
 
   // **「窓を広げれば済む」を潰す素材。** 0.8 秒の寄り道は 1.0 秒の窓では中央値に残るが、
   // 2.0 秒の窓では少数派になって消える。ここが落ちなければ、窓を広げる手を選んでいた。

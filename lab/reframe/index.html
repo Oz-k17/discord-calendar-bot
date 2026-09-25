@@ -114,14 +114,31 @@
             </small>
           </label>
           <label>
+            門の形（gate）
+            <select id="gate">
+              <option value="soft">soft ・ 貯めない（既定）</option>
+              <option value="step">step ・ 貯めて動き出す</option>
+              <option value="release">release ・ 捨てる線を下げる</option>
+              <option value="ramp">ramp ・ 比例して貯める</option>
+            </select>
+            <small>
+              <strong>枠の置き所が焼き直しで振れる根はここ。</strong>
+              貯めて動き出す形は、ならした的の 0.001 の差を枠の 0.059 に化けさせる（59 倍）。
+              soft は 1 倍。切り替えると、下の枠の線が「階段」から「なめらか」へ変わる
+            </small>
+          </label>
+          <label>
             動かす理由にしないずれ（deadband） <output id="out-dead"></output>
-            <input type="range" id="deadband" min="0.01" max="0.2" step="0.005" value="0.06" />
-            <small>広げると泳がなくなるが置いていかれる（0.03〜0.14 で入れた率 86.7% → 79.5%・泳ぎ 0.010 → 0.000）</small>
+            <input type="range" id="deadband" min="0.005" max="0.2" step="0.005" value="0.03" />
+            <small>
+              <strong>soft では「止まるときに残るずれ」そのもの</strong>（縁の内側では 1 コマも動かないので、
+              必ずこのぶん手前で止まる）。詰めると追えるが泳ぐ（0.03 → 0.02 でパンの泳ぎが 0.029 → 0.063）
+            </small>
           </label>
           <label>
             動き出すまでに要る時間（settle） <output id="out-settle"></output>
             <input type="range" id="settle" min="0.05" max="1.5" step="0.05" value="0.3" />
-            <small>1.0 秒まで伸ばしてもパンの泳ぎは 0.12 止まりで、入れた率だけが 78.7% へ落ちる</small>
+            <small>貯めて動き出す門だけが使う（<strong>soft では効かない</strong>）。1.0 秒まで伸ばしてもパンの泳ぎは 0.12 止まり</small>
           </label>
           <label>
             1 秒に動かしてよい幅（maxSpeed） <output id="out-speed"></output>

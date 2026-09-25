@@ -119,6 +119,7 @@ function currentOptions(): Partial<ReframeOptions> {
   return {
     cropWidth: Number($<HTMLInputElement>('crop-width').value),
     deadband: Number($<HTMLInputElement>('deadband').value),
+    gate: $<HTMLSelectElement>('gate').value as ReframeOptions['gate'],
     settle: Number($<HTMLInputElement>('settle').value),
     maxSpeed: Number($<HTMLInputElement>('max-speed').value),
     smooth: Number($<HTMLInputElement>('smooth').value),
@@ -448,6 +449,8 @@ for (const id of ['crop-width', 'deadband', 'settle', 'max-speed', 'smooth', 'ro
   });
 }
 $<HTMLElement>('lead-in').addEventListener('change', refresh);
+// 門の形は畳んだあとの話なので、畳み直さずに引き直すだけでよい。
+$<HTMLElement>('gate').addEventListener('change', refresh);
 
 // コマの速さは**何を読むか**の話なので、こちらだけは読み直しになる。
 $<HTMLElement>('fps').addEventListener('change', () => {
@@ -482,6 +485,7 @@ $<HTMLInputElement>('max-speed').value = String(DEFAULT_REFRAME.maxSpeed);
 $<HTMLInputElement>('smooth').value = String(DEFAULT_REFRAME.smooth);
 $<HTMLInputElement>('row-band').value = String(DEFAULT_REFRAME.rowBand.from);
 $<HTMLInputElement>('lead-in').checked = DEFAULT_REFRAME.leadIn;
+$<HTMLSelectElement>('gate').value = DEFAULT_REFRAME.gate;
 $<HTMLInputElement>('fps').value = String(REFRAME_ANALYSIS_FPS);
 showAllValues();
 

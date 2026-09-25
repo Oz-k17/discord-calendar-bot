@@ -4,6 +4,7 @@
  *   npm run lab:reframe
  *   LAB_RF_DEAD=0.06 LAB_RF_SPEED=0.22 LAB_RF_SETTLE=0.3 LAB_RF_SMOOTH=0.33 npm run lab:reframe
  *   LAB_RF_LEADIN=off npm run lab:reframe   # 頭を真ん中から始める（入れる前の振る舞い）
+ *   LAB_RF_GATE=step npm run lab:reframe    # 門の形を替える（step / release / ramp / soft）
  *   LAB_FPS=30 npm run lab:reframe          # コマの速さを変えて測る（つまみは秒で書いてある）
  *
  * **入れた率だけを見ないこと。** 枠を毎コマ被写体へ貼り付ければ 100% になるが、
@@ -28,6 +29,11 @@ const options = {
   ...(process.env.LAB_RF_SETTLE ? { settle: Number(process.env.LAB_RF_SETTLE) } : {}),
   ...(process.env.LAB_RF_SMOOTH ? { smooth: Number(process.env.LAB_RF_SMOOTH) } : {}),
   ...(process.env.LAB_RF_LEADIN ? { leadIn: process.env.LAB_RF_LEADIN !== 'off' } : {}),
+  // 門の形（`step` / `release` / `ramp` / `soft`）。**合成コマでは振れ幅は測れない**
+  // （粒が乗らないので焼き直しの当たり外れが出ない）ので、ここで見るのは
+  // 「追えているか・泳いでいないか」のほうだけ。振れ幅は `lab:reframe:gate`。
+  ...(process.env.LAB_RF_GATE ? { gate: process.env.LAB_RF_GATE } : {}),
+  ...(process.env.LAB_RF_RAMP ? { gateRamp: Number(process.env.LAB_RF_RAMP) } : {}),
 };
 // 列へ畳むときに見る縦の範囲。既定は上下 15% を落とす（`LAB_RF_BAND=0,1` で全部に戻せる）。
 if (process.env.LAB_RF_BAND) {
@@ -92,9 +98,14 @@ console.log(
 );
 
 console.log('\n\n被写体の居ない素材（泳いでいないか。0.000 が正解）\n');
-console.log(`${pad('素材', 22)}${right('泳ぎ/s', 9)}${right('回数', 7)}${right('組み直し/s', 11)}${right('振れ幅', 9)}`);
-console.log('-'.repeat(58));
+// **合計（泳ぎ＋組み直し）も出す。** 2026-09-25（3 回目）に足した。
+// 泳ぎと組み直しの境目は「run がどこで始まったか」で決まるので、
+// **枠の動き方が変わると、同じ動きが別の欄へ移る**（`cuts-plain` で 0.071 が丸ごと移った）。
+// 合計を並べておけば、増えたのか付け替わっただけなのかがその場で読める。
+console.log(`${pad('素材', 22)}${right('泳ぎ/s', 9)}${right('回数', 7)}${right('組み直し/s', 11)}${right('合計/s', 9)}${right('振れ幅', 9)}`);
+console.log('-'.repeat(67));
 const idleSwims = [];
+const totals = [];
 let worst = null;
 for (const f of without) {
   const clip = renderFixture(f.name, { fps });
@@ -104,13 +115,14 @@ for (const f of without) {
   const { swim, wanders, recompose, range } = scoreSwim(clip.times, centers, clip.cuts, fps);
   idleSwims.push(swim);
   if (!worst || swim > worst.swim) worst = { name: f.name, swim, range };
+  totals.push(swim + recompose);
   console.log(
     `${pad('  ' + f.name, 22)}${right(swim.toFixed(3), 9)}${right(wanders, 7)}` +
-      `${right(recompose.toFixed(3), 11)}${right(range.toFixed(3), 9)}`,
+      `${right(recompose.toFixed(3), 11)}${right((swim + recompose).toFixed(3), 9)}${right(range.toFixed(3), 9)}`,
   );
 }
-console.log('-'.repeat(58));
+console.log('-'.repeat(67));
 console.log(
-  `${pad('  中央値', 22)}${right(median(idleSwims).toFixed(3), 9)}\n` +
-    `${pad('  いちばん泳いだ素材', 22)}${right(worst.swim.toFixed(3), 9)}${right('', 18)}${right(worst.range.toFixed(3), 9)}  ${worst.name}`,
+  `${pad('  中央値', 22)}${right(median(idleSwims).toFixed(3), 9)}${right('', 18)}${right(median(totals).toFixed(3), 9)}\n` +
+    `${pad('  いちばん泳いだ素材', 22)}${right(worst.swim.toFixed(3), 9)}${right('', 18)}${right('', 9)}${right(worst.range.toFixed(3), 9)}  ${worst.name}`,
 );

@@ -22,7 +22,7 @@ import {
   spatialOdds,
   summarizeColumns,
 } from './columns.ts';
-import { DEFAULT_REFRAME, planReframe, rawTargets, summarizeForReframe, toCropRects } from './reframe.ts';
+import { DEFAULT_REFRAME, planFromRaw, planReframe, rawTargets, summarizeForReframe, toCropRects } from './reframe.ts';
 
 export interface TestResult {
   name: string;
@@ -170,10 +170,26 @@ export function runSelfTest(): TestResult[] {
     );
   }
   {
-    // deadband の内側の揺れには反応しない。**これが無いと出来上がりが手ぶれ映像になる。**
-    const frames = Array.from({ length: 60 }, (_v, i) => withBar(0.5 + (i % 2 ? 0.02 : -0.02)));
+    // 小さく揺れるだけの被写体に**枠が付き合わない**。
+    // これが無いと出来上がりが手ぶれ映像になる。
+    //
+    // **「1 度も動かない」では書けない**（2026-09-25・3 回目に書き直した）。
+    // 門を `soft` にして死に帯を 0.03 へ詰めてから、枠は最初に 1 度だけ
+    // 揺れの真ん中へ寄って、そこで止まるようになった（0.518 → 0.512）。
+    // 前の門は `leadIn` が置いた所に居座るので合計 0 だっただけで、
+    // **寄って止まるほうがむしろ正しい。** 見るのは 2 つ:
+    // 揺れに合わせて往復していないこと（後半は 1 コマも動かない）と、
+    // 動いた合計が揺れの幅より小さいこと。
+    const wobble = 0.02;
+    const frames = Array.from({ length: 60 }, (_v, i) => withBar(0.5 + (i % 2 ? wobble : -wobble)));
     const plan = planReframe(clipOf(frames));
-    push('小さく揺れるだけの被写体には枠が反応しない', plan.travel < 1e-9, `動いた量 ${plan.travel.toFixed(4)}`);
+    const late = plan.frames.slice(30);
+    const lateTravel = late.slice(1).reduce((a, f, i) => a + Math.abs(f.center - late[i].center), 0);
+    push(
+      '小さく揺れるだけの被写体に枠が付き合わない（寄って止まる）',
+      lateTravel < 1e-9 && plan.travel < wobble * 2,
+      `合計 ${plan.travel.toFixed(4)} / 後半 ${lateTravel.toFixed(4)}（揺れの幅 ${(wobble * 2).toFixed(2)}）`,
+    );
   }
   {
     // 寄せの上限が効いているか。1 コマで飛ばないこと。
@@ -187,12 +203,18 @@ export function runSelfTest(): TestResult[] {
       `いちばん大きい 1 コマの動き ${jump.toFixed(4)}（上限 ${(0.2 / 15).toFixed(4)}）`,
     );
     // 上限を上げれば速く寄る。**つまみが黙って無視されていないか**まで見る。
+    //
+    // 寄り切りの線は、**死に帯より内側には置けない**（2026-09-25・3 回目に直した）。
+    // `soft` は縁の内側で 1 コマも動かないので、止まる所は必ず死に帯ぶん手前になる。
+    // 前の門は貯めて動き出したあと `stopBand` まで詰めるので 0.02 で書けていたが、
+    // **その「詰め切る」こそが焼き直しで行き先を変えていた**（下の検査を参照）。
     const fast = planReframe(cols, { maxSpeed: 1.0 });
-    const reach = (p: typeof plan) => p.frames.findIndex((f) => Math.abs(f.center - 0.8) < 0.02);
+    const settled = DEFAULT_REFRAME.deadband + 0.01;
+    const reach = (p: typeof plan) => p.frames.findIndex((f) => Math.abs(f.center - 0.8) < settled);
     push(
       '寄せの上限を上げると、速く寄り切る',
       reach(fast) > 0 && reach(fast) < reach(plan),
-      `0.2 で ${reach(plan)} コマ / 1.0 で ${reach(fast)} コマ`,
+      `0.2 で ${reach(plan)} コマ / 1.0 で ${reach(fast)} コマ（寄り切りの線 ${settled.toFixed(3)}）`,
     );
   }
   {
@@ -254,6 +276,56 @@ export function runSelfTest(): TestResult[] {
       '上下の帯を外すと、字幕の居る列が浮かなくなる',
       whole > banded * 3,
       `帯を外して ${banded.toFixed(4)} / 全部見て ${whole.toFixed(4)}`,
+    );
+  }
+  {
+    // **門が増幅器になっていないか。** 2026-09-25（3 回目）のいちばんの収穫。
+    //
+    // 同じ動画を焼き直すと枠の置き所が振れる、その根はここにある——
+    // ならしたあとの的が**ごくわずか**違うだけで、貯めて動き出す門は
+    // 「動き出す / 動かない」に化け、枠ぜんたいが死に帯ぶん別の所へ行く。
+    // 0.001 の差が 0.059 になる（**59 倍**）。`soft` は 1 倍。
+    //
+    // **合成したコマからは書けない検査**（コマは画素に量子化されていて、
+    // 1 画素 0.008 より細かい差が作れない）。なので `planFromRaw` を直に叩く。
+    const n = 120;
+    const times = Array.from({ length: n }, (_v, i) => i / 15);
+    // 30 コマ 0.4 に居て、そのあと**死に帯の縁ちょうど**へ移って居続ける的。
+    const atEdge = (offset: number) => Array.from({ length: n }, (_v, i) => (i < 30 ? 0.4 : 0.4 + offset));
+    const eps = 0.0005;
+    const endGap = (options: Parameters<typeof planFromRaw>[2]) => {
+      const band = { ...DEFAULT_REFRAME, ...options }.deadband;
+      const a = planFromRaw(atEdge(band - eps), times, options).frames;
+      const b = planFromRaw(atEdge(band + eps), times, options).frames;
+      return Math.abs(a[n - 1].center - b[n - 1].center);
+    };
+    const now = endGap({});
+    const latched = endGap({ gate: 'step', deadband: 0.06 });
+    push(
+      '的のごくわずかな差が、枠の行き先に化けない（既定の門）',
+      now <= eps * 2 * 2,
+      `的の差 ${(eps * 2).toFixed(4)} → 枠の差 ${now.toFixed(4)}（${(now / (eps * 2)).toFixed(0)} 倍）`,
+    );
+    // **比べる相手を置く。** これが無いと「1 倍」が良いのかどうかが読めないし、
+    // 既定を貯める門へ戻したときに、この検査が黙って通ってしまう。
+    push(
+      '貯めて動き出す門では、同じ差が桁ちがいに化ける（比べる相手）',
+      latched > eps * 2 * 20,
+      `的の差 ${(eps * 2).toFixed(4)} → 枠の差 ${latched.toFixed(4)}（${(latched / (eps * 2)).toFixed(0)} 倍）`,
+    );
+  }
+  {
+    // 死に帯の内側では 1 コマも動かない（`soft` でもそこは変わっていない）。
+    const times = Array.from({ length: 60 }, (_v, i) => i / 15);
+    const inside = DEFAULT_REFRAME.deadband * 0.9;
+    const plan = planFromRaw(
+      times.map((_t, i) => (i < 20 ? 0.5 : 0.5 + inside)),
+      times,
+    );
+    push(
+      '死に帯の内側へ的が動いても、枠は動かない',
+      plan.travel < 1e-9,
+      `的の動き ${inside.toFixed(4)}（死に帯 ${DEFAULT_REFRAME.deadband}）/ 動いた量 ${plan.travel.toFixed(4)}`,
     );
   }
   {

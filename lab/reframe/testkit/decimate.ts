@@ -4,7 +4,9 @@
  * ## これは画面の一部ではない
  *
  * `encode.ts` と同じ立場で、`index.html` からは読み込んでいない。
- * `decimate-probe.mjs` が playwright 越しに差し込むためだけに置いてある。
+ * `decimate-probe.mjs` と `gate-probe.mjs` が playwright 越しに差し込むためだけに置いてある。
+ * **焼く→読む→畳む→枠を決める、が要るのはどちらも同じ**なので、口は 1 つにしてある
+ * （2 つ持つと、焼き方の違いが測りたいものに混ざる）。
  *
  * ## なぜブラウザの中で測るのか
  *
@@ -28,6 +30,10 @@ interface PlanResult {
   centers: number[];
   raws: number[];
   targets: number[];
+  /** そのコマで枠が動いていたか（`gate-probe.mjs` が「どこで食い違ったか」を読むのに使う）。 */
+  movings: boolean[];
+  /** 門が貯めを捨てた回数（`gate-probe.mjs` が読む）。 */
+  gate: { resets: number; nearResets: number };
 }
 
 interface MeasureResult {
@@ -114,6 +120,8 @@ async function measure(
         centers: plan.frames.map((f) => f.center),
         raws: plan.frames.map((f) => f.raw),
         targets: plan.frames.map((f) => f.target),
+        movings: plan.frames.map((f) => f.moving),
+        gate: plan.gate,
       };
     }),
   };

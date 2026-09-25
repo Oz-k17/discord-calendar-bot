@@ -280,6 +280,17 @@ try {
 }
 
 /**
+ * **「寄り道」と呼ぶ幅**。正解の位置が素材の中央値からこれ以上離れたコマを寄り道とみなす。
+ *
+ * `DEFAULT_REFRAME.deadband` を使っていたが、2026-09-25（3 回目）に既定が
+ * 0.06 → 0.03 へ動いた。**つまみに繋いだままだと、つまみを回すたびに
+ * 「何を寄り道と呼ぶか」まで変わって、前の日の数字と並べられなくなる。**
+ * これは素材の折れ線の話なので、判定のつまみからは切り離して固定する
+ * （この値で測った 9/25 の 1〜3 回目の表と、そのまま並べられる）。
+ */
+const EXCURSION_BAND = 0.06;
+
+/**
  * **寄り道のあいだだけ**を切り出して採点する。
  *
  * 「寄り道」は素材の折れ線を読んで決める——正解の位置が、その素材の中央値から
@@ -294,7 +305,7 @@ function excursion(fixture, times, plan) {
   const center = [];
   let inside = 0;
   for (let i = 0; i < times.length; i += 1) {
-    if (!Number.isFinite(truths[i]) || Math.abs(truths[i] - home) < DEFAULT_REFRAME.deadband) continue;
+    if (!Number.isFinite(truths[i]) || Math.abs(truths[i] - home) < EXCURSION_BAND) continue;
     raw.push(Math.abs(truths[i] - plan.raws[i]));
     target.push(Math.abs(truths[i] - plan.targets[i]));
     const err = Math.abs(truths[i] - plan.centers[i]);
