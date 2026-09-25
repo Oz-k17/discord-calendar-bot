@@ -48,7 +48,8 @@
     "lab:reframe": "node lab/reframe/bench.mjs",
     "lab:reframe:probe": "node lab/reframe/probe.mjs",
     "lab:reframe:demo": "vite lab/reframe",
-    "lab:reframe:uitest": "node lab/reframe/uitest.mjs"
+    "lab:reframe:uitest": "node lab/reframe/uitest.mjs",
+    "lab:reframe:decimate": "node lab/reframe/decimate-probe.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",

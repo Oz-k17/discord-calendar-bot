@@ -54,16 +54,26 @@ export interface EncodedFixture {
  * 描いたコマの列を WebM に焼く。**素材の一覧に依らない**ので、
  * シーン検出の素材（`scenes.mjs`）でも表紙の素材（`thumbs.mjs`）でも同じものを通せる。
  *
- * ビットレートを素材の大きさのわりに高く取ってあるのは、
+ * ビットレートの既定を素材の大きさのわりに高く取ってあるのは、
  * **確かめたいのが圧縮の限界ではなく配線だから**。それでも粒は乗るので、
  * `uitest.mjs` の突き合わせには幅を持たせてある。
+ *
+ * `bitrate` を開けてあるのは、**「同じ中身の、別の焼き上がり」を作るため**（2026-09-25・2 回目）。
+ * 速さを上げると、同じビットレートでは 1 枚あたりの取り分が減るので
+ * **速さと粒が一緒に動いてしまう。** 速さを止めて粒だけ動かせば、その 2 つを分けられる。
+ * 実際にそうして分かったのは、**粒はほとんど動かないのに答えのほうが数ポイント動く**
+ * ということだった（`lab/reframe/README.md` の「読むコマの速さ」）。
+ * 焼き直しただけで動く幅は、**その判定の当たり外れを測る物差し**として使える。
  *
  * `scale` は焼くときの拡大率。**表紙の側が要る**つまみで、
  * 「測るコマ（長辺 128 へ縮める）」と「書き出すコマ（素材の大きさ）」が
  * 別物であることを確かめるには、素材が 128 より大きくないと差が出ない。
  * 拡大は補間で引き伸ばすだけなので、どの秒に何が写っているかは 1 つも動かない。
  */
-export async function encodeClip(clip: RenderedClip, { scale = 1 }: { scale?: number } = {}): Promise<EncodedFixture> {
+export async function encodeClip(
+  clip: RenderedClip,
+  { scale = 1, bitrate = 4_000_000 }: { scale?: number; bitrate?: number } = {},
+): Promise<EncodedFixture> {
   const width = Math.round(clip.width * scale);
   const height = Math.round(clip.height * scale);
 
@@ -88,7 +98,7 @@ export async function encodeClip(clip: RenderedClip, { scale = 1 }: { scale?: nu
   const output = new Output({ format: new WebMOutputFormat(), target: new BufferTarget() });
   const source = new CanvasSource(canvas, {
     codec,
-    quality: new Quality({ bitrate: 4_000_000 }),
+    quality: new Quality({ bitrate }),
     // 全コマを鍵コマにしない。**鍵コマだらけにすると圧縮の粒がほとんど乗らず、
     // 「本物の動画を読んだ」の中身が合成コマを読んだのと変わらなくなる。**
     keyFrameInterval: 2,
@@ -126,9 +136,11 @@ export async function encodeClip(clip: RenderedClip, { scale = 1 }: { scale?: nu
 /** シーン検出の素材 1 本を WebM に焼く。 */
 export async function encodeFixture(
   name: string,
-  { aspect = 'landscape', fps }: { aspect?: string; fps?: number } = {},
+  { aspect = 'landscape', fps, bitrate }: { aspect?: string; fps?: number; bitrate?: number } = {},
 ): Promise<EncodedFixture> {
-  return encodeClip(renderFixture(name, { aspect, ...(fps ? { fps } : {}) }) as RenderedClip);
+  return encodeClip(renderFixture(name, { aspect, ...(fps ? { fps } : {}) }) as RenderedClip, {
+    ...(bitrate ? { bitrate } : {}),
+  });
 }
 
 declare global {

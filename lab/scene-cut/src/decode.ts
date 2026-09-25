@@ -116,17 +116,61 @@ export function analysisSize(
 }
 
 /**
- * どの秒のコマを読むかを並べる。
+ * どの秒のコマを読むかを並べる。**コマの頭ではなく、真ん中を読む。**
  *
- * 最後のコマを尺ちょうどに置かないのは、**尺ちょうどには絵が無い**から
- * （`canvasesAtTimestamps` はその手前のコマを返すので、同じ絵が 2 枚並ぶ）。
- * 上限に当たったらそこで止める。
+ * ## なぜ真ん中なのか（2026-09-25・2 回目に踏んで直した）
+ *
+ * `canvasesAtTimestamps` は「その時刻か、その手前のコマ」を返す。
+ * 頭（`i / fps`）で読むと、**素材のコマの頭とこちらの時刻が同じ所に重なる**ので、
+ * 少しでも手前へずれた瞬間に 1 つ前のコマが返る。
+ *
+ * そして**ずれる**。読む速さが素材より速いときは素材の速さに合わせる（下の `analysisFps`）が、
+ * その素材の速さは**頭の 50 コマから見積もった値**で、ぴったりではない。
+ * 15fps の素材が 15.0015fps と出ると、`i / 15.0015` は毎回コマの頭のわずか手前に落ちて、
+ * **列ぜんたいが 1 コマ前へずれる。** 1 コマ（15fps で 67ms）ぶん遅れて測ることになり、
+ * 自動リフレームの `subject-decoy` では入れた率が 97.5% → 92.6% と落ちた。
+ *
+ * 真ん中（`(i + 0.5) / fps`）で読めば、見積もりが**半コマぶん外れるまで**同じコマが返る。
+ * ぴったりの速さで読むときに選ばれるコマは頭で読むのと 1 枚も変わらない
+ * （0.5/fps はそのコマの中なので）ので、**直しても選び方は動かず、強さだけが増える。**
+ *
+ * 数は `round` で決める（`ceil` ではない）。真ん中を読むので、
+ * **最後の半コマだけが残っているときに 1 枚足すと尺をはみ出す**。
+ * これで「尺ちょうどには絵が無い」も自然に満たされる（最後は必ず尺の内側）。
  */
 export function sampleTimes(duration: number, fps: number, maxFrames: number): Float64Array {
   if (!(duration > 0) || !(fps > 0) || !(maxFrames > 0)) return new Float64Array(0);
-  const count = Math.min(maxFrames, Math.max(1, Math.ceil(duration * fps - 1e-9)));
+  const count = Math.min(maxFrames, Math.max(1, Math.round(duration * fps)));
   const out = new Float64Array(count);
-  for (let i = 0; i < count; i += 1) out[i] = i / fps;
+  for (let i = 0; i < count; i += 1) out[i] = Math.min((i + 0.5) / fps, duration * (1 - 1e-9));
+  return out;
+}
+
+/**
+ * 読めたコマに貼る**時刻の札**を決める。
+ *
+ * **「いつ読むか」と「読めたコマがいつのものか」は別**（2026-09-25・2 回目）。
+ * 読む時刻はコマの真ん中に置いてあるので、そのまま札にすると
+ * **半コマぶん未来の札を貼ったコマ**になる。素材のコマは瞬間を写したものなので、
+ * 札はそのコマ自身の時刻（`wrapped.timestamp`）でなければならない。
+ *
+ * ただし**前へ戻らせない**。同じコマが 2 回返ることがある
+ * （速さの見積もりが素材より速いときや、コマが返らずに前のコマで埋めたとき）ので、
+ * 札をそのまま並べると時刻が**止まる・戻る**。時刻の列は
+ * 「その場と比べる窓」や「1 秒あたりの泳ぎ」の分母に使われるので、
+ * ここが単調でないと、そこから先が静かにおかしくなる。
+ *
+ * 進めないときは**読もうとした時刻**を貼る。返るコマの時刻は必ず読む時刻以下で、
+ * 読む時刻のほうは必ず増えていくので、これで必ず進む。
+ */
+export function frameTimes(requested: ArrayLike<number>, stamps: ArrayLike<number | null>): Float64Array {
+  const out = new Float64Array(stamps.length);
+  for (let i = 0; i < stamps.length; i += 1) {
+    const stamp = stamps[i];
+    const fallback = requested[i] ?? (i > 0 ? out[i - 1] : 0);
+    const usable = typeof stamp === 'number' && Number.isFinite(stamp) && (i === 0 || stamp > out[i - 1]);
+    out[i] = usable ? (stamp as number) : fallback;
+  }
   return out;
 }
 
@@ -181,6 +225,8 @@ export async function decodeVideoFrames(
 
     const sink = new CanvasSink(track, { width: size.width, height: size.height, fit: 'fill' });
     const frames: FrameLike[] = [];
+    // 札の決め方は `frameTimes` に置いてある（そちらの注を参照）。
+    const stamps: (number | null)[] = [];
     let missing = 0;
     let index = 0;
     for await (const wrapped of sink.canvasesAtTimestamps(times)) {
@@ -188,11 +234,13 @@ export async function decodeVideoFrames(
         ctx.drawImage(wrapped.canvas as CanvasImageSource, 0, 0, size.width, size.height);
         const image = ctx.getImageData(0, 0, size.width, size.height);
         frames.push({ width: image.width, height: image.height, data: image.data });
+        stamps.push(wrapped.timestamp);
       } else {
         // 返らなかった所は**前のコマで埋める**。詰めて並べると時刻とコマがずれ、
         // 見つけた秒が静かに前へ寄る。先頭で返らなかったときだけ真っ黒を置く。
         missing += 1;
         frames.push(frames[frames.length - 1] ?? blankFrame(size.width, size.height));
+        stamps.push(null);
       }
       index += 1;
       if (o.onProgress && index % 15 === 0) o.onProgress(index / Math.max(1, times.length));
@@ -202,9 +250,9 @@ export async function decodeVideoFrames(
     return {
       frames,
       // 返ってきたコマが足りないことがある（尺の見積もりが甘い入れ物では起きる）。
-      // 時刻の列は**実際に並んだコマの数へ切り詰める**。ここを合わせないと
+      // 時刻の列は**実際に並んだコマの数**だけ持つ。ここを合わせないと
       // `summarizeFrames` が時刻を 0 で埋め、最後の場面が素材の頭へ飛ぶ。
-      times: times.slice(0, frames.length),
+      times: frameTimes(times, stamps),
       width: size.width,
       height: size.height,
       sourceFps,

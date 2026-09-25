@@ -49,7 +49,8 @@ if (!playwright) {
   process.exit(0);
 }
 
-const { DEFAULT_REFRAME, planReframe, summarizeForReframe } = await import('./src/reframe.ts');
+const { DEFAULT_REFRAME, REFRAME_ANALYSIS_FPS: DEFAULT_REFRAME_FPS, planReframe, summarizeForReframe } =
+  await import('./src/reframe.ts');
 
 let failed = 0;
 const ok = (label, condition, detail = '') => {
@@ -73,17 +74,17 @@ function commandLine(name, { fps = SCENE_FPS, options = {} } = {}) {
  *
  * 待ち方を「コマが揃ったか」にしてあるのは、**尺だけ見ると読み込み途中で通ってしまう**ため。
  */
-async function feed(page, name, { fps } = {}) {
+async function feed(page, name, { fps, bitrate } = {}) {
   const encoded = await page.evaluate(
-    ([n, f]) =>
-      window.__labReframeEncode(n, { ...(f ? { fps: f } : {}) }).then((r) => ({
+    ([n, f, b]) =>
+      window.__labReframeEncode(n, { ...(f ? { fps: f } : {}), ...(b ? { bitrate: b } : {}) }).then((r) => ({
         bytes: [...r.bytes],
         cuts: r.cuts,
         fps: r.fps,
         frames: r.frames,
         codec: r.codec,
       })),
-    [name, fps ?? null],
+    [name, fps ?? null, bitrate ?? null],
   );
   await page.locator('#rf-file').setInputFiles({
     name: `${name}.webm`,
@@ -97,6 +98,24 @@ async function feed(page, name, { fps } = {}) {
   );
   await page.waitForTimeout(300);
   return { encoded, state: await page.evaluate(() => window.__labReframe.state()) };
+}
+
+/**
+ * 読み込み直す速さを変えて、読み終わるまで待つ。
+ *
+ * つまみを動かすだけでは足りない（速さは**何を読むか**の話なので読み直しになる）ので、
+ * `change` まで投げて、`fps` が実際に変わるのを待つ。
+ */
+async function readAt(page, fps) {
+  await setRange(page, '#fps', String(fps), 100);
+  await page.locator('#fps').dispatchEvent('change');
+  await page.waitForFunction(
+    (want) => !window.__labReframe.state().loading && Math.abs((window.__labReframe.state().fps ?? 0) - want) < 3,
+    fps,
+    { timeout: 120000 },
+  );
+  await page.waitForTimeout(300);
+  return page.evaluate(() => window.__labReframe.state());
 }
 
 /** つまみを動かして、判定が回りきるまで待つ。 */
@@ -153,8 +172,16 @@ try {
       defaults.reframe.smooth === 1 &&
       defaults.reframe.rowBand.from === 0.15 &&
       defaults.reframe.leadIn === true &&
-      defaults.analysisFps === 15,
+      defaults.analysisFps === DEFAULT_REFRAME_FPS,
     `${JSON.stringify(defaults.reframe)} / ${defaults.analysisFps}fps`,
+  );
+  // **コマの速さも、目盛りが表せるかまで見る**（窓の幅で 1 度踏んだ穴）。
+  // こちらは 1fps きざみなので 30 は乗るが、**乗らない値を既定にしたときに黙って外れる**
+  // のは同じなので、画面が実際に持っている値を見る。
+  ok(
+    'コマの速さのつまみが、既定をちょうど表せている',
+    Number(await page.locator('#fps').inputValue()) === DEFAULT_REFRAME_FPS,
+    `画面 ${await page.locator('#fps').inputValue()}fps / 判定 ${DEFAULT_REFRAME_FPS}fps`,
   );
 
   // --- 素直な素材: 焼く → 読む → 枠を決める ---
@@ -196,11 +223,18 @@ try {
       `${name.padEnd(20)} ${`${screen.inside.toFixed(1)}%`.padStart(8)} / ${`${command.inside.toFixed(1)}%`.padStart(7)}` +
         `      ${screen.error.toFixed(3)} / ${command.error.toFixed(3)}`,
     );
-    // 幅は 3 ポイント。圧縮の粒で生の位置が 1 列（3.1%）動くと、deadband の縁に居るコマの
-    // 行き先が変わるので、ぴったり一致は求められない。**判定が別物なら 3 ポイントでは収まらない。**
+    // 幅は 6 ポイント。圧縮の粒で生の位置が 1 列（3.1%）動くと、deadband の縁に居るコマの
+    // 行き先が変わるので、ぴったり一致は求められない。
+    //
+    // **3 ポイントから広げたのは、その幅を測ったから**（2026-09-25・2 回目）。
+    // 中身も速さも変えずに**焼くビットレートだけ**振ると、入れた率は
+    // `motion` で 92.6〜98.4%（5.7pt）・`subject-decoy` で 92.6〜96.7%（4.1pt）動く。
+    // 3 ポイントは、**この判定が同じ動画の焼き直しで動く幅より狭かった。**
+    // それでも**判定が別物なら 6 ポイントでは収まらない**（枠を真ん中に固定すると 68pt ずれる。
+    // 下にその検査が置いてある）。
     ok(
       `${name}: 画面とコマンドラインで、入れた率が揃う`,
-      Math.abs(screen.inside - command.inside) <= 3,
+      Math.abs(screen.inside - command.inside) <= 6,
       `コマンドライン ${command.inside.toFixed(1)}% ・ 画面 ${screen.inside.toFixed(1)}%（ずれ ${command.error.toFixed(3)} / ${screen.error.toFixed(3)}）`,
     );
   }
@@ -241,57 +275,57 @@ try {
   // --- コマの速さ（シーン検出との違いを、画面から確かめる） ---
   //
   // シーン検出は既定のつまみが **15fps という単位を隠し持っていた**ので、速いまま渡すと壊れた。
-  // リフレームのつまみは全部「秒」で書いてあるので、**間引いても数字は動かないはず**——
-  // 実際、合成コマなら 30fps 素材を 15fps へ間引いても入れた率は 99.2% で 1 桁も動かない。
-  // **動くのは圧縮を通したときだけ**なので、ここは画面でしか測れない。
+  // **こちらは遅く読むと「負ける」のではなく「振れる」**（2026-09-25・2 回目に測って既定を 30 にした。
+  // 入れた率の平均は 7 本で 15fps 読みも 30fps 読みも 96.5% で同じ）。
+  // つまみは全部「秒」で書いてあるが、ならしは中央値なので効くのは**コマの数**で、
+  // 標本が半分になると中央値が隣の値へ飛びやすくなり、その飛びを門が拡大する。
+  // 合成コマでは 3 通りとも 99.2% で 1 桁も動かないので、**ここは画面でしか測れない。**
   const fast = await feed(page, 'motion', { fps: 30 });
   ok(
-    '30fps の素材でも、既定なら 15fps へ間引いて読む',
-    Math.abs(fast.state.sourceFps - 30) < 3 && Math.abs(fast.state.fps - 15) < 0.5,
+    '30fps の素材を、既定では間引かずに読む（シーン検出の 15fps とは別に持っている）',
+    Math.abs(fast.state.sourceFps - 30) < 3 && Math.abs(fast.state.fps - 30) < 0.5,
     `素材 ${fast.state.sourceFps?.toFixed(1)}fps → 解析 ${fast.state.fps?.toFixed(1)}fps（${fast.state.frames} コマ）`,
   );
-  const decimated = scoreFollow(fixtureOf('motion'), fast.state.times, fast.state.centers, fast.state.cropWidth);
-  const decimatedJitter = jitter(fast.state.raws);
-
-  // ならしの窓を倍にすると、中央値に入る標本の数が 30fps 読みと同じになる。
-  // **ここで戻るなら、効いていたのは「コマの速さ」ではなく「標本の数」。**
-  await setRange(page, '#smooth', '2');
-  const wider = await page.evaluate(() => window.__labReframe.state());
-  const widerScore = scoreFollow(fixtureOf('motion'), wider.times, wider.centers, wider.cropWidth);
-  await setRange(page, '#smooth', String(DEFAULT_REFRAME.smooth));
-
-  await setRange(page, '#fps', '30', 100);
-  await page.locator('#fps').dispatchEvent('change');
-  await page.waitForFunction(() => !window.__labReframe.state().loading && (window.__labReframe.state().fps ?? 0) > 25, null, {
-    timeout: 120000,
-  });
-  await page.waitForTimeout(300);
-  const dense = await page.evaluate(() => window.__labReframe.state());
+  const dense = fast.state;
   const denseScore = scoreFollow(fixtureOf('motion'), dense.times, dense.centers, dense.cropWidth);
 
-  // **合成コマでは間引いても動かない。圧縮を通すと動く。** つまみが秒で書いてあることは
-  // 「fps に依らない」を意味しない——ならしは**コマの数**で効くので、
-  // 間引くと中央値に入る標本が半分になり、圧縮の粒を落としきれなくなる。
+  // 間引いた側へ落とす。**ここで見るのは「落ちるか」ではなく「振れるか」。**
+  // 1 回目（9/25）は落ちると書いたが、読む時刻の置き方を直して 7 本並べたら
+  // 平均はどちらも 96.5% で同じだった。残ったのは**当たり外れの幅**のほう。
+  const decimated = await readAt(page, 15);
+  const decimatedScore = scoreFollow(fixtureOf('motion'), decimated.times, decimated.centers, decimated.cropWidth);
+
+  // 同じ素材を**粗く焼き直す**。中身も速さも同じなので、
+  // ここで動く幅は「読み方の差」ではなく「この判定の当たり外れ」。
+  await feed(page, 'motion', { fps: 30, bitrate: 150_000 });
+  const coarseThin = await page.evaluate(() => window.__labReframe.state());
+  const coarseThinScore = scoreFollow(fixtureOf('motion'), coarseThin.times, coarseThin.centers, coarseThin.cropWidth);
+  const coarseDense = await readAt(page, DEFAULT_REFRAME_FPS);
+  const coarseDenseScore = scoreFollow(fixtureOf('motion'), coarseDense.times, coarseDense.centers, coarseDense.cropWidth);
+
+  const thinSpread = Math.abs(decimatedScore.inside - coarseThinScore.inside);
+  const denseSpread = Math.abs(denseScore.inside - coarseDenseScore.inside);
   ok(
-    '圧縮を通すと、間引いた側だけ入れた率が落ちる（合成コマでは 3 通りとも 99.2%）',
-    dense.fps > 25 && denseScore.inside > decimated.inside + 2,
-    `15fps へ間引いて ${decimated.inside.toFixed(1)}%（${fast.state.frames} コマ・生の位置の荒れ ${decimatedJitter.toFixed(4)}）` +
-      ` → 30fps のまま ${denseScore.inside.toFixed(1)}%（${dense.frames} コマ・${jitter(dense.raws).toFixed(4)}）`,
-  );
-  // 落ちているのが「速さ」ではなく「標本の数」であることの裏取り。
-  ok(
-    'ならしの窓を倍にすると、間引いたままでも戻る（効いているのは標本の数）',
-    widerScore.inside >= decimated.inside + 2,
-    `間引き＋ならし 1.0 秒 ${decimated.inside.toFixed(1)}% → 間引き＋ならし 2.0 秒 ${widerScore.inside.toFixed(1)}%` +
-      `（30fps のまま ${denseScore.inside.toFixed(1)}%）`,
+    '焼き直しただけで答えが動く幅は、間引いた側のほうが大きい（既定を 30 にした理由）',
+    thinSpread > denseSpread + 1,
+    `15fps 読み ${decimatedScore.inside.toFixed(1)}% → ${coarseThinScore.inside.toFixed(1)}%（${thinSpread.toFixed(1)}pt） / ` +
+      `30fps 読み ${denseScore.inside.toFixed(1)}% → ${coarseDenseScore.inside.toFixed(1)}%（${denseSpread.toFixed(1)}pt）` +
+      ` ・ 粒は 15fps 読みで ${grain(decimated.raws).toFixed(5)} → ${grain(coarseThin.raws).toFixed(5)} としか動いていない`,
   );
 
-  await setRange(page, '#fps', '15', 100);
-  await page.locator('#fps').dispatchEvent('change');
-  await page.waitForFunction(() => !window.__labReframe.state().loading && (window.__labReframe.state().fps ?? 99) < 20, null, {
-    timeout: 120000,
-  });
-  await page.waitForTimeout(300);
+  // **「窓を広げれば済む」を潰す素材。** 0.8 秒の寄り道は 1.0 秒の窓では中央値に残るが、
+  // 2.0 秒の窓では少数派になって消える。ここが落ちなければ、窓を広げる手を選んでいた。
+  const dart = await feed(page, 'subject-dart', { fps: 30 });
+  const dartDefault = scoreFollow(fixtureOf('subject-dart'), dart.state.times, dart.state.centers, dart.state.cropWidth);
+  await setRange(page, '#smooth', '2');
+  const dartWide = await page.evaluate(() => window.__labReframe.state());
+  const dartWideScore = scoreFollow(fixtureOf('subject-dart'), dartWide.times, dartWide.centers, dartWide.cropWidth);
+  ok(
+    'ならしの窓を広げると、窓より短い寄り道が消える（だから広げる手は取っていない）',
+    dartDefault.inside > dartWideScore.inside + 2,
+    `ならし 1.0 秒 ${dartDefault.inside.toFixed(1)}% → 2.0 秒 ${dartWideScore.inside.toFixed(1)}%`,
+  );
+  await setRange(page, '#smooth', String(DEFAULT_REFRAME.smooth));
 
   // --- 出来上がりのプレビュー（枠の列 → 実際に見える絵） ---
   //
@@ -499,16 +533,21 @@ async function matchCrop(page) {
 }
 
 /**
- * 生の位置がどれだけ荒れているか（隣り合うコマの差の平均）。
+ * 生の位置に乗っている**粒**の大きさ。前後の真ん中からどれだけ外れているか（2 階差）。
  *
- * **「間引くと落ちる」の中身を数で言うために置いてある。** 見るのは
- * `raw`（ならす前）で、`target` を見ると「ならしが効いた量」を測ることになってしまう。
+ * **隣り合うコマの差では駄目**（2026-09-25・2 回目）。それだと被写体が動いた量そのものを
+ * 測ることになり、**間引けば必ず倍になる**。1 回目にここへ「生の位置の荒れ 0.0105 → 0.0065」と
+ * 書いたのがそれで、粒ではなく標本の間隔を見ていた。
+ * 等速で動く被写体は前後の真ん中に乗るので、2 階差を取れば動きが消えて粒だけが残る。
+ *
+ * 見るのは `raw`（ならす前）。`target` を見ると「ならしが効いた量」を測ることになる。
  */
-function jitter(targets) {
-  if (targets.length < 2) return 0;
-  let sum = 0;
-  for (let i = 1; i < targets.length; i += 1) sum += Math.abs(targets[i] - targets[i - 1]);
-  return sum / (targets.length - 1);
+function grain(raws) {
+  if (raws.length < 3) return 0;
+  const d = [];
+  for (let i = 1; i < raws.length - 1; i += 1) d.push(Math.abs(raws[i] - (raws[i - 1] + raws[i + 1]) / 2));
+  d.sort((a, b) => a - b);
+  return d[d.length >> 1];
 }
 
 /** キャンバスに何か描かれているか（真っ黒・真っ白のままでないか）。 */

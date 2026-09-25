@@ -27,7 +27,7 @@ import {
   straddleDistance,
   straddleSpan,
 } from './scene.ts';
-import { ANALYSIS_FPS, analysisFps, analysisSize, sampleTimes } from './decode.ts';
+import { ANALYSIS_FPS, analysisFps, analysisSize, frameTimes, sampleTimes } from './decode.ts';
 import { toClipEdits } from '../../auto-cut/src/edits.ts';
 
 export interface TestResult {
@@ -602,9 +602,17 @@ export function runSelfTest(): TestResult[] {
 
     const t = sampleTimes(2, 15, 3000);
     check(
-      '2 秒を 15fps で読むと 30 コマ・0 秒から始まる',
-      t.length === 30 && t[0] === 0 && Math.abs(t[29] - 29 / 15) < 1e-12,
-      `${t.length} コマ / 最後 ${t[t.length - 1].toFixed(3)}s`,
+      '2 秒を 15fps で読むと 30 コマ・コマの真ん中から始まる',
+      t.length === 30 && Math.abs(t[0] - 0.5 / 15) < 1e-12 && Math.abs(t[29] - 29.5 / 15) < 1e-12,
+      `${t.length} コマ / 最初 ${t[0].toFixed(4)}s / 最後 ${t[t.length - 1].toFixed(3)}s`,
+    );
+    // **コマの頭ではなく真ん中を読む。** 頭で読むと、素材の速さの見積もりが
+    // ほんの少し速いだけで**列ぜんたいが 1 コマ前へずれる**（`decode.ts` の注を参照）。
+    // 真ん中なら、見積もりが半コマぶん外れるまで同じコマが返る。
+    check(
+      '読む時刻が、素材のコマの頭から半コマぶん離れている',
+      sampleTimes(2, 15, 3000).every((v, i) => Math.abs(v * 15 - i - 0.5) < 1e-9),
+      `ずれ ${(sampleTimes(2, 15, 3000)[7] * 15 - 7).toFixed(3)} コマ`,
     );
     // **尺ちょうどのコマは読まない。** そこには絵が無いので、
     // `canvasesAtTimestamps` はその手前のコマを返し、同じ絵が 2 枚並ぶ。
@@ -612,6 +620,15 @@ export function runSelfTest(): TestResult[] {
       '尺ちょうどのコマは読まない（同じ絵が 2 枚並ばない）',
       sampleTimes(1, 15, 3000).length === 15 && sampleTimes(1, 15, 3000)[14] < 1,
       `${sampleTimes(1, 15, 3000).length} コマ`,
+    );
+    // 半端な尺で、真ん中が尺をはみ出さないか（`round` にしてあるのはこのため）。
+    check(
+      '半端な尺でも、読む時刻が尺をはみ出さない',
+      [1.01, 1.04, 7.77, 13.0].every((d) => {
+        const s = sampleTimes(d, 15, 3000);
+        return s.length > 0 && s[s.length - 1] < d;
+      }),
+      `1.01 秒で ${sampleTimes(1.01, 15, 3000).length} コマ・最後 ${sampleTimes(1.01, 15, 3000)[sampleTimes(1.01, 15, 3000).length - 1].toFixed(4)}s`,
     );
     check(
       '上限に当たったらそこで止める',
@@ -624,6 +641,33 @@ export function runSelfTest(): TestResult[] {
       sampleTimes(0, 15, 3000).length === 0 && sampleTimes(10, 0, 3000).length === 0 && sampleTimes(10, 15, 0).length === 0,
       '空',
     );
+
+    // **札は、読もうとした時刻ではなく読めたコマ自身の時刻。**
+    // 読む時刻はコマの真ん中なので、そのまま札にすると半コマぶん未来の札になる。
+    {
+      const want = sampleTimes(0.2, 15, 3000);
+      const got = frameTimes(want, [0, 1 / 15, 2 / 15]);
+      check(
+        '札は、読もうとした時刻ではなく読めたコマ自身の時刻',
+        Math.abs(got[0] - 0) < 1e-12 && Math.abs(got[1] - 1 / 15) < 1e-12,
+        `読む ${want[1].toFixed(4)}s → 札 ${got[1].toFixed(4)}s`,
+      );
+      // 同じコマが 2 回返ることがある（速さの見積もりが素材より速いとき）。
+      // 札をそのまま並べると時刻が止まるので、そこは読もうとした時刻で進める。
+      const stuck = frameTimes(want, [0, 0, 2 / 15]);
+      check(
+        '同じコマが 2 回返っても、時刻は止まらない',
+        stuck[1] > stuck[0] && stuck[2] > stuck[1],
+        `${stuck[0].toFixed(4)} → ${stuck[1].toFixed(4)} → ${stuck[2].toFixed(4)}`,
+      );
+      // 返らなかったコマ（`null`）も同じ扱い。
+      const missed = frameTimes(want, [0, null, 2 / 15]);
+      check(
+        'コマが返らなかった所も、時刻は進む',
+        missed[1] > missed[0] && Math.abs(missed[1] - want[1]) < 1e-12,
+        `${missed[0].toFixed(4)} → ${missed[1].toFixed(4)} → ${missed[2].toFixed(4)}`,
+      );
+    }
 
     // 長辺を揃える（幅ではない）。縦型で横型の 2.4 倍のコマを作らないため。
     const land = analysisSize(1920, 1080, 128);

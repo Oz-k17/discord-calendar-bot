@@ -25,10 +25,11 @@
  * **出口が「値」なのか「絵」なのかで、画面に要る読み込みの数が変わる。**
  */
 
-import { decodeVideoFrames, ANALYSIS_FPS, type DecodedClip } from '../../scene-cut/src/decode.ts';
+import { decodeVideoFrames, type DecodedClip } from '../../scene-cut/src/decode.ts';
 import type { ColumnStat } from './columns.ts';
 import {
   DEFAULT_REFRAME,
+  REFRAME_ANALYSIS_FPS,
   planReframe,
   summarizeForReframe,
   toCropRects,
@@ -437,7 +438,7 @@ function showAllValues() {
 
 /** いま何 fps で測っているか。**コマ数を秒でも見せる**ために要る（シーン検出の画面と同じ）。 */
 function currentFps(): number {
-  return loaded?.clip.fps ?? Number($<HTMLInputElement>('fps').value) ?? ANALYSIS_FPS;
+  return loaded?.clip.fps ?? Number($<HTMLInputElement>('fps').value) ?? REFRAME_ANALYSIS_FPS;
 }
 
 for (const id of ['crop-width', 'deadband', 'settle', 'max-speed', 'smooth', 'row-band']) {
@@ -481,7 +482,7 @@ $<HTMLInputElement>('max-speed').value = String(DEFAULT_REFRAME.maxSpeed);
 $<HTMLInputElement>('smooth').value = String(DEFAULT_REFRAME.smooth);
 $<HTMLInputElement>('row-band').value = String(DEFAULT_REFRAME.rowBand.from);
 $<HTMLInputElement>('lead-in').checked = DEFAULT_REFRAME.leadIn;
-$<HTMLInputElement>('fps').value = String(ANALYSIS_FPS);
+$<HTMLInputElement>('fps').value = String(REFRAME_ANALYSIS_FPS);
 showAllValues();
 
 // Playwright から呼べるようにしておく（画面を触らずに中身を確かめるため）。
@@ -526,7 +527,7 @@ declare global {
 }
 window.__labReframe = {
   selfTest: runSelfTest,
-  defaults: { reframe: DEFAULT_REFRAME, analysisFps: ANALYSIS_FPS },
+  defaults: { reframe: DEFAULT_REFRAME, analysisFps: REFRAME_ANALYSIS_FPS },
   centerAt: (t: number) => centerAt(plan?.frames ?? [], t),
   columnLuma: (t: number) => {
     if (!loaded || !loaded.cols.length) return [];
