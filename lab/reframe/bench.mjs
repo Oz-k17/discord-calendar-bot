@@ -14,6 +14,9 @@
 
 import { REFRAME_FIXTURES, SCENE_FIXTURES, SCENE_FPS, leadSubjectAt } from '../fixtures/scenes.mjs';
 import { renderFixture } from '../fixtures/make-frames.mjs';
+// 採点は `score.mjs` に置いてある。**画面の確認（`uitest.mjs`）と同じ関数を呼ぶ**ためで、
+// ここに書き直すと、画面と食い違ったときに判定の違いか採点の違いかが読めなくなる。
+import { median, scoreFollow, scoreSwim, totalSwim } from './score.mjs';
 
 const { FULL_BAND } = await import('./src/columns.ts');
 const { DEFAULT_REFRAME, planReframe, summarizeForReframe } = await import('./src/reframe.ts');
@@ -33,50 +36,23 @@ if (process.env.LAB_RF_BAND) {
 }
 // **つまみを足したあとに読む。** 先に読むと、表の頭に書く設定だけが古いままになる。
 const opt = { ...DEFAULT_REFRAME, ...options };
-const half = opt.cropWidth / 2;
 
 const pad = (s, n) => String(s).padEnd(n, ' ');
 const right = (s, n) => String(s).padStart(n, ' ');
-const median = (xs) => {
-  if (!xs.length) return NaN;
-  const s = [...xs].sort((a, b) => a - b);
-  return s[s.length >> 1];
-};
 
-/** 素材 1 本を測る。`center` は枠の中心を返す関数（比べる相手を差し替えるため）。 */
+/** 素材 1 本を測る。`centersOf` は枠の中心を返す関数（比べる相手を差し替えるため）。 */
 function measure(fixture, centersOf) {
   const clip = renderFixture(fixture.name, { fps });
   const cols = summarizeForReframe(clip.frames, clip.times, options);
-  const { centers, travel } = centersOf(cols);
-  const errors = [];
-  let inside = 0;
-  let counted = 0;
-  for (let i = 0; i < cols.length; i += 1) {
-    const truth = leadSubjectAt(fixture, clip.times[i]);
-    if (!truth) continue;
-    // 画面の外に居るコマは追いようが無いので数えない。
-    if (truth.u < 0 || truth.u > 1) continue;
-    counted += 1;
-    const err = Math.abs(truth.u - centers[i]);
-    errors.push(err);
-    if (err < half) inside += 1;
-  }
-  const seconds = clip.times[clip.times.length - 1] - clip.times[0];
-  return {
-    inside: counted ? (inside / counted) * 100 : null,
-    error: median(errors),
-    swim: seconds > 0 ? travel / seconds : 0,
-    counted,
-  };
+  const centers = centersOf(cols);
+  const follow = scoreFollow(fixture, clip.times, centers, opt.cropWidth);
+  return { ...follow, swim: totalSwim(clip.times, centers) };
 }
 
-const planned = (cols) => {
-  const plan = planReframe(cols, options);
-  return { centers: plan.frames.map((f) => f.center), travel: plan.travel };
-};
+const planned = (cols) => planReframe(cols, options).frames.map((f) => f.center);
 // 比べる相手: **何もしない**（ずっと真ん中を切る）。
 // これが置いてないと「入れた率 80%」が良いのか悪いのかが分からない。
-const fixed = (cols) => ({ centers: cols.map(() => 0.5), travel: 0 });
+const fixed = (cols) => cols.map(() => 0.5);
 
 const withSubject = [...SCENE_FIXTURES, ...REFRAME_FIXTURES].filter((f) => leadSubjectAt(f, 6.5));
 const without = SCENE_FIXTURES.filter((f) => !leadSubjectAt(f, 6.5));
@@ -115,39 +91,6 @@ console.log(
     `${right(`${(sumFixedIn / withSubject.length).toFixed(1)}%`, 18)}`,
 );
 
-/**
- * **カットの直後に枠を置き直すのは正しい振る舞い**なので、泳ぎから外す。
- *
- * 場面が変われば構図も変わるから、そこで枠が動くのは「泳いだ」ではなく「組み直した」。
- * 外さずに数えると、カットの多い素材ほど悪く見えて、
- * **直すべきでない所を直しにいく**ことになる。
- *
- * ただし**「カットから 0.6 秒のあいだのコマを外す」では足りない**（測って分かった）。
- * 寄せの上限は 0.22/s なので、端から端まで組み直すのに 3 秒以上かかる。
- * コマで外すと、組み直しの**大半が窓の外に落ちて泳ぎに数えられる**。
- * なので外すのは**寄せ直しのひと続き（run）ごと**で、
- * **その始まりがカットから 0.6 秒以内なら、その run は丸ごと組み直し**とみなす。
- */
-const AFTER_CUT = 0.6;
-
-/** 枠が動いたひと続きを、始まった時刻つきで取り出す。 */
-function movingRuns(plan, times) {
-  const runs = [];
-  let open = null;
-  for (let i = 1; i < plan.frames.length; i += 1) {
-    const moved = Math.abs(plan.frames[i].center - plan.frames[i - 1].center);
-    if (moved > 0) {
-      if (!open) open = { start: times[i - 1], travel: 0 };
-      open.travel += moved;
-    } else if (open) {
-      runs.push(open);
-      open = null;
-    }
-  }
-  if (open) runs.push(open);
-  return runs;
-}
-
 console.log('\n\n被写体の居ない素材（泳いでいないか。0.000 が正解）\n');
 console.log(`${pad('素材', 22)}${right('泳ぎ/s', 9)}${right('回数', 7)}${right('組み直し/s', 11)}${right('振れ幅', 9)}`);
 console.log('-'.repeat(58));
@@ -156,20 +99,13 @@ let worst = null;
 for (const f of without) {
   const clip = renderFixture(f.name, { fps });
   const cols = summarizeForReframe(clip.frames, clip.times, options);
-  const plan = planReframe(cols, options);
-  const centers = plan.frames.map((p) => p.center);
-  const seconds = clip.times[clip.times.length - 1] - clip.times[0];
+  const centers = planReframe(cols, options).frames.map((p) => p.center);
   // カット由来の組み直しを除いた泳ぎ。素材の頭（leadIn の置き所）は動きに数えていない。
-  const runs = movingRuns(plan, clip.times);
-  const isRecompose = (r) => clip.cuts.some((c) => r.start >= c - 1 / fps && r.start < c + AFTER_CUT);
-  const wander = runs.filter((r) => !isRecompose(r));
-  const swim = seconds > 0 ? wander.reduce((a, r) => a + r.travel, 0) / seconds : 0;
-  const recompose = seconds > 0 ? runs.filter(isRecompose).reduce((a, r) => a + r.travel, 0) / seconds : 0;
-  const range = Math.max(...centers) - Math.min(...centers);
+  const { swim, wanders, recompose, range } = scoreSwim(clip.times, centers, clip.cuts, fps);
   idleSwims.push(swim);
   if (!worst || swim > worst.swim) worst = { name: f.name, swim, range };
   console.log(
-    `${pad('  ' + f.name, 22)}${right(swim.toFixed(3), 9)}${right(wander.length, 7)}` +
+    `${pad('  ' + f.name, 22)}${right(swim.toFixed(3), 9)}${right(wanders, 7)}` +
       `${right(recompose.toFixed(3), 11)}${right(range.toFixed(3), 9)}`,
   );
 }

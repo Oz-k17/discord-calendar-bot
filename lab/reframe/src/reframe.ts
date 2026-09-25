@@ -85,7 +85,15 @@ export interface ReframeFrame {
   time: number;
   /** 枠の中心（画面の幅に対する割合）。 */
   center: number;
-  /** その手が指した生の位置。落ち着かせる前の値で、見比べるために持つ。 */
+  /**
+   * その手が指した**生の位置**（`rawTargets` の値そのもの）。
+   *
+   * 下の `target` と 2 本持っているのは、**画面で見比べたときに意味が違うから**
+   * （2026-09-25 に画面を作って気づいた）。生の位置が荒れているのか、
+   * ならしが追い付いていないのかは、片方だけでは切り分けられない。
+   */
+  raw: number;
+  /** 生の位置を中央値でならしたあと、枠を動かす条件へ入れる前の値。 */
   target: number;
   /** そのコマで枠を動かしたか。動いた秒数を数えるために持つ。 */
   moving: boolean;
@@ -147,7 +155,7 @@ export function planReframe(cols: ColumnStat[], options: Partial<ReframeOptions>
   const hi = 1 - half;
   // 窓が画面より広ければ動かしようが無い（切り出す意味が無い）ので、真ん中で止める。
   if (lo >= hi) {
-    for (const c of cols) frames.push({ time: c.time, center: 0.5, target: 0.5, moving: false });
+    for (const c of cols) frames.push({ time: c.time, center: 0.5, raw: 0.5, target: 0.5, moving: false });
     return { frames, options: opt, travel: 0 };
   }
 
@@ -198,7 +206,7 @@ export function planReframe(cols: ColumnStat[], options: Partial<ReframeOptions>
       next = Math.min(hi, Math.max(lo, next));
     }
     travel += Math.abs(next - center);
-    frames.push({ time: cols[i].time, center: next, target: targets[i], moving });
+    frames.push({ time: cols[i].time, center: next, raw: raw[i], target: targets[i], moving });
     center = next;
   }
 

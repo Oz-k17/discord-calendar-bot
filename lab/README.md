@@ -57,10 +57,13 @@ npm run lab:thumb:outline   # 字の縁取り（細い線）が非可逆でど�
 
 npm run lab:reframe:probe   # 「どの手なら被写体が横のどこに居るかを指せるか」を正解付きで測る
 npm run lab:reframe         # 自動リフレームが実際どれくらい効くかを測る
+npm run lab:reframe:demo    # 自動リフレームの画面を開く（切り出した縦型をその場で見る）
+npm run lab:reframe:uitest  # 自動リフレームの画面まで通して確かめる（lab:uitest からも走る）
 ```
 
 `lab:test` は**すべての試作の検算をまとめて走らせる**（1 つだけ緑にして終わらないため）。
-`lab:uitest` も同じで、**画面を持っている試作ぜんぶ**（`auto-cut`・`beat`・`scene-cut`）を続けて通します。
+`lab:uitest` も同じで、**画面を持っている試作ぜんぶ**（`auto-cut`・`beat`・`scene-cut`・`thumbnail`・`reframe`）を
+続けて通します。
 
 確かめ方は 4 段に分けてあります。役割が違うので、どれか 1 つで済ませないでください。
 

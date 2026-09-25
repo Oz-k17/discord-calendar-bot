@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ViViD Edit ラボ — 自動リフレーム</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23b7d0a8'/%3E%3Crect x='5.5' y='2.5' width='5' height='11' fill='none' stroke='%23101114' stroke-width='1.6'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header class="head">
+      <h1>自動リフレーム（横型の素材から、被写体を追って縦型を切り出す）</h1>
+      <p>
+        16:9 で撮った素材から 9:16 を切り出すとき、クロップ枠を被写体に合わせて横へ動かします。
+        決めるのは「各コマで、幅 31.6% の窓を横のどこに置くか」の 1 本の列だけです。
+        処理はすべてこのページの中で完結し、どこにも送信しません。
+      </p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>1. 枠の置き所を決める</h2>
+        <p class="muted">
+          動画ファイルを選んでください（映像だけを見ます）。
+          読むのは <strong>15 コマ／秒に間引いたコマ</strong>で、長辺 128 まで縮めてから測ります。
+          <strong>ここはシーン検出とは事情が違います。</strong>あちらは既定のつまみが 15fps という単位を
+          隠し持っていて、速いまま渡すと壊れました。こちらのつまみは全部「秒」で書いてあるので、
+          10〜60fps で入れた率は 87.6% / 86.7% / 86.5% / 86.4% としか動きません
+          （下のつまみで試せます）。間引いているのは<strong>速さのためだけ</strong>です。
+        </p>
+
+        <label class="file">
+          <span>動画を選ぶ</span>
+          <input type="file" id="rf-file" accept="video/*" />
+        </label>
+        <p class="status" id="rf-status">まだ読み込んでいません。</p>
+
+        <div class="canvas-wrap">
+          <canvas id="rf-canvas" data-height="240"></canvas>
+        </div>
+        <p class="legend">
+          <span class="swatch raw"></span>生の位置（その手が指した所）　<span class="swatch smoothed"></span>ならしたあと
+          　<span class="swatch target"></span>枠の中心　<span class="swatch band"></span>窓の左端〜右端
+          　<span class="swatch moving"></span>枠が動いている所
+          <br />縦が<strong>画面の横位置</strong>（上が左端・下が右端）、横が時間です
+        </p>
+
+        <dl class="stats" id="rf-stats"></dl>
+        <p class="warn" id="rf-warning" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>2. 切り出した縦型を見る</h2>
+        <p class="muted">
+          この試作の出口です。<strong>絵は読み直していません</strong>——枠の列さえ出れば、
+          あとは元の動画を横へずらして見せるだけで済みます
+          （表紙の画面は「測るコマ」と「出す絵」で読み込みが 2 本要りましたが、こちらは要りません）。
+          右の細い枠が出来上がりで、左は元の画とそこに重ねた窓です。
+        </p>
+        <div class="preview">
+          <div class="preview-source">
+            <div class="frame" id="rf-source">
+              <video id="rf-video" muted playsinline></video>
+              <div class="window" id="rf-window"></div>
+            </div>
+            <p class="muted small">元の画（16:9）と、いま切っている窓</p>
+          </div>
+          <div class="preview-out">
+            <div class="frame crop" id="rf-crop">
+              <video id="rf-video-out" muted playsinline></video>
+            </div>
+            <p class="muted small">出来上がり（9:16）</p>
+          </div>
+        </div>
+        <div class="row">
+          <button type="button" id="rf-play" disabled>再生</button>
+          <input type="range" id="rf-seek" min="0" max="1" step="0.001" value="0" disabled />
+          <output id="out-time">0.00s</output>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>3. 追い方のつまみ</h2>
+        <p class="muted">
+          既定は素材 27 本（被写体の居るもの 7 本・居ないもの 20 本）で測って決めた値です
+          （<code>lab/reframe/README.md</code>）。<strong>どれも交換にしかならない</strong>ので、
+          ここは「なぜその既定なのか」を手で確かめるための段です。
+          入れた率だけを上げても、<strong>出来上がりが手ぶれ映像になるだけ</strong>で、
+          上の「泳ぎ」と併せて読む必要があります。
+        </p>
+
+        <div class="controls">
+          <label>
+            解析するコマの速さ <output id="out-fps"></output>
+            <input type="range" id="fps" min="5" max="60" step="1" value="15" />
+            <small>
+              <strong>ここだけは素材の側のつまみ。</strong>つまみが全部「秒」で書いてあるので、
+              入れた率は 10fps 87.6% / 15fps 86.7% / 30fps 86.5% / 60fps 86.4% とほとんど動かない
+            </small>
+          </label>
+          <label>
+            切り出す窓の幅 <output id="out-crop"></output>
+            <input type="range" id="crop-width" min="0.25" max="1" step="0.00390625" value="0.31640625" />
+            <small>
+              16:9 から 9:16 を切るなら 31.6%（<strong>81/256</strong>）。1.0 にすると切らないのと同じ。
+              目盛りが 1/256 きざみなのは、<strong>既定をちょうど表せる目盛りでないと、
+              画面だけが黙って 31.5% で動く</strong>ため（実際に 1 度そうなっていた）
+            </small>
+          </label>
+          <label>
+            動かす理由にしないずれ（deadband） <output id="out-dead"></output>
+            <input type="range" id="deadband" min="0.01" max="0.2" step="0.005" value="0.06" />
+            <small>広げると泳がなくなるが置いていかれる（0.03〜0.14 で入れた率 86.7% → 79.5%・泳ぎ 0.010 → 0.000）</small>
+          </label>
+          <label>
+            動き出すまでに要る時間（settle） <output id="out-settle"></output>
+            <input type="range" id="settle" min="0.05" max="1.5" step="0.05" value="0.3" />
+            <small>1.0 秒まで伸ばしてもパンの泳ぎは 0.12 止まりで、入れた率だけが 78.7% へ落ちる</small>
+          </label>
+          <label>
+            1 秒に動かしてよい幅（maxSpeed） <output id="out-speed"></output>
+            <input type="range" id="max-speed" min="0.05" max="1" step="0.01" value="0.22" />
+            <small>寄せの速さ。端から端まで組み直すのに 3 秒以上かかるのはこの値のため</small>
+          </label>
+          <label>
+            生の位置をならす窓（smooth） <output id="out-smooth"></output>
+            <input type="range" id="smooth" min="0.1" max="2" step="0.05" value="1" />
+            <small>中央値でならす。平均ではないのは、カットのコマで飛ぶ 1 点を落とすため</small>
+          </label>
+          <label>
+            列へ畳むときに見る縦の範囲 <output id="out-band"></output>
+            <input type="range" id="row-band" min="0" max="0.35" step="0.01" value="0.15" />
+            <small>
+              上下を落とすのは<strong>焼き込みの字幕</strong>のため。0 に戻すと
+              <code>captions-only</code> の泳ぎが 0.006 → 0.077 へ 13 倍になる
+            </small>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="lead-in" checked />
+            頭の置き所を最初の settle 秒から決める（leadIn）
+            <small>外すと入れた率は 0.3 ポイント上がるが、泳ぎが 0.006 → 0.026 と 4 倍になる</small>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>4. セルフテスト</h2>
+        <p class="muted">
+          合成したコマで計算そのものを確かめます。素材が無くても、壊れていないことがここで分かります。
+          コマンドライン（<code>npm run lab:test</code>）が見ているものと同じです。
+        </p>
+        <button type="button" id="run-tests">テストを実行</button>
+        <ul class="tests" id="test-results"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./src/demo.ts"></script>
+  </body>
+</html>

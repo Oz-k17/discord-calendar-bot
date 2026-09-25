@@ -1,0 +1,109 @@
+/*
+ * 自動リフレームの画面の見た目。
+ *
+ * **土台は `auto-cut` のものを借りている。** シーン検出・拍・表紙の画面と同じ理由で、
+ * 試作ごとに見た目を作り直すと、直したいのは判定なのに CSS を 4 か所で直すことになる。
+ * ここに置くのは、この画面にしか無い差分だけ。
+ */
+
+@import '../../auto-cut/src/style.css';
+
+/* 凡例の色見本。キャンバスに重ねる色と同じにしてある。 */
+.swatch.raw {
+  background: rgba(154, 183, 216, 0.5);
+}
+
+.swatch.smoothed {
+  background: rgba(216, 184, 122, 0.45);
+}
+
+.swatch.target {
+  background: #d8b87a;
+}
+
+.swatch.band {
+  background: rgba(183, 208, 168, 0.3);
+  border: 1px solid rgba(183, 208, 168, 0.8);
+}
+
+.swatch.moving {
+  background: rgba(164, 112, 122, 0.85);
+}
+
+/*
+ * 出来上がりの見せ方。
+ *
+ * **元の動画を 1 本置いて、それを横へずらして見せている。** 切った絵を作り直していないのは、
+ * 枠の列（`toCropRects`）さえ出れば、絵のほうは元の動画の一部を覗くだけで足りるため。
+ * `.frame` が覗き窓で、中の `video` を `transform` で動かす。
+ */
+.preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  align-items: flex-start;
+}
+
+.preview-source {
+  flex: 1 1 320px;
+  min-width: 260px;
+}
+
+.preview-out {
+  flex: 0 0 auto;
+}
+
+.frame {
+  position: relative;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid rgba(232, 233, 234, 0.18);
+  border-radius: 4px;
+}
+
+.frame video {
+  display: block;
+  /* ずらす基準を左上に固定する。既定（中央）だと窓の幅を変えたときに位置が跳ねる。 */
+  transform-origin: 0 0;
+}
+
+/* 元の画では等倍。切り出す窓は下の `.window` で重ねて見せる。 */
+.preview-source .frame video {
+  width: 100%;
+  height: auto;
+}
+
+/* 出来上がりの側。高さを決め打ちにして、幅は窓の形から JS で決める。 */
+.preview-out .frame {
+  height: 320px;
+}
+
+.window {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border: 2px solid #b7d0a8;
+  background: rgba(183, 208, 168, 0.08);
+  box-shadow: 0 0 0 9999px rgba(16, 17, 20, 0.55);
+  pointer-events: none;
+}
+
+.small {
+  font-size: 0.82rem;
+  margin-top: 6px;
+}
+
+.row input[type='range'] {
+  flex: 1 1 200px;
+}
+
+.controls label.check {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.controls label.check small {
+  flex-basis: 100%;
+}

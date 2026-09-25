@@ -18,7 +18,7 @@
     "lab:bench": "node lab/auto-cut/bench.mjs",
     "lab:loudness": "node lab/auto-cut/loudness.mjs",
     "lab:clipmatch": "node lab/auto-cut/clipmatch.mjs",
-    "lab:uitest": "node lab/auto-cut/uitest.mjs && node lab/beat/uitest.mjs && node lab/scene-cut/uitest.mjs && node lab/thumbnail/uitest.mjs",
+    "lab:uitest": "node lab/auto-cut/uitest.mjs && node lab/beat/uitest.mjs && node lab/scene-cut/uitest.mjs && node lab/thumbnail/uitest.mjs && node lab/reframe/uitest.mjs",
     "lab:probe": "node lab/auto-cut/probe.mjs",
     "lab:frames": "node lab/fixtures/make-frames.mjs",
     "lab:scene": "node lab/scene-cut/bench.mjs",
@@ -46,7 +46,9 @@
     "lab:thumb:format": "node lab/thumbnail/format-probe.mjs",
     "lab:thumb:outline": "node lab/thumbnail/outline-format-probe.mjs",
     "lab:reframe": "node lab/reframe/bench.mjs",
-    "lab:reframe:probe": "node lab/reframe/probe.mjs"
+    "lab:reframe:probe": "node lab/reframe/probe.mjs",
+    "lab:reframe:demo": "vite lab/reframe",
+    "lab:reframe:uitest": "node lab/reframe/uitest.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.55.5",

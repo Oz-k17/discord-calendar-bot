@@ -213,6 +213,25 @@ export function runSelfTest(): TestResult[] {
     push('頭から指せなくても落ちない', head.every((v) => Number.isFinite(v)), `${head[0]}`);
   }
   {
+    // 計画が持つ 3 つの層（`raw` / `target` / `center`）が、**別々の値である**ことを見る。
+    //
+    // 2026-09-25 に画面を作るまで、計画は生の位置を返していなかった
+    // （`target` にならしたあとの値が入っていて、注だけが「生の位置」と言っていた）。
+    // **画面に 2 本描こうとして初めて、1 本しか無いことに気づいた。**
+    // ここが同じ値になっていたら、画面は「荒れ」と「遅れ」を切り分けられない。
+    // 1 コマだけ柱が飛ぶ素材。**中央値はこの 1 点を落とす**ので、
+    // `raw` は飛び、`target` は動かない——層が分かれていなければ、この差は出ない。
+    const frames = [...Array.from({ length: 20 }, () => withBar(0.8)), withBar(0.2), ...Array.from({ length: 20 }, () => withBar(0.8))];
+    const plan = planReframe(clipOf(frames));
+    const raw = rawTargets(clipOf(frames));
+    push(
+      '計画は、生の位置とならしたあとを別々に持つ',
+      plan.frames.every((f, i) => Math.abs(f.raw - raw[i]) < 1e-12) &&
+        plan.frames.some((f) => Math.abs(f.raw - f.target) > 1e-9),
+      `飛んだコマで 生 ${plan.frames[20].raw.toFixed(3)} / ならし ${plan.frames[20].target.toFixed(3)} / 枠 ${plan.frames[20].center.toFixed(3)}`,
+    );
+  }
+  {
     // **上下の帯を外しているか**を、枠の側から見る。
     //
     // 縦に一様な素材（`withBar`）では、帯を外しても外さなくても同じ答えになるので、
