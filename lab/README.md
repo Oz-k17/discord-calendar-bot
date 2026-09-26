@@ -18,6 +18,7 @@
 | [`beat/`](./beat/) | 拍の検出（テンポと、拍が来る秒） | `npm run lab:beat:demo` |
 | [`thumbnail/`](./thumbnail/) | 表紙（サムネイル）候補の自動抽出 | `npm run lab:thumb` |
 | [`reframe/`](./reframe/) | 自動リフレーム（縦型へ切り出す窓を被写体に合わせて動かす） | `npm run lab:reframe` |
+| [`export-cost/`](./export-cost/) | 書き出しの費用（どこで時間を使っているか） | `npm run lab:export` |
 
 ```
 npm run lab            # 開発サーバで開く
@@ -59,7 +60,13 @@ npm run lab:reframe:probe   # 「どの手なら被写体が横のどこに居�
 npm run lab:reframe         # 自動リフレームが実際どれくらい効くかを測る
 npm run lab:reframe:demo    # 自動リフレームの画面を開く（切り出した縦型をその場で見る）
 npm run lab:reframe:uitest  # 自動リフレームの画面まで通して確かめる（lab:uitest からも走る）
+
+npm run lab:export          # 書き出しの費用を測る（数え上げ → 実測の 2 段）
 ```
+
+`export-cost` だけは**触る画面を持たない**（`index.html` は実測を差し込むための空き地）。
+書き出しはデコードもエンコードも WebCodecs なので Node 側に測る相手が無く、
+ブラウザを使うが人は触らない、という形になっている。
 
 `lab:test` は**すべての試作の検算をまとめて走らせる**（1 つだけ緑にして終わらないため）。
 `lab:uitest` も同じで、**画面を持っている試作ぜんぶ**（`auto-cut`・`beat`・`scene-cut`・`thumbnail`・`reframe`）を
