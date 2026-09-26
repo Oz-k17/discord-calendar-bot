@@ -1,15 +1,16 @@
 /**
- * 書き出しの仕事量・段ごとの取り分の検算をコマンドラインから走らせる。
+ * 書き出しの仕事量・段ごとの取り分・重ねる待ち行列の検算をコマンドラインから走らせる。
  *
  *   npm run lab:test   （ほかの試作のぶんと続けて走る）
  *
- * 並べ方も集計も DOM に触らないので、ブラウザは要らない。
+ * 並べ方も集計も待ち行列も DOM に触らないので、ブラウザは要らない。
  * 実測のほうは `npm run lab:export`（playwright が無ければ飛ばす）。
  */
 
-const { runSelfTest } = await import('./src/selftest.ts');
+const { runSelfTest, runPipelineSelfTest } = await import('./src/selftest.ts');
 
-const results = runSelfTest();
+// 待ち行列のほうだけ非同期（約束を手で解いて確かめるため）。並べて 1 つの表に出す。
+const results = [...runSelfTest(), ...(await runPipelineSelfTest())];
 let failed = 0;
 for (const r of results) {
   if (!r.ok) failed += 1;

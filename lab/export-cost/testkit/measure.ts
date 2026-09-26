@@ -9,7 +9,12 @@
  * ## 何を回しているか
  *
  * `src/engine/offline-export.ts` の**コマの輪だけ**を写した。音・トランジション・
- * テロップ・エフェクトは入れていない。入れないのは手を抜いたからではなく、
+ * テロップ・エフェクトは入れていない。
+ *
+ * 振れる軸は 2 つ。**デコーダの開き方**（`mode`）と、
+ * **エンコードの約束を何枚まで未完了のまま先へ進むか**（`encodeDepth`・`src/pipeline.ts`）。
+ * どちらも出来上がりを 1 ビットも変えない（`verify` で出口から確かめてある）。
+ *入れないのは手を抜いたからではなく、
  * **段の取り分を読むのに、足せば足すほど「描く」に全部寄る**から。
  * ここで見たいのは「デコードとエンコードが 1 コマの中で足し算に並んでいる」という骨で、
  * 描く中身が増えたときにどう動くかは `share` から読める（`cost.ts` の `projectSpeedup`）。
@@ -41,6 +46,7 @@ import {
 import { encodeClip } from '../../scene-cut/testkit/encode.ts';
 import { renderFixture } from '../../fixtures/make-frames.mjs';
 import { decodeShape, planExportWork, splitSequence, type ClipStream } from '../src/plan.ts';
+import { InFlightQueue, SERIAL_DEPTH, type InFlightStats } from '../src/pipeline.ts';
 import type { FrameSample } from '../src/cost.ts';
 
 /** 素材を 1 回だけ焼いて使い回す。焼き直すと粒が変わって前後が比べられなくなる。 */
@@ -95,14 +101,42 @@ export interface MeasureOptions {
   /** 再生速度。2 なら素材のコマを 1 つ飛ばしに読む（尺は半分になる）。 */
   speed?: number;
   mode?: DecodeMode;
+  /**
+   * エンコードの約束を何枚まで未完了のまま先へ進むか（`src/pipeline.ts`）。
+   * **0 はいまの本体と同じ直列**で、1 以上でデコードとエンコードが重なる。
+   */
+  encodeDepth?: number;
   /** 出来上がりのコマを照合する（時計は当てにならなくなるので、計測とは別に回す）。 */
   digest?: boolean;
+  /**
+   * 出来上がった WebM を**読み直して**指紋を取る（`signature`）。
+   *
+   * `digest` のほうは**エンコードへ渡す前の canvas** を見ているので、
+   * 重ねたせいで絵が入れ替わったり順番が狂ったりしても捕まえられない。
+   * 出口の側で確かめるにはこちらが要る。時計は当てにならなくなるので計測とは別に回す。
+   */
+  verify?: boolean;
 }
 
 export interface MeasureResult {
   mode: DecodeMode;
+  encodeDepth: number;
   frames: number;
+  /** 輪に居た時間（残りを待ち切るところまで含む）。**仕上げは入っていない。** */
   wallMs: number;
+  /** 仕上げ（`output.finalize()`）。重ねると**ここへ仕事が逃げる**ので必ず併せて読む。 */
+  finalizeMs: number;
+  /** `add()` を呼んで戻ってくるまで（絵を捕まえる同期の手間）。 */
+  submitMs: number;
+  /** 未完了が上限に当たって待たされた時間。重ねる形ではここが `encode` の中身になる。 */
+  waitMs: number;
+  /** 輪を抜けたあと、残りを待ち切るのにかかった時間（`wallMs` の中）。 */
+  drainMs: number;
+  inFlight: InFlightStats;
+  /** 出来上がりを読み直した指紋（`verify` のときだけ）。1 コマぶんが `signatureStride` 個。 */
+  signature: number[];
+  /** 指紋 1 コマぶんの長さ。コマごとに切って読むのに要る。 */
+  signatureStride: number;
   /** デコーダを開くのにかかった時間（`decode` には含めない）。 */
   openMs: number;
   opens: number;
@@ -176,7 +210,9 @@ export async function measureExport(options: MeasureOptions = {}): Promise<Measu
     pieces = 1,
     speed = 1,
     mode = 'at-timestamps',
+    encodeDepth = SERIAL_DEPTH,
     digest = false,
+    verify = false,
   } = options;
 
   const source = await bake(fixture, scale, bitrate);
@@ -271,6 +307,10 @@ export async function measureExport(options: MeasureOptions = {}): Promise<Measu
   // 壊れていることを見せたいのは `at-timestamps` の側なので、そこは気にしない。
   const held = new Map<string, WrappedCanvas['canvas'] | null>();
 
+  const inFlight = new InFlightQueue(encodeDepth);
+  let submitMs = 0;
+  let waitMs = 0;
+
   await output.start();
   const wallStart = performance.now();
 
@@ -307,24 +347,51 @@ export async function measureExport(options: MeasureOptions = {}): Promise<Measu
     const d2 = performance.now();
 
     // --- エンコード ---
-    await videoSource.add(framePlan.time, 1 / fps);
+    // `add()` は**呼んだその場で**絵を捕まえて（`new VideoFrame(canvas)`）、
+    // 返ってくる約束は「詰まりが解けたか」のほう。だから約束を後ろへ回しても
+    // 次のコマで canvas を描き替えてよい（根拠は `src/pipeline.ts` の注）。
+    const submitted = videoSource.add(framePlan.time, 1 / fps);
     const d3 = performance.now();
+    await inFlight.push(submitted);
+    const d4 = performance.now();
 
-    samples.push({ decode: d1 - d0, draw: d2 - d1, encode: d3 - d2 });
+    submitMs += d3 - d2;
+    waitMs += d4 - d3;
+    // `encode` の取り分は**そこで待たされた時間**なので、投げる手間と待ちを合わせて 1 つに数える。
+    // 重ねる形ではここが薄くなるが、**消えたぶんは仕上げ（`finalizeMs`）へ移るだけ**だった
+    // （2026-09-26・2 回目に測った。だから合計で読む）。内訳は `submitMs` / `waitMs` で分かれる。
+    samples.push({ decode: d1 - d0, draw: d2 - d1, encode: d4 - d2 });
     // 指紋は時計の外。取ると `getImageData` のぶん重くなるので、計測の回では取らない。
     if (digest) digests.push(digestOf(ctx, width, height));
   }
 
+  // 残りを待ち切るところまでが「輪」。ここを仕上げへ預けると、
+  // **重ねた形だけ壁時計が短く見える**（仕事が消えたわけではないのに）。
+  const drainStart = performance.now();
+  await inFlight.drain();
+  const drainMs = performance.now() - drainStart;
   const wallMs = performance.now() - wallStart;
+
+  const finalizeStart = performance.now();
   await output.finalize();
+  const finalizeMs = performance.now() - finalizeStart;
   open.forEach(closeStream);
 
   const buffer = (output.target as InstanceType<typeof BufferTarget>).buffer;
+  const signature = verify && buffer ? await signOutput(buffer) : [];
 
   return {
     mode,
+    encodeDepth,
     frames: plan.perFrame.length,
     wallMs,
+    finalizeMs,
+    submitMs,
+    waitMs,
+    drainMs,
+    inFlight: inFlight.counters,
+    signature,
+    signatureStride: SIGNATURE_GRID * SIGNATURE_GRID,
     openMs,
     opens,
     samples,
@@ -333,6 +400,48 @@ export async function measureExport(options: MeasureOptions = {}): Promise<Measu
     height,
     bytes: buffer?.byteLength ?? 0,
   };
+}
+
+/**
+ * 指紋を取る格子。
+ *
+ * **最初 8×8 で書いて、わざと 1 コマずらした相手に素通りされた**（2026-09-26・2 回目）。
+ * 潰す粗さそのものより効いたのは**読み方**のほうで、詳しくは `bench.mjs` の `compare` の注。
+ * ここでは 16×16（＝ 256 個）に取ってある。場面の中の動きは画面のごく一部なので、
+ * これ以上粗くすると升目ごとに見ても動きが均されて消える。
+ */
+const SIGNATURE_GRID = 16;
+
+/**
+ * 出来上がった WebM を**読み直して**、1 コマにつき `SIGNATURE_GRID` の格子ぶんの平均輝度を並べる。
+ *
+ * 縮めるのはブラウザの `drawImage` に任せている。自前で平均を取るより速く、
+ * **ここで見たいのは「別の絵になっていないか」だけ**なので粗くてよい。
+ * 逆に全画素を突き合わせると、非可逆の符号化で毎回ぶれる量まで拾ってしまう。
+ */
+async function signOutput(buffer: ArrayBuffer): Promise<number[]> {
+  const input = new Input({ source: new BlobSource(new Blob([buffer])), formats: [MATROSKA, WEBM] });
+  const values: number[] = [];
+  try {
+    const track = await input.getPrimaryVideoTrack();
+    if (!track) return values;
+    const small = document.createElement('canvas');
+    small.width = SIGNATURE_GRID;
+    small.height = SIGNATURE_GRID;
+    const ctx = small.getContext('2d', { alpha: false, willReadFrequently: true });
+    if (!ctx) throw new Error('指紋用のキャンバスを初期化できませんでした');
+    const sink = new CanvasSink(track);
+    for await (const wrapped of sink.canvases()) {
+      ctx.drawImage(wrapped.canvas, 0, 0, SIGNATURE_GRID, SIGNATURE_GRID);
+      const data = ctx.getImageData(0, 0, SIGNATURE_GRID, SIGNATURE_GRID).data;
+      for (let i = 0; i < data.length; i += 4) {
+        values.push((data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000);
+      }
+    }
+  } finally {
+    input.dispose();
+  }
+  return values;
 }
 
 /**

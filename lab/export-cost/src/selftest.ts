@@ -14,7 +14,8 @@ import {
   visibleAt,
   type LabSequence,
 } from './plan.ts';
-import { projectOverlap, projectSpeedup, summarizeRun, type FrameSample } from './cost.ts';
+import { projectOverlap, projectOverlapMs, projectSpeedup, summarizeRun, type FrameSample } from './cost.ts';
+import { InFlightQueue, overlappedFrameMs } from './pipeline.ts';
 
 export interface TestResult {
   name: string;
@@ -263,6 +264,31 @@ export function runSelfTest(): TestResult[] {
   }
 
   {
+    // 重ねて消えるのは**短いほうの段**のぶんだけ。
+    ok(
+      '重ねたときに消えるのは短いほうの段のぶん',
+      near(projectOverlapMs(1000, 400, 700), 1000 / 600, 1e-9) && near(projectOverlapMs(1000, 700, 400), 1000 / 600, 1e-9),
+      `${projectOverlapMs(1000, 400, 700).toFixed(3)} 倍`,
+    );
+    // 待っていた時間だけを渡す形。取り分をそのまま渡すより小さく出るのが正しい。
+    const run = summarizeRun(flatRun(874 / 390, 10 / 390, 1210 / 390, 390), 2164);
+    const naive = projectOverlap(run, 'decode', 'encode');
+    const honest = projectOverlapMs(2164, 874, 521);
+    ok(
+      '同期の手間を除くと、重ねる見積もりは小さくなる',
+      honest < naive,
+      `取り分そのまま ${naive.toFixed(2)} 倍 / 待ちだけ ${honest.toFixed(2)} 倍`,
+    );
+    let threw = false;
+    try {
+      projectOverlapMs(100, -1, 10);
+    } catch {
+      threw = true;
+    }
+    ok('重ねる見積もりに負の時間を渡したら黙って通さない', threw);
+  }
+
+  {
     // 測り方を間違えて壁時計が段の合計より短く出たとき、負の取り分を作らない。
     const run = summarizeRun(flatRun(4, 1, 5, 10), 50);
     ok('壁時計が合計より短くても、どれでもない時間は負にならない', run.other.share === 0 && run.other.sum === 0);
@@ -275,6 +301,175 @@ export function runSelfTest(): TestResult[] {
       threw = true;
     }
     ok('倍率に 0 を渡したら黙って通さない', threw);
+  }
+
+  return out;
+}
+
+/** 手で解ける約束。**時計を使わずに**「まだ終わっていない」を作れる。 */
+function deferred(): { promise: Promise<void>; resolve: () => void; reject: (e: unknown) => void } {
+  let resolve!: () => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = () => res();
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** 積み残しの仕事を全部流す。`setTimeout` を挟むのは、約束の連鎖が 2 段あるため。 */
+const settle = () => new Promise<void>((r) => setTimeout(r, 0));
+
+/**
+ * 重ねる待ち行列の検算。ここだけ非同期なので、`runSelfTest` とは別の口にしてある。
+ *
+ * **本物のエンコーダは使わない。** 見たいのは「何枚まで抱えるか・順番が狂わないか・
+ * 失敗が消えないか」で、どれも約束の扱いの話だから、手で解ける約束で足りる。
+ */
+export async function runPipelineSelfTest(): Promise<TestResult[]> {
+  const out: TestResult[] = [];
+  const ok = (name: string, condition: boolean, detail = '') => out.push({ name, ok: condition, detail });
+
+  {
+    // 0 枚＝直列。投げたその場で待つので、解くまで先へ進まない。
+    const queue = new InFlightQueue(0);
+    const first = deferred();
+    let passed = false;
+    void queue.push(first.promise).then(() => {
+      passed = true;
+    });
+    await settle();
+    const blocked = !passed;
+    first.resolve();
+    await settle();
+    ok('0 枚なら、いまの本体と同じで解けるまで先へ進まない', blocked && passed);
+  }
+
+  {
+    // 1 枚＝1 コマ先行。1 回目は待たず、2 回目で 1 回目を待つ。
+    const queue = new InFlightQueue(1);
+    const a = deferred();
+    const b = deferred();
+    const waitedOnFirst = await queue.push(a.promise);
+    let secondDone = false;
+    void queue.push(b.promise).then(() => {
+      secondDone = true;
+    });
+    await settle();
+    const blockedOnA = !secondDone;
+    a.resolve();
+    await settle();
+    ok('1 枚なら 1 コマ先行して、次のコマで前のコマを待つ', !waitedOnFirst && blockedOnA && secondDone);
+    b.resolve();
+    await queue.drain();
+  }
+
+  {
+    // 待つのは**いちばん古いもの**。新しいほうが先に解けても、順番は飛ばさない。
+    const queue = new InFlightQueue(1);
+    const old = deferred();
+    const fresh = deferred();
+    await queue.push(old.promise);
+    let done = false;
+    void queue.push(fresh.promise).then(() => {
+      done = true;
+    });
+    fresh.resolve();
+    await settle();
+    const stillWaiting = !done;
+    old.resolve();
+    await settle();
+    ok('待つのはいちばん古いもの（新しいほうが先に解けても飛ばさない）', stillWaiting && done);
+  }
+
+  {
+    // 上限を超えて抱え込まない。ここが破れると未完了の絵が尺のぶんだけ積み上がる。
+    const depth = 2;
+    const queue = new InFlightQueue(depth);
+    const held: ReturnType<typeof deferred>[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const d = deferred();
+      held.push(d);
+      const pushed = queue.push(d.promise);
+      // 上限に当たってからは、解かないと戻らない。**古いほうから**解いていく。
+      // 見るのは `queue.size` ではなく手元の数。`push` は上限を超えたぶんを
+      // **同期で行列から外してから**待ちに入るので、戻ってきた時点の `size` はもう上限に収まっている。
+      if (held.length > depth) held.shift()?.resolve();
+      await pushed;
+    }
+    const withinLimit = queue.counters.maxInFlight <= depth + 1 && queue.size <= depth;
+    held.forEach((d) => d.resolve());
+    await queue.drain();
+    ok(
+      '上限を超えて抱え込まない',
+      withinLimit && queue.counters.submitted === 6,
+      `最大 ${queue.counters.maxInFlight} 枚 / 待った ${queue.counters.waits} 回`,
+    );
+  }
+
+  {
+    // 失敗を握り潰さない。誰も待っていない約束が落ちても、次の `push` で出てくる。
+    const queue = new InFlightQueue(2);
+    const bad = deferred();
+    await queue.push(bad.promise);
+    bad.reject(new Error('エンコーダが落ちた'));
+    await settle();
+    let message = '';
+    try {
+      await queue.push(Promise.resolve());
+      await queue.drain();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    ok('誰も待っていないところで落ちても、次に呼んだところで出てくる', message === 'エンコーダが落ちた', message);
+  }
+
+  {
+    // 2 回目は出ない（同じ失敗を投げ続けると、輪が抜けられなくなる）。
+    const queue = new InFlightQueue(1);
+    await queue.push(Promise.reject(new Error('一度きり')));
+    let first = '';
+    let second = 'まだ';
+    try {
+      await queue.drain();
+    } catch (error) {
+      first = (error as Error).message;
+    }
+    try {
+      await queue.drain();
+      second = '';
+    } catch (error) {
+      second = (error as Error).message;
+    }
+    ok('同じ失敗を 2 回投げない', first === '一度きり' && second === '', `1 回目 ${first} / 2 回目 ${second || 'なし'}`);
+  }
+
+  {
+    let threw = false;
+    try {
+      new InFlightQueue(-1);
+    } catch {
+      threw = true;
+    }
+    let threwFraction = false;
+    try {
+      new InFlightQueue(1.5);
+    } catch {
+      threwFraction = true;
+    }
+    ok('枚数に負の数や小数を渡したら黙って通さない', threw && threwFraction);
+  }
+
+  {
+    ok('重ねない（0 枚）なら 1 コマは足し算のまま', overlappedFrameMs(6, 2, 0) === 8);
+    ok('重ねれば遅いほうの段が律速する', overlappedFrameMs(6, 2, 1) === 6 && overlappedFrameMs(2, 6, 4) === 6);
+    let threw = false;
+    try {
+      overlappedFrameMs(-1, 2, 1);
+    } catch {
+      threw = true;
+    }
+    ok('段の時間に負の数を渡したら黙って通さない', threw);
   }
 
   return out;

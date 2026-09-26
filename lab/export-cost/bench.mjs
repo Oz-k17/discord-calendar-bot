@@ -6,6 +6,7 @@
  *   LAB_EX_FPS=60 npm run lab:export      # 書き出しの速さを変える
  *   LAB_EX_PIECES=5 npm run lab:export    # 1 本の素材を 5 つに割ったタイムラインで測る
  *   LAB_EX_REPEAT=5 npm run lab:export    # 繰り返す回数（既定 3・中央値を取る）
+ *   LAB_EX_DEPTHS=0,1 npm run lab:export  # 重ねる枚数を振る（0 は直列＝いまの本体）
  *
  * ## 2 段ある
  *
@@ -40,7 +41,7 @@ import { launch, loadPlaywright, serve } from '../browser.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 const { planExportWork, splitSequence, summarizePlan } = await import('./src/plan.ts');
-const { projectOverlap, projectSpeedup, summarizeRun } = await import('./src/cost.ts');
+const { projectOverlap, projectOverlapMs, projectSpeedup, summarizeRun } = await import('./src/cost.ts');
 
 // 既定を 8（1024×576）にしてあるのは、**小さい絵では振れ幅が答えを隠す**から（2026-09-26）。
 // 512×288 では 4 つのやり方が 1.17〜1.29 倍と団子になり、振れ幅（18〜30%）の中に埋まる。
@@ -51,6 +52,14 @@ const fps = Number(process.env.LAB_EX_FPS ?? 30);
 const pieces = Number(process.env.LAB_EX_PIECES ?? 1);
 const fixture = process.env.LAB_EX_FIXTURE ?? 'cuts-plain';
 const repeat = Number(process.env.LAB_EX_REPEAT ?? 3);
+// 重ねる枚数。0 は直列（いまの本体）。既定で 0 / 1 / 2 / 4 を並べる。
+// **0 は必ず入れる。** 比べる相手（直列）が無いと「前と比べ」の分母が作れない。
+const depths = [
+  ...new Set([0, ...(process.env.LAB_EX_DEPTHS ?? '0,1,2,4').split(',').map(Number)]),
+].sort((a, b) => a - b);
+for (const d of depths) {
+  if (!Number.isInteger(d) || d < 0) throw new Error(`LAB_EX_DEPTHS は 0 以上の整数の並びです（${d}）`);
+}
 
 const pad = (s, n) => String(s).padEnd(n, ' ');
 const right = (s, n) => String(s).padStart(n, ' ');
@@ -108,8 +117,16 @@ try {
       (o) =>
         window.__labExportMeasure(o).then((r) => ({
           mode: r.mode,
+          encodeDepth: r.encodeDepth,
           frames: r.frames,
           wallMs: r.wallMs,
+          finalizeMs: r.finalizeMs,
+          submitMs: r.submitMs,
+          waitMs: r.waitMs,
+          drainMs: r.drainMs,
+          inFlight: r.inFlight,
+          signature: r.signature,
+          signatureStride: r.signatureStride,
           openMs: r.openMs,
           opens: r.opens,
           samples: r.samples,
@@ -121,7 +138,12 @@ try {
       options,
     );
 
-  /** 捨てる 1 回 → 数える N 回。返すのは**壁時計が中央値だった回**と、その振れ幅。 */
+  /**
+   * 捨てる 1 回 → 数える N 回。返すのは**壁時計が中央値だった回**と、その振れ幅。
+   *
+   * `totalMs`（輪＋仕上げ）を併せて返すのは、**重ねる形では仕上げへ仕事が逃げる**から。
+   * 輪だけを見ていると「速くなった」が「あとで払う」に化ける。
+   */
   const runRepeated = async (options) => {
     await run(options);
     const runs = [];
@@ -129,7 +151,47 @@ try {
     const walls = runs.map((r) => r.wallMs);
     const target = mid(walls);
     const picked = runs.find((r) => r.wallMs === target) ?? runs[0];
-    return { ...picked, spread: (Math.max(...walls) - Math.min(...walls)) / target, runs: walls };
+    const totals = runs.map((r) => r.wallMs + r.finalizeMs);
+    return {
+      ...picked,
+      totalMs: picked.wallMs + picked.finalizeMs,
+      spread: (Math.max(...walls) - Math.min(...walls)) / target,
+      totalSpread: (Math.max(...totals) - Math.min(...totals)) / mid(totals),
+      runs: walls,
+    };
+  };
+
+  /**
+   * 設定を**交互に**回して、それぞれの中央値を返す。
+   *
+   * `runRepeated` は 1 つの設定を固めて N 回回すが、**効きが 5% 前後のときはそれでは足りない**
+   * （2026-09-26・2 回目）。同じ設定を続けて測ると、その間のページの温まり方・他のプロセス・
+   * ゴミ集めの波が**そのまま設定の差に化ける**。実際、固めて測った表では
+   * 「重ねると 1.55 倍」と出て、交互に回したら 1.02 倍になった。
+   *
+   * 1 周ごとに順番をひっくり返すのは、**並びの前後でも差が付く**ため
+   * （先頭はいつも少し冷えている）。行き帰りで打ち消す。
+   */
+  const runInterleaved = async (cases, rounds = repeat) => {
+    for (const c of cases) await run(c);
+    const got = cases.map(() => []);
+    for (let round = 0; round < rounds; round += 1) {
+      const order = cases.map((_, i) => (round % 2 === 0 ? i : cases.length - 1 - i));
+      for (const i of order) {
+        const r = await run(cases[i]);
+        got[i].push({ ...r, totalMs: r.wallMs + r.finalizeMs });
+      }
+    }
+    return got.map((runs) => {
+      const totals = runs.map((r) => r.totalMs);
+      const target = mid(totals);
+      const picked = runs.find((r) => r.totalMs === target) ?? runs[0];
+      return {
+        ...picked,
+        totalSpread: (Math.max(...totals) - Math.min(...totals)) / target,
+        totals,
+      };
+    });
   };
 
   // ページぜんたいの暖機。**設定ごとの 1 回捨てでは足りない**（上の注を参照）。
@@ -191,6 +253,64 @@ try {
       '（`videoSource.add()` はエンコーダが詰まっていれば返ってこない）。',
   );
 
+  // --- デコードとエンコードを重ねる（2026-09-26・2 回目） ---
+  console.log('\n## デコードとエンコードを重ねる\n');
+  const autoSerial = rows.find(([name]) => name === 'auto');
+  console.log(
+    `${pad('やり方', 16)}${right('枚数', 6)}${right('輪 s', 8)}${right('仕上げ s', 10)}${right('合計 s', 9)}${right('decode ms', 11)}${right('投げ ms', 10)}${right('待ち ms', 10)}${right('振れ幅', 9)}${right('前と比べ', 10)}`,
+  );
+  // **交互に回す。** 固めて測ると、この節の差（数 %）は振れ幅に埋もれるどころか
+  // 振れ幅のほうを差として読んでしまう（`runInterleaved` の注）。
+  const overlapCases = [];
+  for (const mode of ['at-timestamps', 'auto']) {
+    for (const encodeDepth of depths) overlapCases.push({ fixture, scale, fps, pieces, mode, encodeDepth });
+  }
+  const overlapMeasured = await runInterleaved(overlapCases);
+  const overlapRows = overlapCases.map((c, i) => [
+    c.mode,
+    c.encodeDepth,
+    overlapMeasured[i],
+    summarizeRun(overlapMeasured[i].samples, overlapMeasured[i].wallMs),
+  ]);
+  const overlapBase = overlapMeasured[0];
+  for (const [mode, encodeDepth, r, sum] of overlapRows) {
+    console.log(
+      `${pad(mode, 16)}${right(encodeDepth, 6)}${right((r.wallMs / 1000).toFixed(2), 8)}${right((r.finalizeMs / 1000).toFixed(2), 10)}${right((r.totalMs / 1000).toFixed(2), 9)}${right(sum.stages.decode.sum.toFixed(0), 11)}${right(r.submitMs.toFixed(0), 10)}${right(r.waitMs.toFixed(0), 10)}${right(pct(r.totalSpread), 9)}${right(`${(overlapBase.totalMs / r.totalMs).toFixed(2)} 倍`, 10)}`,
+    );
+  }
+  console.log(
+    '\n**合計（輪＋仕上げ）で読むこと。** 重ねると未完了のコマが残るので、\n' +
+      '輪だけを見ると仕上げへ逃げたぶんが「速くなった」に見える。\n' +
+      'この表だけは設定を**交互に**回している（固めて測ると振れ幅を差として読む）。\n',
+  );
+
+  // 見積もりを 2 通り並べて、実測と突き合わせる。
+  // `encode` の取り分をそのまま「重ねれば消える」と読むと大きく出るが、
+  // 消えるのは**待っていた時間**だけで、同期で絵を捕まえる手間（投げ）は残る。
+  const serialAuto = overlapRows.find(([m, d]) => m === 'auto' && d === 0);
+  const bestAuto = overlapRows
+    .filter(([m, d]) => m === 'auto' && d > 0)
+    .reduce((best, row) => (best === null || row[2].totalMs < best[2].totalMs ? row : best), null);
+  // 重ねる枚数を 0 だけに絞って走らせたときは、比べる相手が無いので表だけ出して抜ける。
+  console.log('### 見積もりと実測\n');
+  console.log(`${pad('読み方', 34)}${right('倍率', 8)}`);
+  console.log(
+    `${pad('取り分をそのまま重ねる（素朴）', 30)}${right(`${projectOverlap(autoSerial[2], 'decode', 'encode').toFixed(2)} 倍`, 10)}`,
+  );
+  console.log(
+    `${pad('待っていた時間だけ重なる', 32)}${right(`${projectOverlapMs(serialAuto[2].totalMs, serialAuto[3].stages.decode.sum, serialAuto[2].waitMs).toFixed(2)} 倍`, 10)}`,
+  );
+  console.log(
+    bestAuto
+      ? `${pad(`実測（いちばん良かった ${bestAuto[1]} 枚）`, 32)}${right(`${(serialAuto[2].totalMs / bestAuto[2].totalMs).toFixed(2)} 倍`, 10)}`
+      : `${pad('実測', 34)}${right('—（0 枚しか測っていません）', 10)}`,
+  );
+  console.log(
+    '\n**`encode` の取り分の半分以上は「待ち」ではなく「投げ」だった。**\n' +
+      '`add()` は呼んだその場で `new VideoFrame(canvas)` を作って符号化器へ渡す。\n' +
+      'その同期の手間は、約束を後ろへ回しても 1 ミリ秒も減らない。',
+  );
+
   // --- 割ったときの開き直しを、素材ごとにまとめたら ---
   console.log('\n## 1 本の素材を割ったとき（開き直しの代価）\n');
   console.log(
@@ -248,6 +368,66 @@ try {
     fast.digests.length === fastTruth.digests.length && fastDiff === 0,
     `違い ${fastDiff} / ${fastTruth.digests.length} コマ`,
   );
+  // 重ねる形は、ここまでの照合では確かめられない。**`digests` はエンコードへ渡す前の
+  // canvas を見ている**ので、約束を後ろへ回したせいで絵が入れ替わっても同じ値が並ぶ。
+  // なので出来上がった WebM を読み直して、出口の側で突き合わせる。
+  console.log('');
+  const verifySmall = { fixture, scale: 2, fps: 15, pieces: 1, verify: true };
+  const serialOut = await run({ ...verifySmall, mode: 'auto', encodeDepth: 0 });
+  /**
+   * 指紋を**コマごと・升目ごと**に突き合わせて、違ったコマの枚数を返す。
+   *
+   * **畳み方を 2 回間違えた**（2026-09-26・2 回目）。
+   * 1 つ目は全コマを 1 つの平均にしたこと（わざと 1 コマずらした相手が 0.71 / 255 で素通り）。
+   * 2 つ目はコマごとに分けたあとも**升目の平均**を見たことで、こちらも 3 / 195 コマしか立たない。
+   * 場面の中の動きは画面のごく一部なので、升目 256 個で割ると平均の中に消える。
+   * **升目ごとの最大**で見ると 128 / 195 コマが立ち、canvas 側の指紋（129 / 195）とほぼ並ぶ。
+   * 線の 2 / 255 は、同じ入力なら開きがぴったり 0 だと測れているので余裕を取っただけ。
+   */
+  const compare = (a, b, stride) => {
+    if (a.length !== b.length || a.length === 0) return { frames: 0, differing: Infinity, worst: Infinity };
+    const frames = a.length / stride;
+    let differing = 0;
+    let worst = 0;
+    for (let f = 0; f < frames; f += 1) {
+      let cell = 0;
+      for (let i = f * stride; i < (f + 1) * stride; i += 1) {
+        const d = Math.abs(a[i] - b[i]);
+        if (d > cell) cell = d;
+      }
+      if (cell > 2) differing += 1;
+      if (cell > worst) worst = cell;
+    }
+    return { frames, differing, worst };
+  };
+  const stride = serialOut.signatureStride;
+  for (const encodeDepth of depths.filter((d) => d > 0)) {
+    const r = await run({ ...verifySmall, mode: 'auto', encodeDepth });
+    const c = compare(serialOut.signature, r.signature, stride);
+    ok(
+      `${encodeDepth} 枚重ねても、出来上がった WebM は直列と 1 コマも違わない`,
+      c.differing === 0 && c.worst < 2,
+      `違い ${c.differing} / ${c.frames} コマ ・ 升目の開きの最大 ${c.worst.toFixed(4)} / 255`,
+    );
+  }
+  // **わざと壊して落ちることまで確かめる。** 2026-09-23（2 回目）に、止まった素材では
+  // 取り違えが素通りすると分かっている。ここは `cuts-plain`（場面が変わる素材）で測る。
+  const brokenOut = await run({ ...verifySmall, mode: 'broken', encodeDepth: 1 });
+  const brokenGap = compare(serialOut.signature, brokenOut.signature, stride);
+  ok(
+    '出口の照合は、わざと 1 コマずらした相手でちゃんと落ちる',
+    brokenGap.differing > brokenGap.frames * 0.5,
+    `違い ${brokenGap.differing} / ${brokenGap.frames} コマ ・ 升目の開きの最大 ${brokenGap.worst.toFixed(4)} / 255`,
+  );
+  // 重ねても投げた枚数と出来上がったコマ数が合うこと（1 枚も落としていない）。
+  const overlapped = await run({ ...verifySmall, mode: 'auto', encodeDepth: 2 });
+  ok(
+    '重ねてもコマを落としていない',
+    overlapped.signature.length === serialOut.signature.length && overlapped.inFlight.submitted === overlapped.frames,
+    `出口 ${overlapped.signature.length / stride} コマ / 投げた ${overlapped.inFlight.submitted} 枚 / 輪 ${overlapped.frames} コマ`,
+  );
+  console.log('');
+
   const broken = await run({ ...small, mode: 'broken' });
   const brokenDiff = broken.digests.filter((d, i) => d !== truth.digests[i]).length;
   ok(

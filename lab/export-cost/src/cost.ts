@@ -110,3 +110,21 @@ export function projectOverlap(summary: RunSummary, a: Stage, b: Stage): number 
   const after = 1 - sa - sb + Math.max(sa, sb);
   return after > 0 ? 1 / after : Infinity;
 }
+
+/**
+ * 2 つの段を重ねたときの倍率を、**ミリ秒から**出す。
+ *
+ * `projectOverlap` は段の取り分をそのまま「重ねれば消える量」として扱うが、
+ * 2026-09-26（2 回目）に測ったら**それが外れの元**だった。
+ * `encode` の取り分 1210ms のうち、重ねて消せる「待っていた時間」は 521ms だけで、
+ * 残りの 646ms は `add()` が**同期で**絵を捕まえて符号化器へ渡している手間だった。
+ * 同期の手間は、約束を後ろへ回しても 1 ミリ秒も減らない。
+ *
+ * なのでこちらには**重ねて消せるぶんだけ**を渡す。消えるのは短いほうの段のぶん。
+ */
+export function projectOverlapMs(wallMs: number, aMs: number, bMs: number): number {
+  if (wallMs < 0 || aMs < 0 || bMs < 0) throw new Error('時間は 0 以上です');
+  const saved = Math.min(aMs, bMs);
+  if (wallMs <= 0) return 1;
+  return wallMs > saved ? wallMs / (wallMs - saved) : Infinity;
+}
