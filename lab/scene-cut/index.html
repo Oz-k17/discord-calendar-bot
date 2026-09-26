@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ViViD Edit ラボ — シーン検出</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23b7d0a8'/%3E%3Cpath d='M6 3v10M10 3v10' stroke='%23101114' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header class="head">
+      <h1>シーン検出（1 本の素材を、場面ごとに割る）</h1>
+      <p>
+        動画の中でカットが切り替わっている所を見つけて、場面ごとの区間にします。
+        狙いは「長回しの素材を放り込んだら、勝手に場面ごとのクリップへ割れている」ことで、
+        出てくる区間はそのままタイムラインのクリップになります。
+        処理はすべてこのページの中で完結し、どこにも送信しません。
+      </p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>1. 切り所を見つける</h2>
+        <p class="muted">
+          動画ファイルを選んでください（映像だけを見ます）。
+          <strong>読むのは 15 コマ／秒に間引いたコマだけです。</strong>
+          既定のつまみは 15fps の素材で決めてあり、60fps のまま渡すと
+          ディゾルブの 1 コマぶんの差が薄まって壊れるためです（下のつまみで試せます）。
+        </p>
+
+        <label class="file">
+          <span>動画を選ぶ</span>
+          <input type="file" id="scene-file" accept="video/*" />
+        </label>
+        <p class="status" id="scene-status">まだ読み込んでいません。</p>
+
+        <div class="canvas-wrap">
+          <canvas id="scene-canvas" data-height="220"></canvas>
+        </div>
+        <p class="legend">
+          <span class="swatch line"></span>見つけた切り所　<span class="swatch dist"></span>隣り合うコマの距離
+          　<span class="swatch gate"></span>固定の線　<span class="swatch reject"></span>落とした候補
+          <br />縦は<strong>固定の線の 3 倍</strong>までで、そこを超えた柱には明るい帽子が付きます（線のまわりを読むための目盛りです）
+        </p>
+
+        <dl class="stats" id="scene-stats"></dl>
+        <p class="warn" id="scene-warning" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>2. 割れた場面</h2>
+        <p class="muted">
+          この試作の出口です。区間は<strong>隙間なく並ぶ</strong>ので、
+          <code>auto-cut/src/edits.ts</code> の <code>toClipEdits</code> へそのまま渡すと
+          「1 本のクリップを場面ごとに割る」になります。尺は 1 秒も減りません。
+        </p>
+        <div class="shots" id="scene-shots"></div>
+        <p class="muted" id="scene-shots-note">まだ何も読み込んでいません。</p>
+      </section>
+
+      <section class="card">
+        <h2>3. 見つけ方のつまみ</h2>
+        <p class="muted">
+          既定は素材 16 本（正解 49 本）で測って決めた値です（<code>lab/scene-cut/README.md</code>）。
+          ここは「なぜその既定なのか」を手で確かめるための段で、回しても記録の数字は動きません。
+        </p>
+
+        <div class="controls">
+          <label>
+            何を見て「変わった」と決めるか
+            <select id="metric">
+              <option value="combined">combined（明るさと色の分布の、大きいほう）</option>
+              <option value="lumaHist">lumaHist（明るさの分布）</option>
+              <option value="rgbHist">rgbHist（色の分布）</option>
+              <option value="grid">grid（縮小した画素の引き算）</option>
+            </select>
+            <small><code>grid</code> は<strong>パンに破れる</strong>ので既定にしていない（正解の最小 0.044 対 パンの最大 0.039）</small>
+          </label>
+          <label>
+            解析するコマの速さ <output id="out-fps"></output>
+            <input type="range" id="fps" min="5" max="60" step="1" value="15" />
+            <small>
+              <strong>ここだけは素材の側のつまみ。</strong>上げると渡り（ディゾルブ）が壊れる
+              ——瞬間のカットは速さで動かないのに、<strong>渡りだけが 1 コマぶんに薄まる</strong>ため。
+              15fps → 60fps で距離は 0.243 → 0.086（合成コマ）／0.354 → 0.136（焼いた動画）
+            </small>
+          </label>
+          <label>
+            固定の線 <output id="out-threshold"></output>
+            <input type="range" id="threshold" min="0.01" max="0.5" step="0.01" value="0.05" />
+            <small>小さすぎる変化を落とす。0.02〜0.14 では 1 本も動かない（その場と比べる線が肩代わりしている）</small>
+          </label>
+          <label>
+            その場のふだんの高さの何倍か <output id="out-local-ratio"></output>
+            <input type="range" id="local-ratio" min="0" max="12" step="0.5" value="4" />
+            <small>
+              0 で切る。<strong>縦型のパンを落としているのはこちら</strong>。
+              台は 2〜7（下は暗所ノイズの 2.8 倍、上はパン中のカットの 7.8 倍）
+            </small>
+          </label>
+          <label>
+            周りを何コマ見るか <output id="out-local-window"></output>
+            <input type="range" id="local-window" min="4" max="60" step="1" value="30" />
+            <small>狭いと<strong>渡りが自分で自分を隠す</strong>（1 秒のディゾルブを 8 コマで見ると比が 1.1 倍まで落ちる）</small>
+          </label>
+          <label>
+            変化をまたぐ幅 <output id="out-straddle"></output>
+            <input type="range" id="straddle" min="0" max="20" step="1" value="6" />
+            <small>戻ってくる変化（フラッシュ）を落とす。<strong>光っている長さより広く</strong>取る必要がある</small>
+          </label>
+          <label>
+            これより短い場面は作らない <output id="out-min-scene"></output>
+            <input type="range" id="min-scene" min="0.1" max="2" step="0.05" value="0.4" />
+            <small>ディゾルブで連なって立つ候補を 1 本にまとめる役も兼ねている</small>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>4. セルフテスト</h2>
+        <p class="muted">
+          合成したコマで計算そのものを確かめます。素材が無くても、壊れていないことがここで分かります。
+          コマンドライン（<code>npm run lab:test</code>）が見ているものと同じです。
+        </p>
+        <button type="button" id="run-tests">テストを実行</button>
+        <ul class="tests" id="test-results"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./src/demo.ts"></script>
+  </body>
+</html>

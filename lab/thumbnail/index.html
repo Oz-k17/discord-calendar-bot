@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ViViD Edit ラボ — 表紙の候補</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23b7d0a8'/%3E%3Ccircle cx='8' cy='8' r='3' fill='none' stroke='%23101114' stroke-width='1.6'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header class="head">
+      <h1>表紙の候補（1 本の素材から、使える絵を何枚か選ぶ）</h1>
+      <p>
+        動画の中から「表紙に使えるコマ」を何枚か選びます。狙いは
+        「書き出したあと、表紙をどれにするかで手が止まらない」ことで、
+        出てくる絵はそのまま配信サイトの一覧に置けます。
+        処理はすべてこのページの中で完結し、どこにも送信しません。
+      </p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>1. 候補を選ぶ</h2>
+        <p class="muted">
+          動画ファイルを選んでください（映像だけを見ます）。
+          <strong>選ぶために読むのは 15 コマ／秒に間引いて長辺 128 画素へ縮めたコマだけです。</strong>
+          点の付け方は素材の中での順位で決まるので、分布さえ残っていれば足ります。
+          <strong>書き出す絵はそれとは別に、選んでから素材の大きさで読み直します</strong>（下の「2.」）。
+        </p>
+
+        <label class="file">
+          <span>動画を選ぶ</span>
+          <input type="file" id="thumb-file" accept="video/*" />
+        </label>
+        <p class="status" id="thumb-status">まだ読み込んでいません。</p>
+
+        <div class="canvas-wrap">
+          <canvas id="thumb-canvas" data-height="220"></canvas>
+        </div>
+        <p class="legend">
+          <span class="swatch score"></span>コマごとの点　<span class="swatch floor"></span>出来の下限
+          　<span class="swatch picked"></span>選んだコマ　<span class="swatch skipped"></span>飛ばしたコマ
+          <br />縦は<strong>ふつう（中央値）の 3 倍</strong>までで、そこを超えた柱には明るい帽子が付きます
+        </p>
+
+        <dl class="stats" id="thumb-stats"></dl>
+        <p class="warn" id="thumb-warning" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>2. 選んだ絵</h2>
+        <p class="muted">
+          この試作の出口です。<strong>絵は選んでから素材の大きさで読み直しています</strong>
+          （長辺 <code>1920</code> まで）。測るときのコマをそのまま出すと、
+          長辺 128 画素の絵しか出てきません。
+          <strong>条件を緩めて入れた 1 枚には理由が付きます</strong>——
+          黙って混ぜると「3 枚とも同じくらい良い」と読めてしまうためです。
+        </p>
+        <div class="controls export-controls">
+          <label>
+            書き出す形式
+            <select id="export-format">
+              <option value="png">PNG（可逆・大きい）</option>
+              <option value="jpeg">JPEG（非可逆・1 割の大きさ）</option>
+            </select>
+            <small>
+              <strong>「文字が乗るから非可逆は駄目」は測ったら違った</strong>——
+              焼き込みの文字帯は品質 0.85 以上なら<strong>帯の外より誤差が小さい</strong>
+              （<code>npm run lab:thumb:format</code>）
+            </small>
+          </label>
+          <label>
+            JPEG の品質 <output id="out-jpeg-quality"></output>
+            <input type="range" id="jpeg-quality" min="0.5" max="0.95" step="0.05" value="0.9" />
+            <small>
+              <strong>1.0 は置いていない。</strong> 0.95 の 3〜4 倍の大きさになるのに誤差は
+              0.1/255 しか縮まず、<strong>細かさへの粗はそこでいちばん大きい</strong>
+            </small>
+          </label>
+        </div>
+        <div class="picks" id="thumb-picks"></div>
+        <p class="muted" id="thumb-picks-note">まだ何も読み込んでいません。</p>
+      </section>
+
+      <section class="card">
+        <h2>3. 選び方のつまみ</h2>
+        <p class="muted">
+          既定は素材 10 本で測って決めた値です（<code>lab/thumbnail/README.md</code>）。
+          ここは「なぜその既定なのか」を手で確かめるための段で、回しても記録の数字は動きません。
+        </p>
+
+        <div class="controls">
+          <label>
+            何枚選ぶか <output id="out-count"></output>
+            <input type="range" id="count" min="1" max="8" step="1" value="3" />
+            <small>多く頼むほど、条件を緩めて入る枚数が増える（素材に「良い所」が何か所あるかで決まる）</small>
+          </label>
+          <label>
+            細かさを何で測るか
+            <select id="sharpness">
+              <option value="grad">grad（隣り合う画素の差。いちばん素朴）</option>
+              <option value="cellRatio">cellRatio（升目ごとに、その升目の最大と比べる）</option>
+              <option value="cellMoving">cellMoving（尺のあいだに細かさが動いた升目だけ）</option>
+              <option value="gradNet">gradNet（粒ノイズの見積りを引く）</option>
+            </select>
+            <small>
+              <strong>手の込んだ 3 つはどれも既定に届かなかった</strong>——帯や粒に強くしようとした細工が、
+              どれも中身の情報を一緒に削っていた（<code>pick.ts</code> の注）
+            </small>
+          </label>
+          <label>
+            出来の下限（ふつうの何割） <output id="out-quality-floor"></output>
+            <input type="range" id="quality-floor" min="0" max="0.95" step="0.05" value="0.7" />
+            <small>
+              <strong>0 にすると壊れたコマを進んで選ぶ。</strong>
+              「似ていない絵を選べ」は、そのままだと「いちばん壊れたコマを選べ」になるため
+            </small>
+          </label>
+          <label>
+            下限を何と比べるか
+            <select id="floor-base">
+              <option value="median">median（その素材のふつうのコマ）</option>
+              <option value="top">top（その素材のいちばん良いコマ）</option>
+            </select>
+            <small><code>top</code> にすると<strong>下限と場面の網羅がそのまま交換になる</strong>（鮮明な場面が 1 つあると、ほかが丸ごと落ちる）</small>
+          </label>
+          <label>
+            似すぎの線 <output id="out-min-distance"></output>
+            <input type="range" id="min-distance" min="0" max="0.5" step="0.01" value="0.15" />
+            <small><strong>中途半端に小さくすると外すより悪い</strong>（0 で 0.0% のところ 0.08 で 6.7%）。小さすぎる線が通すのは「少しだけ壊れた絵」</small>
+          </label>
+          <label>
+            選んだもの どうしを何秒離すか <output id="out-min-gap"></output>
+            <input type="range" id="min-gap" min="0" max="3" step="0.25" value="0.5" />
+            <small>時間で離すだけでは足りない（止まった場面なら 5 秒離れていても同じ絵）ので、上の線と併せて使う</small>
+          </label>
+          <label>
+            周りより明るすぎる線（何倍） <output id="out-flash-high"></output>
+            <input type="range" id="flash-high" min="1.15" max="4" step="0.05" value="1.4" />
+            <small>
+              1 コマだけ見ても白飛びと「もともと明るい絵」は区別が付かない。
+              <strong>基準はその場から取る</strong>（周りのふつうの何倍か）
+            </small>
+          </label>
+          <label>
+            周りを何秒見るか <output id="out-flash-window"></output>
+            <input type="range" id="flash-window" min="0.2" max="2" step="0.1" value="0.8" />
+            <small>狭いと<strong>光が自分で自分の基準を押し上げる</strong>（0.2〜0.3 秒では効かない）</small>
+          </label>
+          <label class="mode-row">
+            <span class="mode-label">枚数が足りないとき</span>
+            <span class="mode"><input type="checkbox" id="fill" checked /> 条件を緩めてでも揃える</span>
+            <small>表紙は「ありません」では困るもの。緩めた 1 枚には理由が付く</small>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>4. セルフテスト</h2>
+        <p class="muted">
+          合成したコマで計算そのものを確かめます。素材が無くても、壊れていないことがここで分かります。
+          コマンドライン（<code>npm run lab:test</code>）が見ているものと同じです。
+        </p>
+        <button type="button" id="run-tests">テストを実行</button>
+        <ul class="tests" id="test-results"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./src/demo.ts"></script>
+  </body>
+</html>

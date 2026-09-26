@@ -1,0 +1,54 @@
+# 外から使うとき用。上の docker-compose.yml の代わりにこちらを貼る。
+#
+# Cloudflare Tunnel を足して、NAS から**外向きに**繋ぎにいく。
+# ポート開放も固定 IP も要らず、CGNAT でも通る。NAS の IP は外に出ない。
+#
+# **HTTPS が付くのが大きい。** http で配ると、ブラウザが「安全なコンテキスト」と
+# みなさないため WebCodecs が使えず、書き出しが 1 コマずつではなく実時間の録画に
+# 落ちる（遅い・重いとコマ落ちする・ファイルが数倍になる）。トンネルを通せば
+# 証明書は自動で付くので、LAN から使う人もトンネルの URL で開くのが結局いちばん速い。
+#
+# ---- 使い分け ----
+# ドメインを持っていない → 「お試しトンネル」。account も domain も不要だが、
+#   URL が起動のたびに変わり、認証も付かない。試す用。
+# ドメインを持っている   → 「名前付きトンネル」。URL が固定され、Cloudflare Access で
+#   ログインを required にできる（50 人まで無料）。実運用はこちら。
+
+services:
+  vivid-edit:
+    image: nginx:alpine
+    container_name: vivid-edit
+    restart: unless-stopped
+    # 外へはトンネル経由で出すので、NAS の口は開けなくてよい。
+    # LAN からも直接開きたいなら、下の ports を活かす。
+    # ports:
+    #   - "8080:80"
+    volumes:
+      - /volume1/docker/vivid-edit/app:/srv/app:ro
+      - /volume1/docker/vivid-edit/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /volume1/video/shared:/srv/media:ro
+
+  # ---- ドメイン無しで試す場合（お試しトンネル）----
+  # 起動すると、ログに https://<ランダム>.trycloudflare.com が出る。それを開く。
+  # コンテナを再起動すると URL が変わる。同時 200 リクエストの上限があり、
+  # Cloudflare 自身が「本番用ではない」と明記している。まず動かしてみる用。
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: vivid-edit-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://vivid-edit:80
+    depends_on:
+      - vivid-edit
+
+  # ---- ドメインを持っている場合（名前付きトンネル）----
+  # 上の cloudflared を消して、こちらに差し替える。
+  # Cloudflare の Zero Trust 画面でトンネルを作ると、トークンが 1 つ渡される。
+  # 公開先（Public hostname）は http://vivid-edit:80 を指す。
+  #
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: vivid-edit-tunnel
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run --token <ここにトークン>
+  #   depends_on:
+  #     - vivid-edit
