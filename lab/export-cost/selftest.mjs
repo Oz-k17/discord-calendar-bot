@@ -8,9 +8,10 @@
  */
 
 const { runSelfTest, runPipelineSelfTest } = await import('./src/selftest.ts');
+const { runAudioSelfTest } = await import('./src/audio-selftest.ts');
 
 // 待ち行列のほうだけ非同期（約束を手で解いて確かめるため）。並べて 1 つの表に出す。
-const results = [...runSelfTest(), ...(await runPipelineSelfTest())];
+const results = [...runSelfTest(), ...(await runPipelineSelfTest()), ...runAudioSelfTest()];
 let failed = 0;
 for (const r of results) {
   if (!r.ok) failed += 1;

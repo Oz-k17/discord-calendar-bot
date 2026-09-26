@@ -18,7 +18,7 @@
 | [`beat/`](./beat/) | 拍の検出（テンポと、拍が来る秒） | `npm run lab:beat:demo` |
 | [`thumbnail/`](./thumbnail/) | 表紙（サムネイル）候補の自動抽出 | `npm run lab:thumb` |
 | [`reframe/`](./reframe/) | 自動リフレーム（縦型へ切り出す窓を被写体に合わせて動かす） | `npm run lab:reframe` |
-| [`export-cost/`](./export-cost/) | 書き出しの費用（どこで時間を使っているか） | `npm run lab:export` |
+| [`export-cost/`](./export-cost/) | 書き出しの費用（映像も音も、どこで時間とメモリを使っているか） | `npm run lab:export` |
 
 ```
 npm run lab            # 開発サーバで開く
@@ -62,6 +62,7 @@ npm run lab:reframe:demo    # 自動リフレームの画面を開く（切り�
 npm run lab:reframe:uitest  # 自動リフレームの画面まで通して確かめる（lab:uitest からも走る）
 
 npm run lab:export          # 書き出しの費用を測る（数え上げ → 実測の 2 段）
+npm run lab:export:audio    # 音の側の先払い（一括ミックス 対 窓に割る）を測る
 ```
 
 `export-cost` だけは**触る画面を持たない**（`index.html` は実測を差し込むための空き地）。

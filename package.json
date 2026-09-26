@@ -51,7 +51,8 @@
     "lab:reframe:uitest": "node lab/reframe/uitest.mjs",
     "lab:reframe:decimate": "node lab/reframe/decimate-probe.mjs",
     "lab:reframe:gate": "node lab/reframe/gate-probe.mjs",
-    "lab:export": "node lab/export-cost/bench.mjs"
+    "lab:export": "node lab/export-cost/bench.mjs",
+    "lab:export:audio": "node lab/export-cost/audio.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.48.0",
