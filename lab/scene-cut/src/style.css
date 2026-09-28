@@ -1,0 +1,58 @@
+/*
+ * シーン検出の画面の見た目。
+ *
+ * **土台は `auto-cut` のものを借りている。** 拍の画面（`beat/src/style.css`）と同じ理由で、
+ * 試作ごとに見た目を作り直すと、直したいのは判定なのに CSS を 3 か所で直すことになる。
+ * ここに置くのは、シーン検出の画面にしか無い差分だけ。
+ */
+
+@import '../../auto-cut/src/style.css';
+
+/* 凡例の色見本。キャンバスに重ねる色と同じにしてある。 */
+.swatch.dist {
+  background: rgba(154, 183, 216, 0.55);
+}
+
+.swatch.gate {
+  background: #d8b87a;
+}
+
+.swatch.reject {
+  background: #a4707a;
+}
+
+/*
+ * 場面の一覧。**サムネイルを並べるのは、秒だけでは合っているか分からない**ため。
+ * 数字を読んで頭の中で絵を思い出すより、隣どうしが違う絵かを見るほうが速い。
+ */
+.shots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.shots figure {
+  margin: 0;
+  width: 132px;
+}
+
+.shots canvas {
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+  background: #000;
+  display: block;
+}
+
+.shots figcaption {
+  font-size: 12px;
+  color: var(--dim);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.shots figcaption b {
+  color: var(--text);
+  font-weight: 600;
+}

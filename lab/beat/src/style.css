@@ -1,0 +1,44 @@
+/*
+ * 拍の画面の見た目。
+ *
+ * **土台は `auto-cut` のものを借りている。** 試作ごとに見た目を作り直すと、
+ * 直したいのは判定なのに CSS を 2 か所で直すことになるし、
+ * 並べて見たときに「どちらが新しい書き方か」が分からなくなる。
+ * ここに置くのは、拍の画面にしか無い差分だけ。
+ */
+
+@import '../../auto-cut/src/style.css';
+
+/* 凡例の色見本。波形の上に重ねる 3 本と同じ色にしてある。 */
+.swatch.sub {
+  background: rgba(183, 208, 168, 0.35);
+}
+
+.swatch.onset {
+  background: #9ab7d8;
+}
+
+.swatch.tempo {
+  background: #d8b87a;
+}
+
+/*
+ * つまみの中のチェックボックスは、ほかのつまみと高さが揃わない
+ * （range は縦に場所を取るのに、チェックボックスは 1 行しか無い）。
+ * 下に説明が来る形に寄せて、行の頭を揃える。
+ */
+.controls label span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.controls input[type='checkbox'] {
+  accent-color: var(--accent);
+}
+
+/* 拍が見つからなかったことは、数字ではなく文で言う。 */
+.stats dd.none {
+  color: var(--dim);
+  font-size: 13px;
+}

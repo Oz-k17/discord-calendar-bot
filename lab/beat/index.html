@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ViViD Edit ラボ — 拍の検出</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23b7d0a8'/%3E%3Cpath d='M3 4v8M8 4v8M13 4v8' stroke='%23101114' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header class="head">
+      <h1>拍の検出（テンポと、拍が来る秒）</h1>
+      <p>
+        曲のテンポを測り、どの秒に拍が来るかを並べます。狙いは「曲に合わせてカットを置く」ことで、
+        タイムラインの吸い付き先に拍を足せるようにする下地です。
+        処理はすべてこのページの中で完結し、どこにも送信しません。
+      </p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>1. 拍を見つける</h2>
+        <p class="muted">
+          音声ファイルでも動画ファイルでも構いません（音だけを見ます）。
+          <strong>拍が見つからなければ、何も並べずにそう言います。</strong>
+          適当な 120 を埋めるより、黙って引っ込むほうが使う側にとって正しいためです。
+        </p>
+
+        <label class="file">
+          <span>曲の入った素材を選ぶ</span>
+          <input type="file" id="beat-file" accept="audio/*,video/*" />
+        </label>
+        <p class="status" id="beat-status">まだ読み込んでいません。</p>
+
+        <div class="canvas-wrap">
+          <canvas id="beat-canvas" data-height="210"></canvas>
+        </div>
+        <p class="legend">
+          <span class="swatch line"></span>拍　<span class="swatch sub"></span>等分した吸い付き先
+          　<span class="swatch onset"></span>立ち上がりの列（位相に使うほう）
+          　<span class="swatch tempo"></span>窓ごとのテンポ（「テンポを追う」のとき）
+        </p>
+
+        <dl class="stats" id="beat-stats"></dl>
+        <p class="warn" id="beat-warning" hidden></p>
+
+        <div class="row">
+          <button type="button" id="play-original" disabled>元のまま再生</button>
+          <button type="button" id="play-clicks" disabled>拍を重ねて再生</button>
+          <button type="button" id="stop-beat" disabled>停止</button>
+        </div>
+        <p class="muted">
+          重ねているのは短いクリック音です。<strong>拍が合っているかは、数字より耳のほうが速く分かります。</strong>
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>2. 見つけ方のつまみ</h2>
+        <p class="muted">
+          既定は素材 18 本で測って決めた値です（<code>lab/beat/README.md</code>）。
+          ここは「なぜその既定なのか」を手で確かめるための段で、回しても記録の数字は動きません。
+        </p>
+
+        <div class="controls">
+          <label>
+            テンポに使う列
+            <select id="tempo-method">
+              <option value="energy">energy（音量の増えぶん）</option>
+              <option value="flux">flux（スペクトルの増えぶん）</option>
+              <option value="logFlux">logFlux（帯ごとに dB で見る）</option>
+            </select>
+            <small>要るのは<strong>列が周期的であること</strong>。帯ごとに見ると打点の間も埋まって周期が薄くなる</small>
+          </label>
+          <label>
+            拍の位置に使う列
+            <select id="phase-method">
+              <option value="energy">energy（音量の増えぶん）</option>
+              <option value="flux">flux（スペクトルの増えぶん）</option>
+              <option value="logFlux">logFlux（帯ごとに dB で見る）</option>
+            </select>
+            <small>要るのは<strong>打点どうしの大きさの釣り合い</strong>。dB で見ると長く響く音の尾に次の打点が埋もれる</small>
+          </label>
+          <label>
+            テンポの中心 <output id="out-prior-bpm"></output>
+            <input type="range" id="prior-bpm" min="60" max="180" step="1" value="120" />
+            <small>素材の中から出てくる値ではなく、<strong>入力への仮定</strong>（速すぎる／遅すぎるテンポを人は取らない）</small>
+          </label>
+          <label>
+            中心からの幅 <output id="out-prior-octaves"></output>
+            <input type="range" id="prior-octaves" min="0.3" max="3" step="0.1" value="0.9" />
+            <small>広げるほど仮定が弱くなる。3 まで広げると 8 分ハットの素材が半分のテンポへ落ちる</small>
+          </label>
+          <label>
+            「拍は無い」の線 <output id="out-min-clarity"></output>
+            <input type="range" id="min-clarity" min="1.1" max="3" step="0.05" value="1.9" />
+            <small>尺で縮める（短い素材では雑音でも山が立つ）。実際に効いている線は下の統計に出る</small>
+          </label>
+          <label>
+            吸い付き先の細かさ <output id="out-subdivide"></output>
+            <input type="range" id="subdivide" min="1" max="4" step="1" value="1" />
+            <small>拍の間を等分して足す。2 で 8 分、4 で 16 分。ハネた曲では実際の音とずれる</small>
+          </label>
+          <label>
+            <span><input type="checkbox" id="follow-tempo" /> 途中で変わるテンポを追う</span>
+            <small>
+              <strong>既定では切ってあります。</strong>窓ごとのテンポ自体はよく当たるのに、
+              その周期で拍を並べると平均で負けました（README）
+            </small>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>3. カットを拍へ吸い付かせる</h2>
+        <p class="muted">
+          この試作の出口です。カットを置きたい秒を入れると、<strong>近ければ拍へ寄り、遠ければそのまま</strong>返ります。
+          話の切れ目でたまたま拍から遠い所に来たカットまで引っ張ると、逆に言葉が切れるためです。
+        </p>
+
+        <div class="controls">
+          <label>
+            カットを置きたい秒 <output id="out-snap-at"></output>
+            <input type="range" id="snap-at" min="0" max="16" step="0.01" value="4" />
+            <small>読み込んだ素材の尺に合わせて動きます</small>
+          </label>
+          <label>
+            これ以上は動かさない <output id="out-max-shift"></output>
+            <input type="range" id="max-shift" min="0" max="0.5" step="0.01" value="0.12" />
+            <small>0 にすれば何も動かない（吸い付きを切ったのと同じ）</small>
+          </label>
+        </div>
+
+        <dl class="stats" id="snap-stats"></dl>
+      </section>
+
+      <section class="card">
+        <h2>4. セルフテスト</h2>
+        <p class="muted">
+          合成した音で計算そのものを確かめます。素材が無くても、壊れていないことがここで分かります。
+          コマンドライン（<code>npm run lab:test</code>）が見ているものと同じです。
+        </p>
+        <button type="button" id="run-tests">テストを実行</button>
+        <ul class="tests" id="test-results"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="./src/demo.ts"></script>
+  </body>
+</html>

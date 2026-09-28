@@ -1,0 +1,93 @@
+/*
+ * 表紙の画面の見た目。
+ *
+ * **土台は `auto-cut` のものを借りている。** シーン検出・拍の画面と同じ理由で、
+ * 試作ごとに見た目を作り直すと、直したいのは判定なのに CSS を 4 か所で直すことになる。
+ * ここに置くのは、表紙の画面にしか無い差分だけ。
+ */
+
+@import '../../auto-cut/src/style.css';
+
+/* 凡例の色見本。キャンバスに重ねる色と同じにしてある。 */
+.swatch.score {
+  background: rgba(154, 183, 216, 0.55);
+}
+
+.swatch.floor {
+  background: #d8b87a;
+}
+
+.swatch.picked {
+  background: #b7d0a8;
+}
+
+.swatch.skipped {
+  background: #a4707a;
+}
+
+/*
+ * 選んだ候補。**シーン検出の一覧より 1 枚を大きく取ってある。**
+ * あちらで見たいのは「隣どうしが別の場面か」なので小さくてよいが、
+ * こちらは「この絵を表紙にしてよいか」を見るので、ボケているかが分かる大きさが要る。
+ */
+.picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.picks figure {
+  margin: 0;
+  width: 232px;
+}
+
+.picks canvas {
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+  background: #000;
+  display: block;
+}
+
+.picks figcaption {
+  font-size: 12px;
+  color: var(--dim);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.picks figcaption b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* 条件を緩めて入れた 1 枚。**黙って混ぜない**ための印。 */
+.picks .relaxed {
+  color: #d8b87a;
+}
+
+.picks button {
+  margin-top: 6px;
+  width: 100%;
+}
+
+/*
+ * 書き出しの形式のつまみ。**候補の絵のすぐ上に置く**。
+ *
+ * 選び方のつまみ（3 の段）と混ぜないのは、こちらが候補を選び直さないため——
+ * 形式を変えても出てくるコマは同じで、変わるのは「それを何で焼くか」だけ。
+ * 同じ列に並べると、回すと候補が変わるつまみと見分けが付かない。
+ */
+.export-controls {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  padding: 10px 12px;
+  border: 1px solid var(--line, #2a2d33);
+  border-radius: 6px;
+  margin-bottom: 14px;
+}
+
+/* 品質は PNG のときに触れない。**触れないことが見えるように**薄くする。 */
+.export-controls input:disabled {
+  opacity: 0.35;
+}
